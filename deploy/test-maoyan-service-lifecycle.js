@@ -10,105 +10,119 @@ function makeFakeChild(pid) {
   child.killed = false;
   child.kill = () => {
     child.killed = true;
-    child.emit("exit", 0);
+    setImmediate(() => child.emit("exit", 0));
     return true;
   };
   return child;
 }
 
-function testOldChildExitDoesNotPolluteNewChild() {
+function loadService() {
   delete require.cache[require.resolve("../maoyan-service")];
-  const svc = require("../maoyan-service");
+  return require("../maoyan-service");
+}
+
+function testOldChildExitDoesNotPolluteNewChild() {
+  const svc = loadService();
   svc._testResetMaoyanState();
 
   const oldChild = makeFakeChild(1001);
   const newChild = makeFakeChild(1002);
 
-  const internals = require("../maoyan-service");
-  internals._testResetMaoyanState();
+  svc._testSetState({
+    maoyanProcess: newChild,
+    startedByUs: true,
+    apiStatus: { ready: true, error: "" },
+  });
 
-  // 模拟内部状态：手动设置 module 级变量需通过启动流程，改用直接 require 后 patch
-  const mod = require("../maoyan-service");
+  svc._testHandleChildExit(oldChild, 1);
+  let state = svc._testGetState();
+  assert.strictEqual(state.maoyanProcess, newChild);
+  assert.strictEqual(state.startedByUs, true);
+  assert.strictEqual(state.apiStatus.ready, true);
 
-  // 通过 spawn 回调逻辑复现：读取 maoyan-service 源码中的 exit handler 行为
-  let maoyanProcess = oldChild;
-  let startedByUs = true;
-  let apiStatus = { ready: true, error: "" };
-
-  function onExit(child, code) {
-    if (maoyanProcess !== child) return;
-    maoyanProcess = null;
-    if (startedByUs) {
-      startedByUs = false;
-      apiStatus.ready = false;
-      if (code !== 0 && code !== null) {
-        apiStatus.error = `票房服务异常退出 (code ${code})`;
-      }
-    }
-  }
-
-  maoyanProcess = newChild;
-  startedByUs = true;
-  apiStatus.ready = true;
-
-  onExit(oldChild, 1);
-  assert.strictEqual(maoyanProcess, newChild);
-  assert.strictEqual(startedByUs, true);
-  assert.strictEqual(apiStatus.ready, true);
-
-  onExit(newChild, 0);
-  assert.strictEqual(maoyanProcess, null);
-  assert.strictEqual(startedByUs, false);
-  assert.strictEqual(apiStatus.ready, false);
-
+  svc._testHandleChildExit(newChild, 0);
+  state = svc._testGetState();
+  assert.strictEqual(state.maoyanProcess, null);
+  assert.strictEqual(state.startedByUs, false);
+  assert.strictEqual(state.apiStatus.ready, false);
   console.log("OK: old child exit does not pollute new child state");
 }
 
-function testHealthFailureKillsOwnProcessOnly() {
-  delete require.cache[require.resolve("../maoyan-service")];
-  const svc = require("../maoyan-service");
+async function testHealthFailureKillsOwnProcessOnly() {
+  const svc = loadService();
   svc._testResetMaoyanState();
 
   const child = makeFakeChild(2001);
-  let killedPid = null;
-
+  let killed = false;
   child.kill = () => {
-    killedPid = child.pid;
+    killed = true;
     child.killed = true;
+    child.emit("exit", 0);
     return true;
   };
 
-  // 模拟 getApiStatus health 失败路径：仅杀自己启动的 maoyanProcess
-  let maoyanProcess = child;
-  let startedByUs = true;
-  let apiStatus = { ready: true, error: "", apiBase: "http://127.0.0.1:8765" };
+  svc._testSetState({
+    maoyanProcess: child,
+    startedByUs: true,
+    apiStatus: { ready: true, error: "", apiBase: "http://127.0.0.1:8765" },
+  });
+  svc._testSetCheckHealth(async () => false);
 
-  function shutdownOwn() {
-    if (!startedByUs || !maoyanProcess || maoyanProcess.killed) return;
-    maoyanProcess.kill("SIGTERM");
-    maoyanProcess = null;
-    startedByUs = false;
-  }
-
-  const alive = false;
-  if (apiStatus.ready && !alive) {
-    apiStatus.ready = false;
-    apiStatus.error = "票房服务已断开，正在尝试恢复…";
-    if (startedByUs && maoyanProcess) {
-      shutdownOwn();
-    }
-  }
-
-  assert.strictEqual(killedPid, 2001);
-  assert.strictEqual(maoyanProcess, null);
-  assert.strictEqual(startedByUs, false);
-  console.log("OK: health failure kills only own child process");
+  await svc.getApiStatus();
+  const state = svc._testGetState();
+  assert.strictEqual(killed, true);
+  assert.strictEqual(state.maoyanProcess, null);
+  assert.strictEqual(state.startedByUs, false);
+  console.log("OK: health failure shuts down own child via production code");
 }
 
-function main() {
+async function testShutdownWaitBeforeRestart() {
+  const svc = loadService();
+  svc._testResetMaoyanState();
+
+  const oldChild = makeFakeChild(3001);
+  let exitSeen = false;
+  oldChild.on("exit", () => {
+    exitSeen = true;
+  });
+
+  svc._testSetState({ maoyanProcess: oldChild, startedByUs: true, apiStatus: { ready: true } });
+  await svc.shutdownMaoyanServiceAndWait(1000);
+
+  const state = svc._testGetState();
+  assert.strictEqual(exitSeen, true);
+  assert.strictEqual(state.maoyanProcess, null);
+  assert.strictEqual(state.startedByUs, false);
+  assert.strictEqual(state.apiStatus.ready, false);
+  console.log("OK: shutdownMaoyanServiceAndWait clears own child state after exit");
+}
+
+async function testUnknownServiceNotKilled() {
+  const svc = loadService();
+  svc._testResetMaoyanState();
+
+  let taskkillCalled = false;
+  svc._testSetSpawn((cmd, args) => {
+    if (cmd === "taskkill") taskkillCalled = true;
+    return makeFakeChild(0);
+  });
+  svc._testSetCheckHealth(async () => true);
+  svc._testSetState({ maoyanProcess: null, startedByUs: false });
+
+  await svc.ensureMaoyanService({ apiBase: "http://127.0.0.1:8765" });
+  assert.strictEqual(taskkillCalled, false);
+  console.log("OK: unknown external service is not killed");
+}
+
+async function main() {
   testOldChildExitDoesNotPolluteNewChild();
-  testHealthFailureKillsOwnProcessOnly();
+  await testHealthFailureKillsOwnProcessOnly();
+  await testShutdownWaitBeforeRestart();
+  await testUnknownServiceNotKilled();
   console.log("\nALL PASSED (maoyan service lifecycle)");
 }
 
-main();
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

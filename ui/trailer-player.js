@@ -281,18 +281,18 @@ function loadCurrent(fromSwitch, gen = generation) {
       if (!isCurrentGeneration(gen)) return;
       currentVideoSrc = item.src;
       const loadSeq = bindActiveLoad(item, gen);
+      attachLoadEvents(gen, loadSeq, item.src);
       videoEl.src = item.src;
       videoEl.load();
-      attachLoadEvents(gen, loadSeq, item.src);
     }, FADE_OUT_MS);
     return;
   }
 
   currentVideoSrc = item.src;
   const loadSeq = bindActiveLoad(item, gen);
+  attachLoadEvents(gen, loadSeq, item.src);
   videoEl.src = item.src;
   videoEl.load();
-  attachLoadEvents(gen, loadSeq, item.src);
 }
 
 function switchToIndex(index, animate, gen = generation) {
@@ -378,14 +378,21 @@ export function initTrailerPlayer() {
   showNoTrailer();
 }
 
+function canRefreshInPlace(chartPlaylist) {
+  if (!playingMediaKey || !playlist.length || !chartPlaylist.length) return false;
+  const currentItem = playlist[currentIndex];
+  if (!currentItem?.src) return false;
+  const nextItem = chartPlaylist.find((p) => itemMediaKey(p) === playingMediaKey);
+  if (!nextItem) return false;
+  return (
+    urlsMatch(nextItem.src, currentItem.src) &&
+    urlsMatch(nextItem.src, currentVideoSrc) &&
+    urlsMatch(nextItem.src, activeLoadSrc)
+  );
+}
+
 export function syncTrailerWithRanking(movies, catalog = getMovieMediaCatalog()) {
   if (!initialized) return;
-
-  generation += 1;
-  const gen = generation;
-  clearTimers();
-  switching = false;
-  clearActiveLoad();
 
   const sorted = [...(movies || [])].sort((a, b) => a.rank - b.rank);
   const top1 = sorted.find((m) => m.rank === 1);
@@ -400,6 +407,21 @@ export function syncTrailerWithRanking(movies, catalog = getMovieMediaCatalog())
 
   const top1Changed = Boolean(lastTop1Key && newTop1Key && newTop1Key !== lastTop1Key);
   const firstLoad = Boolean(newTop1Key && !lastTop1Key && !playingMediaKey);
+
+  if (!firstLoad && !top1Changed && canRefreshInPlace(chartPlaylist)) {
+    playlist = chartPlaylist;
+    const idx = playlist.findIndex((p) => itemMediaKey(p) === playingMediaKey);
+    if (idx >= 0) currentIndex = idx;
+    if (newTop1Key) lastTop1Key = newTop1Key;
+    updatePlayingInfo();
+    return;
+  }
+
+  generation += 1;
+  const gen = generation;
+  clearTimers();
+  switching = false;
+  clearActiveLoad();
 
   if (firstLoad || top1Changed) {
     lastTop1Key = newTop1Key;
@@ -462,8 +484,10 @@ export function __getTrailerDebugState() {
     activeLoadGeneration,
     activeLoadSeq,
     activeLoadSrc,
+    activeLoadMediaKey,
     playingMediaKey,
     failStreak,
     playlistLength: playlist.length,
+    listenerCount: loadHandlers.length,
   };
 }

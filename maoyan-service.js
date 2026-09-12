@@ -12,6 +12,9 @@ let startedByUs = false;
 let ensurePromise = null;
 let apiStatus = { ready: false, error: "", apiBase: "http://127.0.0.1:8765" };
 
+let _spawnImpl = spawn;
+let _checkHealthImpl = null;
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -158,6 +161,7 @@ function isMaoyanLoggedIn() {
 }
 
 function checkHealth(apiBase) {
+  if (_checkHealthImpl) return _checkHealthImpl(apiBase);
   return new Promise((resolve) => {
     const url = `${apiBase}/health`;
     const req = http.get(url, { timeout: 4000 }, (res) => {
@@ -182,13 +186,25 @@ function checkHealth(apiBase) {
   });
 }
 
+function handleMaoyanChildExit(child, code) {
+  if (maoyanProcess !== child) return;
+  maoyanProcess = null;
+  if (startedByUs) {
+    startedByUs = false;
+    apiStatus.ready = false;
+    if (code !== 0 && code !== null) {
+      apiStatus.error = `票房服务异常退出 (code ${code})`;
+    }
+  }
+}
+
 function startMaoyanProcess(dir) {
   const runtime = resolveRuntime();
   const dataDir = getDataDir();
   fs.mkdirSync(dataDir, { recursive: true });
 
   return new Promise((resolve, reject) => {
-    const child = spawn(runtime.bin, runtime.args, {
+    const child = _spawnImpl(runtime.bin, runtime.args, {
       cwd: dir,
       stdio: "ignore",
       windowsHide: true,
@@ -208,17 +224,94 @@ function startMaoyanProcess(dir) {
     });
 
     child.on("exit", (code) => {
-      if (maoyanProcess !== child) return;
-      maoyanProcess = null;
-      if (startedByUs) {
-        startedByUs = false;
-        apiStatus.ready = false;
-        if (code !== 0 && code !== null) {
-          apiStatus.error = `票房服务异常退出 (code ${code})`;
-        }
-      }
+      handleMaoyanChildExit(child, code);
     });
   });
+}
+
+async function waitForPidGone(pid, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!pid) return true;
+    const alive = await new Promise((resolve) => {
+      try {
+        process.kill(pid, 0);
+        resolve(true);
+      } catch {
+        resolve(false);
+      }
+    });
+    if (!alive) return true;
+    await sleep(100);
+  }
+  return false;
+}
+
+function shutdownMaoyanService() {
+  if (!startedByUs || !maoyanProcess || maoyanProcess.killed) return;
+
+  const pid = maoyanProcess.pid;
+
+  try {
+    maoyanProcess.kill("SIGTERM");
+  } catch {
+    /* noop */
+  }
+
+  if (process.platform === "win32" && pid) {
+    try {
+      _spawnImpl("taskkill", ["/pid", String(pid), "/f", "/t"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+    } catch {
+      /* noop */
+    }
+  }
+
+  maoyanProcess = null;
+  startedByUs = false;
+}
+
+async function shutdownMaoyanServiceAndWait(timeoutMs = 10000) {
+  if (!startedByUs || !maoyanProcess) return;
+
+  const child = maoyanProcess;
+  const pid = child.pid;
+
+  await new Promise((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    child.once("exit", done);
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      /* noop */
+    }
+    if (process.platform === "win32" && pid) {
+      try {
+        _spawnImpl("taskkill", ["/pid", String(pid), "/f", "/t"], {
+          stdio: "ignore",
+          windowsHide: true,
+        });
+      } catch {
+        /* noop */
+      }
+    }
+    setTimeout(done, timeoutMs);
+  });
+
+  await waitForPidGone(pid, timeoutMs);
+
+  if (maoyanProcess === child) {
+    maoyanProcess = null;
+    startedByUs = false;
+    apiStatus.ready = false;
+  }
 }
 
 async function waitForHealth(apiBase, timeoutMs = 90000) {
@@ -256,7 +349,7 @@ async function ensureMaoyanServiceInner(config) {
   }
 
   if (maoyanProcess) {
-    shutdownMaoyanService();
+    await shutdownMaoyanServiceAndWait();
   }
 
   const maoyanDir = resolveMaoyanDir();
@@ -279,7 +372,7 @@ async function ensureMaoyanServiceInner(config) {
     apiStatus.loggedIn = isMaoyanLoggedIn();
   } else {
     apiStatus.error = "票房服务启动超时，请检查端口占用或 Chrome 是否可用";
-    shutdownMaoyanService();
+    await shutdownMaoyanServiceAndWait();
   }
 
   return apiStatus;
@@ -341,37 +434,11 @@ async function getApiStatus() {
       apiStatus.ready = false;
       apiStatus.error = "票房服务已断开，正在尝试恢复…";
       if (startedByUs && maoyanProcess) {
-        shutdownMaoyanService();
+        await shutdownMaoyanServiceAndWait();
       }
     }
   }
   return { ...apiStatus, loggedIn };
-}
-
-function shutdownMaoyanService() {
-  if (!startedByUs || !maoyanProcess || maoyanProcess.killed) return;
-
-  const pid = maoyanProcess.pid;
-
-  try {
-    maoyanProcess.kill("SIGTERM");
-  } catch {
-    /* noop */
-  }
-
-  if (process.platform === "win32" && pid) {
-    try {
-      spawn("taskkill", ["/pid", String(pid), "/f", "/t"], {
-        stdio: "ignore",
-        windowsHide: true,
-      });
-    } catch {
-      /* noop */
-    }
-  }
-
-  maoyanProcess = null;
-  startedByUs = false;
 }
 
 function _testResetMaoyanState() {
@@ -379,18 +446,60 @@ function _testResetMaoyanState() {
   startedByUs = false;
   ensurePromise = null;
   apiStatus = { ready: false, error: "", apiBase: "http://127.0.0.1:8765" };
+  _spawnImpl = spawn;
+  _checkHealthImpl = null;
+}
+
+function _testGetState() {
+  return {
+    maoyanProcess,
+    startedByUs,
+    apiStatus: { ...apiStatus },
+    ensurePromise: Boolean(ensurePromise),
+  };
+}
+
+function _testSetState(patch = {}) {
+  if (Object.prototype.hasOwnProperty.call(patch, "maoyanProcess")) {
+    maoyanProcess = patch.maoyanProcess;
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "startedByUs")) {
+    startedByUs = patch.startedByUs;
+  }
+  if (patch.apiStatus) {
+    apiStatus = { ...apiStatus, ...patch.apiStatus };
+  }
+}
+
+function _testHandleChildExit(child, code) {
+  handleMaoyanChildExit(child, code);
+}
+
+function _testSetSpawn(fn) {
+  _spawnImpl = fn || spawn;
+}
+
+function _testSetCheckHealth(fn) {
+  _checkHealthImpl = fn || null;
 }
 
 module.exports = {
   ensureMaoyanService,
   getApiStatus,
   shutdownMaoyanService,
+  shutdownMaoyanServiceAndWait,
   checkHealth,
   isMaoyanLoggedIn,
   startMaoyanLogin,
   buildApiBase,
   getDataDir,
+  handleMaoyanChildExit,
   _testResetMaoyanState,
+  _testGetState,
+  _testSetState,
+  _testHandleChildExit,
+  _testSetSpawn,
+  _testSetCheckHealth,
   DATA_DIR: LEGACY_DATA_DIR,
   SERVER_DIR,
 };

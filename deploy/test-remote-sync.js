@@ -292,6 +292,78 @@ async function testStaleRequestDiscardedAfterSwitch() {
   }
 }
 
+async function testSessionBusyRace() {
+  const admin = await startAdminWithPath(
+    path.join(fs.mkdtempSync(path.join(os.tmpdir(), "maoyan-sync-")), "overlay-settings.json"),
+  );
+  const clientPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "maoyan-client-")), "overlay-settings.json");
+  writeSettings(clientPath, {
+    schemaVersion: 2,
+    revision: 1,
+    fonts: { heroTitle: 30 },
+  });
+
+  try {
+    process.env.MAOYAN_SETTINGS_PATH = clientPath;
+    delete require.cache[require.resolve("../lib/settings")];
+    delete require.cache[require.resolve("../lib/remote-sync")];
+
+    const originalFetch = global.fetch;
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let releaseA;
+    let countAfterB = false;
+    global.fetch = async (url, options) => {
+      const href = String(url);
+      if (href.includes("/api/settings")) {
+        if (countAfterB) {
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          inFlight -= 1;
+        } else if (!releaseA) {
+          await new Promise((resolve, reject) => {
+            const signal = options?.signal;
+            if (signal?.aborted) {
+              reject(Object.assign(new Error("Aborted"), { name: "AbortError" }));
+              return;
+            }
+            const onAbort = () => {
+              signal?.removeEventListener("abort", onAbort);
+              reject(Object.assign(new Error("Aborted"), { name: "AbortError" }));
+            };
+            signal?.addEventListener("abort", onAbort);
+            releaseA = () => {
+              signal?.removeEventListener("abort", onAbort);
+              resolve();
+            };
+          });
+        }
+      }
+      return originalFetch(url, options);
+    };
+
+    const { startRemoteSync, stopRemoteSync } = require("../lib/remote-sync");
+    startRemoteSync(admin.baseUrl);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    stopRemoteSync();
+    if (releaseA) releaseA();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    maxInFlight = 0;
+    countAfterB = true;
+    startRemoteSync(admin.baseUrl);
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    stopRemoteSync();
+    global.fetch = originalFetch;
+
+    assert.ok(maxInFlight <= 1, `remote sync concurrent fetches must be <=1, got ${maxInFlight}`);
+    console.log("OK: remote sync session busy prevents generation race");
+  } finally {
+    admin.close();
+    delete process.env.MAOYAN_SETTINGS_PATH;
+  }
+}
+
 async function main() {
   const settingsPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "maoyan-sync-")), "overlay-settings.json");
   await testPasswordMaskRoundTrip(settingsPath);
@@ -299,6 +371,7 @@ async function main() {
   await testRemoteSyncClient();
   await testSameRevisionDifferentContent();
   await testStaleRequestDiscardedAfterSwitch();
+  await testSessionBusyRace();
   console.log("\nALL PASSED (remote sync)");
 }
 

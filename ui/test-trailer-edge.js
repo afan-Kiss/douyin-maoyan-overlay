@@ -194,6 +194,54 @@ async function main() {
     }
     console.log("OK: Case5 empty chart clears src and pauses");
 
+    const catalogRefresh = [
+      { name: "稳定片A", trailer: "trailers/_sample.mp4" },
+      { name: "稳定片B", trailer: "trailers/_sample.mp4" },
+    ];
+    await page.evaluate(async () => {
+      const { destroyTrailerPlayer, initTrailerPlayer } = await import("./trailer-player.js");
+      destroyTrailerPlayer();
+      initTrailerPlayer();
+      const v = document.getElementById("trailer-video");
+      v.play = () => Promise.resolve();
+    });
+    const moviesAFirst = [{ rank: 1, name: "稳定片A" }, { rank: 2, name: "稳定片B" }];
+    await syncWithCatalog(page, moviesAFirst, catalogRefresh);
+    await page.waitForFunction(() =>
+      document.getElementById("trailer-now")?.textContent?.includes("稳定片A"),
+    );
+    await page.evaluate(() => {
+      document.getElementById("trailer-video").dispatchEvent(new Event("playing"));
+    });
+    const baseState = await page.evaluate(async () => {
+      const { __getTrailerDebugState } = await import("./trailer-player.js");
+      return __getTrailerDebugState();
+    });
+    for (let i = 0; i < 10; i += 1) {
+      const shuffled =
+        i % 2 === 0
+          ? [{ rank: 1, name: "稳定片A" }, { rank: 2, name: "稳定片B" }]
+          : [{ rank: 1, name: "稳定片A" }, { rank: 3, name: "稳定片B" }];
+      await syncWithCatalog(page, shuffled, catalogRefresh);
+      const st = await page.evaluate(async () => {
+        const { __getTrailerDebugState } = await import("./trailer-player.js");
+        return __getTrailerDebugState();
+      });
+      if (st.generation !== baseState.generation) {
+        throw new Error(`Case6 generation changed on refresh: ${JSON.stringify(st)}`);
+      }
+      if (st.listenerCount !== baseState.listenerCount) {
+        throw new Error(`Case6 listener count drift: ${st.listenerCount} vs ${baseState.listenerCount}`);
+      }
+    }
+    await page.evaluate(() => {
+      document.getElementById("trailer-video").dispatchEvent(new Event("ended"));
+    });
+    await page.waitForFunction(() =>
+      document.getElementById("trailer-now")?.textContent?.includes("稳定片B"),
+    );
+    console.log("OK: Case6 chart refresh keeps listeners and ended advances");
+
     console.log("\nALL PASSED (trailer edge)");
   } finally {
     await browser.close();

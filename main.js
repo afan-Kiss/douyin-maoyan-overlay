@@ -92,10 +92,10 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, "ui", "index.html"));
   mainWindow.setMenuBarVisibility(false);
 
-  mainWindow.once("ready-to-show", () => {
+  mainWindow.once("ready-to-show", async () => {
     mainWindow.show();
     try {
-      if (confirmUpdateHealth()) {
+      if (await confirmUpdateHealth()) {
         console.log("更新健康确认完成，已清理备份");
       }
     } catch (error) {
