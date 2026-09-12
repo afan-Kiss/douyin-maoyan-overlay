@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>全国实时票房榜</title>
+    <link rel="stylesheet" href="fonts/harmonyos-sans.css" />
+    <link rel="stylesheet" href="fonts/mtsi-font.css" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="stage">
+      <div class="bg-layer" aria-hidden="true">
+        <div class="bg-glow bg-glow--a"></div>
+        <div class="bg-glow bg-glow--b"></div>
+        <div class="bg-grid"></div>
+        <div class="bg-stars"></div>
+      </div>
+
+      <section class="hero">
+        <div class="hero__head">
+          <div class="hero__live">
+            <span class="live-dot"></span>
+            <span class="hero__live-label">LIVE</span>
+          </div>
+          <h1 class="hero__title">全国实时票房榜</h1>
+          <div class="hero__actions">
+            <button class="titlebar__btn titlebar__btn--login" id="btn-login" title="登录">登录</button>
+          </div>
+        </div>
+        <p class="hero__subtitle">全国票房榜 · 实时刷新 <span class="hero__time" id="update-time">连接中…</span></p>
+        <div class="hero__nation">
+          <div class="hero__nation-item hero__nation-item--wide">
+            <span class="hero__nation-label">今日大盘</span>
+            <span class="hero__nation-row">
+              <span class="hero__nation-value mtsi-font" id="nation-box">--</span>
+              <span class="hero__nation-unit js-nation-unit">万</span>
+            </span>
+          </div>
+          <div class="hero__nation-divider"></div>
+          <div class="hero__nation-item">
+            <span class="hero__nation-label">排片</span>
+            <span class="hero__nation-value" id="nation-shows">--</span>
+          </div>
+          <div class="hero__nation-divider"></div>
+          <div class="hero__nation-item">
+            <span class="hero__nation-label">人次</span>
+            <span class="hero__nation-value" id="nation-views">--</span>
+          </div>
+        </div>
+      </section>
+
+      <div id="status" class="status status--loading">正在启动票房服务…</div>
+
+      <div class="rank-shell">
+        <section class="podium" id="podium" aria-label="票房榜前三">
+          <div class="podium-slot" data-slot="2"></div>
+          <div class="podium-slot" data-slot="1"></div>
+          <div class="podium-slot" data-slot="3"></div>
+        </section>
+        <section class="rank-compact" id="rank-compact" aria-label="票房榜4至10名"></section>
+      </div>
+      <div class="delta-overlay" id="delta-overlay" aria-hidden="true"></div>
+    </div>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

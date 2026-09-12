@@ -1,0 +1,92 @@
+[
+  {
+    "name": "欢迎来龙餐馆",
+    "aliases": ["欢迎来龙餐馆"],
+    "poster": "posters/welcome.jpg",
+    "trailer": "trailers/welcome.mp4",
+    "trailerPoster": "trailers/welcome-cover.jpg",
+    "tagline": "美食与生命，都值得被温柔以待",
+    "release": "正在热映"
+  },
+  {
+    "name": "功夫女足",
+    "aliases": ["功夫女足"],
+    "poster": "posters/kungfu-football.jpg",
+    "trailer": "trailers/kungfu-football.mp4",
+    "trailerPoster": "trailers/kungfu-football-cover.webp",
+    "tagline": "神级功夫 × 足球热血 × 爆笑无厘头",
+    "release": "正在热映"
+  },
+  {
+    "name": "八仙",
+    "aliases": ["八仙", "八仙！"],
+    "poster": "posters/baxian.jpg",
+    "trailer": "trailers/baxian.mp4",
+    "trailerPoster": "trailers/baxian-cover.webp",
+    "tagline": "八仙过海，各显神通",
+    "release": "正在热映"
+  },
+  {
+    "name": "奥德赛",
+    "aliases": ["奥德赛", "The Odyssey"],
+    "poster": "trailers/odyssey-cover.webp",
+    "trailer": "trailers/odyssey.mp4",
+    "trailerPoster": "trailers/odyssey-cover.webp",
+    "tagline": "诺兰史诗巨制，踏上归乡之旅",
+    "release": "正在热映"
+  },
+  {
+    "name": "空枪",
+    "aliases": ["空枪", "Empty Gun"],
+    "poster": "trailers/empty-gun-cover.webp",
+    "trailer": "trailers/empty-gun.mp4",
+    "trailerPoster": "trailers/empty-gun-cover.webp",
+    "tagline": "警匪博弈，人性豪赌",
+    "release": "正在热映"
+  },
+  {
+    "name": "去你的岛",
+    "aliases": ["去你的岛", "To Your Island"],
+    "poster": "trailers/to-your-island-cover.webp",
+    "trailer": "trailers/to-your-island.mp4",
+    "trailerPoster": "trailers/to-your-island-cover.webp",
+    "tagline": "一座岛，上锁的房子，解开心结的钥匙",
+    "release": "正在热映"
+  },
+  {
+    "name": "蜘蛛侠：崭新之日",
+    "aliases": ["蜘蛛侠：崭新之日", "蜘蛛侠：英雄重生", "Spider-Man: Brand New Day"],
+    "poster": "trailers/spiderman-cover.webp",
+    "trailer": "trailers/spiderman.mp4",
+    "trailerPoster": "trailers/spiderman-cover.webp",
+    "tagline": "新的一天，即将开始",
+    "release": "正在热映"
+  },
+  {
+    "name": "痴迷",
+    "aliases": ["痴迷", "Obsession"],
+    "poster": "trailers/obsession-cover.webp",
+    "trailer": "trailers/obsession.mp4",
+    "trailerPoster": "trailers/obsession-cover.webp",
+    "tagline": "一个愿望，扭曲的爱",
+    "release": "正在热映"
+  },
+  {
+    "name": "年会不能停2！",
+    "aliases": ["年会不能停2！", "年会不能停！2", "年会不能停2"],
+    "poster": "trailers/annual-meeting-cover.webp",
+    "trailer": "trailers/annual-meeting.mp4",
+    "trailerPoster": "trailers/annual-meeting-cover.webp",
+    "tagline": "刘马组合，越笑越大升",
+    "release": "正在热映"
+  },
+  {
+    "name": "汪汪队立大功大电影3",
+    "aliases": ["汪汪队立大功大电影3", "汪汪队立大功大电影3：勇闯恐龙岛", "PAW Patrol: The Dino Movie"],
+    "poster": "trailers/paw-patrol-cover.webp",
+    "trailer": "trailers/paw-patrol.mp4",
+    "trailerPoster": "trailers/paw-patrol-cover.webp",
+    "tagline": "汪汪队与恐龙梦幻联动",
+    "release": "正在热映"
+  }
+]

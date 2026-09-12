@@ -1,0 +1,4 @@
+/* 华为鸿蒙字体 HarmonyOS Sans SC - 系统已安装优先，CDN 分片兜底 */
+@import url("https://cdn.jsdelivr.net/npm/harmonyos-sans-webfont-splitted@1.2.1/dist/HarmonyOS_Sans_SC/Regular/Regular.css");
+@import url("https://cdn.jsdelivr.net/npm/harmonyos-sans-webfont-splitted@1.2.1/dist/HarmonyOS_Sans_SC/Medium/Medium.css");
+@import url("https://cdn.jsdelivr.net/npm/harmonyos-sans-webfont-splitted@1.2.1/dist/HarmonyOS_Sans_SC/Bold/Bold.css");

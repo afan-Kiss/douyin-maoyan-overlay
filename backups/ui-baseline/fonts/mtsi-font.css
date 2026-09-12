@@ -1,0 +1,8 @@
+/* 猫眼票房反爬数字字体 - 本地优先 */
+@font-face {
+  font-family: "mtsi-font";
+  src: url("./mtsi-font.woff") format("woff");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}

@@ -1,0 +1,75 @@
+{
+  "name": "douyin-maoyan-overlay",
+  "version": "1.0.0",
+  "description": "抖音直播猫眼票房无边框展示",
+  "main": "bootstrap.js",
+  "scripts": {
+    "start": "electron .",
+    "admin": "node standalone-admin.js",
+    "setup": "npm install --registry=https://registry.npmmirror.com && npx playwright install chromium",
+    "login": "node server/login.js",
+    "build:release": "powershell -NoProfile -ExecutionPolicy Bypass -File deploy/build-release.ps1",
+    "upload:release": "node deploy/upload-release.js",
+    "upload:release:fast": "node deploy/upload-release.js --skip-build",
+    "test:update": "node deploy/test-update-selfcheck.js",
+    "test:migration": "node deploy/test-settings-migration.js",
+    "test:remote-sync": "node deploy/test-remote-sync.js",
+    "test:updater-edge": "node deploy/test-updater-edge.js",
+    "push:github": "node deploy/push-github.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "playwright": "^1.51.0"
+  },
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8",
+    "ssh2": "^1.16.0"
+  },
+  "build": {
+    "appId": "com.xiangyuzhubao.maoyanoverlay",
+    "productName": "MaoyanOverlay",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "bootstrap.js",
+      "main.js",
+      "preload.js",
+      "config.json",
+      "package.json",
+      "admin-server.js",
+      "maoyan-service.js",
+      "lib/**/*",
+      "server/**/*",
+      "ui/**/*",
+      "admin/**/*",
+      "!ui/trailers/*.mp4",
+      "!ui/trailers/_sample.mp4",
+      "!overlay-settings.json",
+      "!update-command.json",
+      "!data/browser_state.json",
+      "!data/cookies.txt",
+      "!data/session_cache/**",
+      "!deploy/**",
+      "!backups/**",
+      "!dist/**",
+      "!.git/**",
+      "!node_modules/.cache/**",
+      "!**/*.map"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "artifactName": "MaoyanOverlay.exe"
+    },
+    "portable": {
+      "artifactName": "MaoyanOverlay.exe"
+    }
+  }
+}

@@ -1,0 +1,39 @@
+---
+description: GitHub 推送配置 - 使用项目内保存的 token 推送
+alwaysApply: true
+---
+
+# GitHub 推送规则（永久生效，禁止再问用户要 token）
+
+本项目 GitHub Personal Access Token **已保存在本地 `deploy/github.json`**（已 gitignore，不入库），用户明确要求保存在项目中、每次推送自动使用，**永远不要再次向用户索要 GitHub token**。
+
+## 凭证位置
+
+- 文件：`deploy/github.json`
+- 仓库：`https://github.com/afan-Kiss/douyin-maoyan-overlay`
+- 分支：`master`
+
+## 每次需要 push 时
+
+1. **直接读取** `deploy/github.json` 获取 `token`、`owner`、`repo`、`branch`
+2. **优先执行** `npm run push:github` 或 `node deploy/push-github.js` 或 `.\push-github.bat`
+3. 脚本会自动 `git remote set-url` 并 `git push -u origin master`
+4. **禁止**要求用户重新提供 token
+5. **禁止** force push 到 master
+6. 输出日志时**不要打印完整 token**（可用 `ghp_***` 脱敏）
+
+## 命令
+
+```bash
+npm run push:github
+```
+
+或
+
+```powershell
+.\push-github.bat
+```
+
+## 注意
+
+若推送返回 `Repository not found`，说明 GitHub 上尚未创建该仓库，需先在 GitHub 创建 `afan-Kiss/douyin-maoyan-overlay`，再执行推送脚本（不要用裸 `git push`，必须用上述脚本读取 token）。

@@ -1,0 +1,13 @@
+{
+  "apiBase": "http://127.0.0.1:8765",
+  "remoteAdminUrl": "https://xiangyuzhubao.xyz/maoyan-admin",
+  "updateServerUrl": "https://xiangyuzhubao.xyz",
+  "pollIntervalMs": 5000,
+  "topCount": 10,
+  "window": {
+    "width": 525,
+    "height": 1080,
+    "alwaysOnTop": false,
+    "transparent": false
+  }
+}

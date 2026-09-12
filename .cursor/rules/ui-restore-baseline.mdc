@@ -1,0 +1,41 @@
+---
+description: 界面备份与恢复 - 用户说「恢复到上次界面」时执行
+alwaysApply: true
+---
+
+# 界面备份与恢复
+
+## 备份位置
+
+当前界面基线（**上次界面**）保存在：
+
+- 目录：`backups/ui-baseline/`
+- 清单：`backups/ui-baseline/MANIFEST.json`
+- 恢复脚本：`scripts/restore-ui-baseline.ps1`
+
+备份包含：`ui/index.html`、`ui/styles.css`、`ui/app.js`、`ui/settings-applier.js`、`ui/number-anim.js`、`ui/maoyan-api.js`、`ui/fonts/*`、`overlay-settings.json`、`lib/settings.js`。
+
+**不要修改 `backups/ui-baseline/` 里的文件**，除非用户明确要求更新备份基线。
+
+## 用户说「恢复到上次界面」时
+
+1. 执行恢复脚本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/restore-ui-baseline.ps1
+```
+
+2. 将 `backups/ui-baseline/` 中列出的文件覆盖回项目对应路径（与脚本行为一致）。
+3. 告知用户重启 Electron 软件（`npm start`）后生效。
+4. **不要**顺带改 unrelated 代码；仅恢复备份文件。
+
+## 用户要求更新备份基线时
+
+仅当用户明确说「更新界面备份」「重新备份当前界面」等时，才用当前 `ui/` 与相关设置覆盖 `backups/ui-baseline/`，并更新 `MANIFEST.json` 的 `createdAt` 与 `description`。
+
+## 触发词（同义）
+
+- 恢复到上次界面
+- 恢复界面备份
+- 还原之前的界面
+- 回到备份的 UI

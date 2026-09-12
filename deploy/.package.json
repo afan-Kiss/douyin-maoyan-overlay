@@ -1,0 +1,12 @@
+{
+  "name": "maoyan-overlay-admin",
+  "version": "1.0.0",
+  "private": true,
+  "main": "standalone-admin.js",
+  "scripts": {
+    "start": "node standalone-admin.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}

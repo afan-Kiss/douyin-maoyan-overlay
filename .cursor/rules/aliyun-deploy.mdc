@@ -1,0 +1,55 @@
+---
+description: 阿里云部署与自动更新凭证 - 发布/部署时使用
+alwaysApply: true
+---
+
+# 阿里云部署与自动更新规则
+
+本项目自动更新走 **https://xiangyuzhubao.xyz/maoyan-updates/**，安装包托管在 **47.108.21.50**。
+
+## 凭证（已保存在项目中）
+
+凭证文件：`deploy/aliyun.json`（含 SSH 密码、OSS AccessKey 等，**勿写入规则文件或提交到 Git**）
+
+| 项 | 说明 |
+|---|---|
+| 更新服务器 | https://xiangyuzhubao.xyz |
+| 部署服务器 IP | 见 `deploy/aliyun.json` 的 `deployHost` |
+| SSH / OSS | 见 `deploy/aliyun.json` |
+
+## 更新通道（静态托管）
+
+| 文件 | 公网地址 |
+|---|---|
+| 版本清单 | https://xiangyuzhubao.xyz/maoyan-updates/latest.json |
+| 安装包 | https://xiangyuzhubao.xyz/maoyan-updates/MaoyanOverlay.exe |
+
+服务器目录：`/opt/maoyan-updates/`
+
+客户端启动时读取 `latest.json`，有新版本则分片下载 EXE、SHA256 校验后替换重启。代码在 `lib/update/`。
+
+## 发布命令
+
+```powershell
+# 打包 + 上传到 47.108.21.50
+npm run upload:release
+
+# 已有 dist/MaoyanOverlay.exe 时跳过打包
+npm run upload:release:fast
+```
+
+## 主动推送更新（同微信 Agent）
+
+后台下发 `{ type: "agent.update" }` 指令，客户端每 2 秒轮询接收并自动 `checkAndApplyIfAvailable()`。
+
+| API | 说明 |
+|---|---|
+| `POST /maoyan-admin/api/update/push` | 管理后台推送更新（需 X-Admin-Token） |
+| `GET /maoyan-admin/api/update/command?lastAck=` | 客户端轮询待执行指令 |
+| `GET /maoyan-admin/api/update/status` | 查看当前推送指令 |
+
+上传安装包脚本 `npm run upload:release` 会在上传完成后**自动下发推送指令**。
+
+Windows 注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\MaoyanOverlay`，代码在 `lib/auto-start.js`。
+
+**每次需要部署或上传更新包时，直接读取 `deploy/aliyun.json`，不要向用户重复索要密钥。**

@@ -1,0 +1,25 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+
+# 运行态 / 敏感数据
+data/browser_state.json
+data/cookies.txt
+data/session_cache/
+data/browser_state.json
+
+ui/preview-*.png
+overlay-settings.json
+update-command.json
+deploy/.update-command.json
+deploy/aliyun.json
+deploy/github.json
+
+# 媒体大文件（本地保留，不入库）
+ui/trailers/*.mp4
+ui/trailers/_sample.mp4
+
+# 构建产物
+*.exe
+code-review.zip

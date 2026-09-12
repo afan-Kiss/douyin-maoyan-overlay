@@ -1,0 +1,5 @@
+# 运行时数据目录（换电脑时连同整个软件文件夹一起复制）
+
+- browser_state.json  猫眼登录状态（首次需点软件内「登录」）
+- config.ini            可选：Chrome 路径、API 端口
+- session_cache/        签名缓存

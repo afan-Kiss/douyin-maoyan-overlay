@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>票房直播 · 可视化后台</title>
+    <link rel="stylesheet" href="admin.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="topbar__brand">
+          <h1>票房直播 · 可视化后台</h1>
+          <p>左侧为实时预览，点击界面元素后在右侧修改配色与字号，保存后约 2 秒内同步到直播窗口</p>
+        </div>
+        <div class="topbar__actions">
+          <input id="admin-token" type="password" placeholder="管理密码" autocomplete="current-password" />
+          <button id="btn-save" class="btn btn--primary" type="button">保存设置</button>
+          <button id="btn-reset" class="btn" type="button">恢复默认</button>
+        </div>
+      </header>
+
+      <div id="toast" class="toast" hidden></div>
+
+      <div class="workspace">
+        <section class="preview-pane">
+          <div class="preview-pane__head">
+            <span class="preview-pane__label">直播界面预览</span>
+            <span class="preview-pane__hint">点击任意区域选中并编辑</span>
+          </div>
+          <div class="preview-frame-wrap">
+            <iframe
+              id="preview-frame"
+              class="preview-frame"
+              title="直播界面预览"
+              src="ui/index.html?preview=admin"
+            ></iframe>
+          </div>
+        </section>
+
+        <aside class="inspector">
+          <div class="inspector__head">
+            <h2 id="inspector-title">选择一个区域</h2>
+            <p id="inspector-desc">在左侧预览中点击标题、数字、卡片等区域</p>
+          </div>
+
+          <div id="inspector-fields" class="inspector__fields">
+            <div class="inspector__empty">
+              <span class="inspector__empty-icon">◎</span>
+              <p>点击预览中的元素开始编辑</p>
+            </div>
+          </div>
+
+          <div class="inspector__quick">
+            <span class="inspector__quick-label">快捷跳转</span>
+            <div class="chip-row" id="quick-targets"></div>
+          </div>
+
+          <details class="inspector__section">
+            <summary>数据与刷新</summary>
+            <div class="inspector__section-body">
+              <div class="field">
+                <label>刷新频率（毫秒）</label>
+                <input type="number" id="pollIntervalMs" min="1000" max="60000" step="500" />
+              </div>
+              <div class="field">
+                <label>显示电影数量</label>
+                <input type="number" id="topCount" min="1" max="30" />
+              </div>
+              <div class="field">
+                <label>详细字段刷新间隔（毫秒）</label>
+                <input type="number" id="enrich-fullIntervalMs" min="10000" max="300000" step="5000" />
+              </div>
+              <div class="field">
+                <label>趋势补充数量（部）</label>
+                <input type="number" id="enrich-trendLimit" min="1" max="20" />
+              </div>
+            </div>
+          </details>
+
+          <details class="inspector__section">
+            <summary>窗口与账号</summary>
+            <div class="inspector__section-body">
+              <div class="field-grid">
+                <div class="field">
+                  <label>宽度（px）</label>
+                  <input type="number" id="window-width" min="360" max="1200" />
+                </div>
+                <div class="field">
+                  <label>高度（px）</label>
+                  <input type="number" id="window-height" min="400" max="1600" />
+                </div>
+              </div>
+              <div class="field field--row">
+                <label>始终置顶</label>
+                <input type="checkbox" id="window-alwaysOnTop" />
+              </div>
+              <div class="field">
+                <label>后台端口</label>
+                <input type="number" id="admin-port" min="1024" max="65535" />
+              </div>
+              <div class="field">
+                <label>管理密码</label>
+                <input type="password" id="admin-password" placeholder="保存时更新密码" />
+              </div>
+            </div>
+          </details>
+
+          <details class="inspector__section">
+            <summary>软件更新</summary>
+            <div class="inspector__section-body">
+              <p class="panel-desc">上传新版本后推送，在线客户端将自动下载安装。</p>
+              <div class="field">
+                <label>当前推送指令</label>
+                <output id="update-command-status" class="mono">加载中…</output>
+              </div>
+              <button id="btn-push-update" class="btn btn--primary btn--block" type="button">
+                推送更新到所有客户端
+              </button>
+            </div>
+          </details>
+        </aside>
+      </div>
+    </div>
+    <script src="admin.js"></script>
+  </body>
+</html>

@@ -1,0 +1,19 @@
+{
+  "name": "ui-baseline",
+  "label": "上次界面",
+  "description": "2026-09-11 备份：鸿蒙字体、LIVE 与标题同行、领奖台布局、非置顶可拖动、数据稳定合并等当前界面",
+  "createdAt": "2026-09-11T21:59:00+08:00",
+  "restoreCommand": "powershell -ExecutionPolicy Bypass -File scripts/restore-ui-baseline.ps1",
+  "files": [
+    { "from": "index.html", "to": "ui/index.html" },
+    { "from": "styles.css", "to": "ui/styles.css" },
+    { "from": "app.js", "to": "ui/app.js" },
+    { "from": "settings-applier.js", "to": "ui/settings-applier.js" },
+    { "from": "number-anim.js", "to": "ui/number-anim.js" },
+    { "from": "maoyan-api.js", "to": "ui/maoyan-api.js" },
+    { "from": "fonts/harmonyos-sans.css", "to": "ui/fonts/harmonyos-sans.css" },
+    { "from": "fonts/mtsi-font.css", "to": "ui/fonts/mtsi-font.css" },
+    { "from": "overlay-settings.json", "to": "overlay-settings.json" },
+    { "from": "settings.js", "to": "lib/settings.js" }
+  ]
+}
