@@ -16,6 +16,9 @@ const PASS = process.env.DEPLOY_PASS || cred.deployPass || "";
 const REMOTE_DIR = "/opt/maoyan-updates";
 const PUBLIC_BASE = cred.updateServerUrl || "https://xiangyuzhubao.xyz";
 const SKIP_BUILD = process.argv.includes("--skip-build");
+const NO_BUMP = process.argv.includes("--no-bump");
+const SKIP_NGINX = process.argv.includes("--skip-nginx");
+const { bumpPackageVersion, displayVersion } = require("./bump-version");
 
 function hashFile(filePath) {
   return new Promise((resolve, reject) => {
@@ -69,6 +72,10 @@ function buildRelease() {
 }
 
 async function ensureNginx(conn) {
+  if (SKIP_NGINX) {
+    console.log("跳过 Nginx 配置检查（--skip-nginx）");
+    return;
+  }
   const snippet = fs.readFileSync(
     path.join(__dirname, "maoyan-updates.nginx.conf"),
     "utf-8",
@@ -80,12 +87,30 @@ async function ensureNginx(conn) {
     "/etc/nginx/conf.d/xiangyu-portal.conf",
     "/etc/nginx/conf.d/xiangyu-portal-ssl.conf",
   ]) {
-    await exec(
-      conn,
-      `grep -q '${marker}' ${file} || awk 'BEGIN{done=0} {print} !done && /client_max_body_size 50m;/ {print "    include /etc/nginx/snippets/${marker};"; done=1}' ${file} > ${file}.tmp && mv ${file}.tmp ${file}`,
-    );
+    const exists = await exec(conn, `test -f '${file}' && echo yes || echo no`);
+    if (String(exists).trim() !== "yes") {
+      console.log(`跳过 Nginx 配置注入（文件不存在）: ${file}`);
+      continue;
+    }
+    const injectCmd = [
+      `if grep -q '${marker}' '${file}'; then`,
+      `  echo 'Nginx 已包含 ${marker}: ${file}';`,
+      `else`,
+      `  awk 'BEGIN{done=0} {print} !done && /client_max_body_size 50m;/ {print "    include /etc/nginx/snippets/${marker};"; done=1}' '${file}' > '${file}.tmp';`,
+      `  test -s '${file}.tmp' && mv '${file}.tmp' '${file}' || { echo 'Nginx 注入跳过: ${file}'; rm -f '${file}.tmp'; };`,
+      `fi`,
+    ].join(" ");
+    try {
+      await exec(conn, injectCmd);
+    } catch (error) {
+      console.warn(`Nginx 配置注入失败（继续上传）: ${file} — ${error.message}`);
+    }
   }
-  await exec(conn, "nginx -t && systemctl reload nginx");
+  try {
+    await exec(conn, "nginx -t && systemctl reload nginx");
+  } catch (error) {
+    console.warn(`Nginx reload 失败（继续上传）: ${error.message}`);
+  }
 }
 
 async function pushUpdateCommand(conn, version) {
@@ -104,7 +129,21 @@ async function pushUpdateCommand(conn, version) {
 async function main() {
   if (!PASS) throw new Error("缺少 deployPass，请检查 deploy/aliyun.json");
 
-  if (!SKIP_BUILD) buildRelease();
+  let bumped = null;
+  if (!NO_BUMP) {
+    bumped = bumpPackageVersion();
+    console.log(
+      `版本递增: ${bumped.previous} -> ${bumped.next} (发布 v${bumped.display})`,
+    );
+  }
+
+  const mustBuild = !SKIP_BUILD || Boolean(bumped);
+  if (mustBuild) {
+    if (SKIP_BUILD && bumped) {
+      console.log("版本已递增，将重新打包以写入新版本号…");
+    }
+    buildRelease();
+  }
 
   const exePath = path.join(ROOT, "dist", "MaoyanOverlay.exe");
   if (!fs.existsSync(exePath)) {
@@ -112,9 +151,7 @@ async function main() {
   }
 
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf-8"));
-  let version = String(pkg.version || "1.0.0");
-  const verMatch = version.match(/^(\d+\.\d+)\.0+$/);
-  if (verMatch) version = verMatch[1];
+  let version = displayVersion(pkg.version || "1.0.0");
 
   const sha256 = await hashFile(exePath);
   const fileSize = fs.statSync(exePath).size;
@@ -144,6 +181,9 @@ async function main() {
   });
 
   console.log(`已连接 ${USER}@${HOST}`);
+  if (SKIP_NGINX) {
+    await exec(conn, `mkdir -p ${REMOTE_DIR}`);
+  }
   await ensureNginx(conn);
 
   const sftp = await new Promise((resolve, reject) => {

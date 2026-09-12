@@ -1,0 +1,29 @@
+---
+description: 发布更新时自动递增版本号
+alwaysApply: true
+---
+
+# 版本号与发布规则
+
+## 版本递增
+
+每次向更新通道发布新版本前，**必须递增 `package.json` 的 version**（次版本 +1：`1.0.0` → `1.1.0` → `1.2.0`）。
+
+- 脚本：`npm run version:bump` 或 `node deploy/bump-version.js`
+- `npm run upload:release` **默认自动 bump** 后打包上传
+- 仅重传同一版本包时用：`node deploy/upload-release.js --no-bump --skip-build`
+
+## 发布流程
+
+```bash
+npm run upload:release
+git add package.json
+git commit -m "chore: release vX.Y"
+npm run push:github
+```
+
+## 展示规则
+
+- `package.json` 存三段 semver（如 `1.2.0`）
+- 客户端与 `latest.json` 展示为两段（如 `1.2`）
+- 代码见 `deploy/bump-version.js`、`lib/update/version.js`
