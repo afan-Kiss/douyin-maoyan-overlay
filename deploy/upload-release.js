@@ -218,6 +218,10 @@ async function main() {
   }
   console.log("远程 EXE HTTP/大小校验通过");
 
+  const stableName = "MaoyanOverlay.exe";
+  await exec(conn, `cp -f '${remoteExe}' '${REMOTE_DIR}/${stableName}'`);
+  console.log(`已同步便携版固定文件名: ${stableName}`);
+
   const remoteManifestTmp = `${REMOTE_DIR}/latest.json.tmp`;
   const remoteManifest = `${REMOTE_DIR}/latest.json`;
   console.log("上传 latest.json（临时文件）…");
@@ -243,6 +247,7 @@ async function main() {
   console.log("\n=== 上传完成 ===");
   console.log(`版本: v${version}`);
   console.log(`下载: ${downloadUrl}`);
+  console.log(`便携直链: ${base}/maoyan-updates/MaoyanOverlay.exe`);
   console.log(`清单: ${base}/maoyan-updates/latest.json`);
   console.log(`SHA256: ${sha256}`);
   console.log("旧版 EXE 已保留在服务器目录，供已开始下载的客户端继续拉取");

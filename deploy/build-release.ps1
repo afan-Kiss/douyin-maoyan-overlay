@@ -49,6 +49,9 @@ try {
   Set-Content -Path (Join-Path $outDir 'version.txt') -Value $ver -NoNewline -Encoding ascii
 
   $sizeMb = [math]::Round((Get-Item $OutExe).Length / 1MB, 2)
+  $desktopExe = Join-Path ([Environment]::GetFolderPath('Desktop')) 'MaoyanOverlay.exe'
+  Copy-Item -Force $OutExe $desktopExe
+  Write-Output "DESKTOP_EXE=$desktopExe"
   Write-Output "VERSION=v$ver"
   Write-Output "EXE=$OutExe"
   Write-Output "VERSIONED_EXE=$versionedExe"

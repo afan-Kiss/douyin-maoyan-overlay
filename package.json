@@ -1,6 +1,6 @@
 {
   "name": "douyin-maoyan-overlay",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "抖音直播猫眼票房无边框展示",
   "main": "bootstrap.js",
   "scripts": {
@@ -64,7 +64,9 @@
       "!**/*.map"
     ],
     "asar": true,
+    "icon": "build/icon.ico",
     "win": {
+      "icon": "build/icon.ico",
       "target": [
         {
           "target": "portable",
