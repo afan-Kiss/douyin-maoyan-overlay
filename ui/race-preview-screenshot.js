@@ -255,7 +255,10 @@ async function main() {
       ({ movies, nation }) => {
         const { renderList, updateNation, setStatus } = window.__racePreview;
         renderList(movies);
-        updateNation(nation, { updateTimeText: "2026-09-12 16:42:38" });
+        updateNation(nation, {
+          updateTimeText: "2026-09-12 16:42:38",
+          calendar: { today: "2026-09-12" },
+        });
         setStatus("ok", "");
       },
       { movies: mockMovies, nation: mockNation }

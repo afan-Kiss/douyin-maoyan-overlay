@@ -9,74 +9,120 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <div class="stage">
-      <div class="bg-layer" aria-hidden="true">
-        <div class="bg-veil"></div>
-        <div class="bg-glow bg-glow--a"></div>
-        <div class="bg-glow bg-glow--b"></div>
-        <div class="bg-beam bg-beam--l"></div>
-        <div class="bg-beam bg-beam--r"></div>
-        <div class="bg-stars"></div>
-        <div class="bg-curtain"></div>
+    <div id="viewport" class="viewport">
+      <div class="stage">
+        <div class="bg-layer" aria-hidden="true">
+          <div class="bg-base"></div>
+          <div class="bg-curtain bg-curtain--l"></div>
+          <div class="bg-ribbon bg-ribbon--r"></div>
+          <div class="bg-spotlight bg-spotlight--l"></div>
+          <div class="bg-spotlight bg-spotlight--r"></div>
+          <div class="bg-beam bg-beam--l"></div>
+          <div class="bg-beam bg-beam--r"></div>
+          <div class="bg-speedlines"></div>
+          <div class="bg-particles"></div>
+          <div class="bg-vignette"></div>
+        </div>
+
+        <header class="hero">
+          <div class="hero__chrome">
+            <button class="titlebar__btn titlebar__btn--login" id="btn-login" title="登录">登录</button>
+          </div>
+
+          <div class="hero__title-row">
+            <h1 class="hero__title">票房赛马榜</h1>
+            <svg class="hero__trophy" viewBox="0 0 64 64" aria-hidden="true">
+              <defs>
+                <linearGradient id="trophyGold" x1="0%" y1="0%" x2="0%" y2="100%">
+                  <stop offset="0%" stop-color="#fff4c8" />
+                  <stop offset="45%" stop-color="#f0c45a" />
+                  <stop offset="100%" stop-color="#b8862a" />
+                </linearGradient>
+              </defs>
+              <path
+                fill="url(#trophyGold)"
+                stroke="#7a2a10"
+                stroke-width="1.4"
+                d="M18 10h28v6c0 9.4-6.2 16.2-14 17.6V40h6v4H26v-4h6v-6.4C24.2 32.2 18 25.4 18 16V10z"
+              />
+              <path
+                fill="none"
+                stroke="url(#trophyGold)"
+                stroke-width="3"
+                stroke-linecap="round"
+                d="M18 14c-6 1-10 6-10 12s5 10 10 10"
+              />
+              <path
+                fill="none"
+                stroke="url(#trophyGold)"
+                stroke-width="3"
+                stroke-linecap="round"
+                d="M46 14c6 1 10 6 10 12s-5 10-10 10"
+              />
+              <rect x="22" y="44" width="20" height="4" rx="1" fill="url(#trophyGold)" stroke="#7a2a10" stroke-width="1" />
+              <path fill="url(#trophyGold)" stroke="#7a2a10" stroke-width="1" d="M16 52h32l-3 6H19z" />
+            </svg>
+          </div>
+
+          <div class="hero__champ" id="champ-banner">
+            <span class="hero__champ-text" id="champ-text">今日冠军：--</span>
+          </div>
+
+          <div class="hero__meta">
+            <span class="hero__date" id="hero-date">今日：--</span>
+            <span class="hero__source">信息取自公开资讯</span>
+          </div>
+
+          <div class="nation-strip" id="nation-strip">
+            <div class="nation-pill nation-pill--main nation-pill--dark">
+              <span class="nation-pill__crown" aria-hidden="true">
+                <svg viewBox="0 0 24 18" width="18" height="14">
+                  <path
+                    fill="#ffd978"
+                    stroke="#8a4a10"
+                    stroke-width="0.8"
+                    d="M2 14 L4 5 L8 10 L12 3 L16 10 L20 5 L22 14 Z"
+                  />
+                </svg>
+              </span>
+              <span class="nation-pill__label">今日大盘</span>
+              <span class="nation-pill__row">
+                <span class="nation-pill__value mtsi-font" id="nation-box">--</span>
+                <span class="nation-pill__unit js-nation-unit">万</span>
+              </span>
+            </div>
+            <div class="nation-pill nation-pill--light" id="nation-shows-pill">
+              <span class="nation-pill__label">排片</span>
+              <span class="nation-pill__value" id="nation-shows">--</span>
+            </div>
+            <div class="nation-pill nation-pill--dark" id="champ-box-pill">
+              <span class="nation-pill__label">冠军票房</span>
+              <span class="nation-pill__row">
+                <span class="nation-pill__value mtsi-font" id="champ-box">--</span>
+                <span class="nation-pill__unit" id="champ-box-unit">万</span>
+              </span>
+            </div>
+            <div class="nation-pill nation-pill--light" id="nation-views-pill">
+              <span class="nation-pill__label">观影人次</span>
+              <span class="nation-pill__value" id="nation-views">--</span>
+            </div>
+            <div class="nation-pill nation-pill--dark" id="nation-seat-pill">
+              <span class="nation-pill__label">上座率</span>
+              <span class="nation-pill__value" id="nation-seat">--</span>
+            </div>
+          </div>
+        </header>
+
+        <div id="status" class="status status--loading">正在启动票房服务…</div>
+
+        <section class="race-list" id="race-list" aria-label="票房榜前十"></section>
+
+        <footer class="stage-footer">
+          <span class="stage-footer__pill">数据仅供娱乐参考，非官方统计，以实际上映为准</span>
+        </footer>
+
+        <div class="delta-overlay" id="delta-overlay" aria-hidden="true"></div>
       </div>
-
-      <section class="hero">
-        <div class="hero__top">
-          <div class="hero__live">
-            <span class="live-dot"></span>
-            <span class="hero__live-label">LIVE</span>
-          </div>
-          <button class="titlebar__btn titlebar__btn--login" id="btn-login" title="登录">登录</button>
-        </div>
-
-        <h1 class="hero__title">票房赛马榜</h1>
-        <p class="hero__subtitle">
-          多榜齐看 · 谁是今日冠军
-          <span class="hero__source">信息取自公开资讯</span>
-        </p>
-
-        <div class="hero__champ" id="champ-banner">
-          <span class="hero__champ-label">今日冠军</span>
-          <span class="hero__champ-name" id="champ-name">--</span>
-        </div>
-
-        <div class="nation-strip" id="nation-strip">
-          <div class="nation-pill nation-pill--main">
-            <span class="nation-pill__label">今日大盘</span>
-            <span class="nation-pill__row">
-              <span class="nation-pill__value mtsi-font" id="nation-box">--</span>
-              <span class="nation-pill__unit js-nation-unit">万</span>
-            </span>
-          </div>
-          <div class="nation-pill" id="champ-box-pill">
-            <span class="nation-pill__label">冠军票房</span>
-            <span class="nation-pill__row">
-              <span class="nation-pill__value mtsi-font" id="champ-box">--</span>
-              <span class="nation-pill__unit" id="champ-box-unit">万</span>
-            </span>
-          </div>
-          <div class="nation-pill" id="nation-shows-pill">
-            <span class="nation-pill__label">排片</span>
-            <span class="nation-pill__value" id="nation-shows">--</span>
-          </div>
-          <div class="nation-pill" id="nation-views-pill">
-            <span class="nation-pill__label">观影人次</span>
-            <span class="nation-pill__value" id="nation-views">--</span>
-          </div>
-        </div>
-
-        <p class="hero__time" id="update-time">实时更新 --:--:--</p>
-      </section>
-
-      <div id="status" class="status status--loading">正在启动票房服务…</div>
-
-      <section class="race-list" id="race-list" aria-label="票房榜前十"></section>
-
-      <footer class="stage-footer">
-        数据仅供娱乐参考，非官方统计，以实际上映为准
-      </footer>
-
-      <div class="delta-overlay" id="delta-overlay" aria-hidden="true"></div>
     </div>
 
     <script type="module" src="app.js"></script>

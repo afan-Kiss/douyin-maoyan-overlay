@@ -9,6 +9,7 @@ import {
   estimateSpeedMetrics,
 } from "./maoyan-api.js";
 import { applyOverlaySettings, getOverlaySettings } from "./settings-applier.js";
+import { bindDesignViewport } from "./viewport-fit.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -18,12 +19,16 @@ const statusEl = $("status");
 const nationBoxEl = $("nation-box");
 const nationShowsEl = $("nation-shows");
 const nationViewsEl = $("nation-views");
-const updateTimeEl = $("update-time");
-const champNameEl = $("champ-name");
+const nationSeatEl = $("nation-seat");
+const heroDateEl = $("hero-date");
+const champTextEl = $("champ-text");
 const champBannerEl = $("champ-banner");
 const champBoxEl = $("champ-box");
 const champBoxUnitEl = $("champ-box-unit");
 const champBoxPillEl = $("champ-box-pill");
+
+const CROWN_SVG =
+  '<svg class="race-card__crown" viewBox="0 0 24 18" aria-hidden="true"><path fill="#ffd978" stroke="#8a4a10" stroke-width="0.8" d="M2 14 L4 5 L8 10 L12 3 L16 10 L20 5 L22 14 Z"/></svg>';
 
 let config = {};
 let pollTimer = null;
@@ -535,20 +540,31 @@ function dailyTableHtml(rows) {
   return `<table class="race-card__table"><thead>${head}</thead><tbody>${body}</tbody></table>`;
 }
 
+function cardClassName(movie) {
+  const rank = Math.min(Number(movie.rank) || 99, 10);
+  const compact = rank >= 6 ? " race-card--compact" : "";
+  return `race-card race-card--rank${rank}${compact}`;
+}
+
 function raceCardTemplate(movie) {
   const mainland = mainlandValue(movie);
   const regions = buildRegionsHtml(movie);
   const metrics = buildMetricsHtml(movie);
   const table = dailyTableHtml(movie.dailyTable);
+  const mainlandText = isEmptyField(mainland) ? "--" : String(mainland);
 
   return `
+    <span class="race-card__badge">今日冠军</span>
     <div class="race-card__head">
       <span class="race-card__rank">NO.${movie.rank}</span>
-      <h2 class="race-card__title">《${escapeHtml(movie.name)}》</h2>
+      <div class="race-card__title-wrap">
+        <h2 class="race-card__title">《${escapeHtml(movie.name)}》</h2>
+        ${CROWN_SVG}
+      </div>
       <span class="race-card__delta"></span>
       <div class="race-card__mainland${isEmptyField(mainland) ? " is-empty" : ""}">
-        <em>中国内地</em>
-        <strong class="js-mainland">${isEmptyField(mainland) ? "--" : escapeHtml(mainland)}</strong>
+        <em>中国内地：</em>
+        <strong class="js-mainland">${isEmptyField(mainland) ? "--" : escapeHtml(mainlandText)}</strong>
       </div>
     </div>
     <div class="race-card__regions${regions ? "" : " is-empty"}">${regions}</div>
@@ -559,7 +575,7 @@ function raceCardTemplate(movie) {
 
 function buildRaceCard(movie) {
   const card = document.createElement("article");
-  card.className = `race-card race-card--rank${Math.min(movie.rank, 10)}`;
+  card.className = cardClassName(movie);
   card.dataset.movieId = String(movie.movieId);
   card.dataset.rank = String(movie.rank);
   card.innerHTML = raceCardTemplate(movie);
@@ -567,7 +583,10 @@ function buildRaceCard(movie) {
   if (wrap && !wrap.classList.contains("is-empty")) {
     wrap.dataset.tableSig = dailyTableSignature(movie.dailyTable);
   }
-  requestAnimationFrame(() => fitNowrapEl(card.querySelector(".js-mainland")));
+  requestAnimationFrame(() => {
+    fitNowrapEl(card.querySelector(".race-card__title"));
+    fitNowrapEl(card.querySelector(".js-mainland"));
+  });
   return card;
 }
 
@@ -643,7 +662,7 @@ function trackBoxDelta(card, movie, isNew) {
 
 function updateRaceCard(card, movie, isNew = false) {
   const prevRank = Number(card.dataset.rank || 0);
-  card.className = `race-card race-card--rank${Math.min(movie.rank, 10)}`;
+  card.className = cardClassName(movie);
   card.dataset.rank = String(movie.rank);
 
   if (prevRank && prevRank !== movie.rank) {
@@ -661,7 +680,9 @@ function updateRaceCard(card, movie, isNew = false) {
   }
 
   setTextIfChanged(card.querySelector(".race-card__rank"), `NO.${movie.rank}`);
-  setTextIfChanged(card.querySelector(".race-card__title"), `《${movie.name}》`);
+  if (setTextIfChanged(card.querySelector(".race-card__title"), `《${movie.name}》`)) {
+    fitNowrapEl(card.querySelector(".race-card__title"));
+  }
 
   const mainland = mainlandValue(movie);
   const mainlandWrap = card.querySelector(".race-card__mainland");
@@ -772,7 +793,7 @@ function setPlainBoxValue(el, amount) {
   el.textContent = text;
 }
 
-function formatUpdateLabel(parsed) {
+function resolveDisplayDate(parsed) {
   const WEEK = ["日", "一", "二", "三", "四", "五", "六"];
   let d = null;
   if (parsed?.updateTimestamp) {
@@ -783,7 +804,6 @@ function formatUpdateLabel(parsed) {
   }
   if (!d || Number.isNaN(d.getTime())) d = new Date();
 
-  const pad = (n) => String(n).padStart(2, "0");
   let y = d.getFullYear();
   let m = d.getMonth() + 1;
   let day = d.getDate();
@@ -799,10 +819,21 @@ function formatUpdateLabel(parsed) {
     }
   }
 
-  const datePart = `${y}-${pad(m)}-${pad(day)}`;
-  const weekPart = `周${WEEK[d.getDay()]}`;
-  const timePart = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-  return `实时更新 ${datePart} ${weekPart} ${timePart}`;
+  return `今日：${y}年${String(m).padStart(2, "0")}月${String(day).padStart(2, "0")}日 周${WEEK[d.getDay()]}`;
+}
+
+function computeNationSeatRate(movies) {
+  const rates = (movies || [])
+    .map((m) => {
+      const raw = m?.avgSeatView ?? m?.dailyTable?.[0]?.avgSeatView;
+      if (isEmptyField(raw)) return null;
+      const n = parseFloat(String(raw).replace(/%/g, ""));
+      return Number.isFinite(n) ? n : null;
+    })
+    .filter((n) => n != null);
+  if (!rates.length) return "--";
+  const avg = rates.reduce((a, b) => a + b, 0) / rates.length;
+  return `${avg.toFixed(1)}%`;
 }
 
 function setEncodedBoxValue(el, html, fallbackText = "--") {
@@ -827,7 +858,8 @@ function updateChampion(movies) {
   }
 
   champBannerEl?.classList.remove("is-hidden");
-  setTextIfChanged(champNameEl, `《${top.name}》`);
+  setTextIfChanged(champTextEl, `今日冠军：${top.name}`);
+  fitNowrapEl(champTextEl);
 
   const unit = top.todayUnit || "万";
   if (champBoxUnitEl) champBoxUnitEl.textContent = unit;
@@ -846,6 +878,10 @@ function updateChampion(movies) {
     setEncodedBoxValue(champBoxEl, top.todayBoxHtml);
   } else {
     champBoxPillEl?.classList.add("is-hidden");
+  }
+
+  if (nationSeatEl) {
+    setTextIfChanged(nationSeatEl, computeNationSeatRate(movies));
   }
 }
 
@@ -883,8 +919,8 @@ function updateNation(nation, parsed) {
   $("nation-shows-pill")?.classList.toggle("is-hidden", isEmptyField(nation.showCountDesc));
   $("nation-views-pill")?.classList.toggle("is-hidden", isEmptyField(nation.viewCountDesc));
 
-  if (updateTimeEl) {
-    updateTimeEl.textContent = formatUpdateLabel(parsed);
+  if (heroDateEl) {
+    setTextIfChanged(heroDateEl, resolveDisplayDate(parsed));
   }
 }
 
@@ -1126,7 +1162,9 @@ async function handleLoginClick() {
 }
 
 async function init() {
+  bindDesignViewport();
   $("btn-login")?.addEventListener("click", handleLoginClick);
+  if (heroDateEl) setTextIfChanged(heroDateEl, resolveDisplayDate(null));
 
   config = (await window.overlay?.getConfig()) || {
     apiBase: "http://127.0.0.1:8765",
