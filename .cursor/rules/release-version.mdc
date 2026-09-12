@@ -26,4 +26,4 @@ npm run push:github
 
 - `package.json` 存三段 semver（如 `1.2.0`）
 - 客户端与 `latest.json` 展示为两段（如 `1.2`）
-- 代码见 `deploy/bump-version.js`、`lib/update/version.js`
+- 图标源文件固定为桌面 **`1.ico`**（打包前自动读取并放大到 256×256 写入 `build/icon.ico`）
