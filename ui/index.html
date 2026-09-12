@@ -3,155 +3,82 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>电影实时票房榜</title>
+    <title>票房赛马榜</title>
     <link rel="stylesheet" href="fonts/harmonyos-sans.css" />
     <link rel="stylesheet" href="fonts/mtsi-font.css" />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <div class="preview-stage">
-      <div id="viewport" class="viewport">
-        <div class="bg-layer" aria-hidden="true">
-          <div class="bg-planet"></div>
-          <div class="bg-nebula bg-nebula--a"></div>
-          <div class="bg-nebula bg-nebula--b"></div>
-          <div class="bg-stars"></div>
-          <div class="bg-stars bg-stars--far"></div>
-          <div class="bg-horizon"></div>
-        </div>
-
-        <div class="live-body">
-          <div class="live-zone live-zone--top">
-            <header class="live-header">
-              <div class="live-header__meta">
-                <div class="live-badge">
-                  <span class="live-dot"></span>
-                  <span class="live-badge__text">LIVE</span>
-                </div>
-                <time class="live-header__time" id="header-time">--</time>
-                <button class="titlebar__btn titlebar__btn--login" id="btn-login" title="登录">登录</button>
-              </div>
-
-              <div class="live-header__center">
-                <h1 class="live-header__title">电影实时票房榜</h1>
-                <p class="live-header__subtitle">
-                  <span class="live-header__line"></span>
-                  今日大盘 · 猫眼排行
-                  <span class="live-header__line"></span>
-                </p>
-              </div>
-            </header>
-
-            <div id="status" class="status status--loading">正在启动票房服务…</div>
-            <p id="status-hint" class="status-hint" hidden>数据更新中…</p>
-
-            <section class="summary-bar glass-panel" id="top-card" aria-label="今日大盘核心指标">
-              <div class="summary-bar__item summary-bar__item--primary">
-                <span class="summary-bar__label">实时票房</span>
-                <div class="summary-bar__value-row">
-                  <span class="summary-bar__value mtsi-font" id="nation-value">--</span>
-                  <span class="summary-bar__unit" id="nation-unit">万</span>
-                  <span class="summary-bar__delta" id="nation-delta"></span>
-                </div>
-              </div>
-              <div class="summary-bar__divider"></div>
-              <div class="summary-bar__item">
-                <span class="summary-bar__label">观影人次</span>
-                <div class="summary-bar__value-row">
-                  <span class="summary-bar__value" id="nation-views">--</span>
-                  <span class="summary-bar__delta" id="views-delta"></span>
-                </div>
-              </div>
-              <div class="summary-bar__divider"></div>
-              <div class="summary-bar__item">
-                <span class="summary-bar__label">场均人次</span>
-                <div class="summary-bar__value-row">
-                  <span class="summary-bar__value" id="nation-avg">--</span>
-                  <span class="summary-bar__delta" id="avg-delta"></span>
-                </div>
-              </div>
-            </section>
-          </div>
-
-          <div class="live-zone live-zone--main">
-            <section class="podium" aria-label="票房榜前三">
-              <div class="podium__lead">
-                <div class="podium__slot" data-rank="1"></div>
-              </div>
-              <div class="podium__rest">
-                <div class="podium__slot" data-rank="2"></div>
-                <div class="podium__slot" data-rank="3"></div>
-              </div>
-            </section>
-
-            <section class="ranking-section" aria-label="票房榜4至10名">
-              <div class="ranking-section__head">
-                <span class="ranking-section__th ranking-section__th--rank">排名</span>
-                <span class="ranking-section__th ranking-section__th--name">影片名称</span>
-                <span class="ranking-section__th ranking-section__th--box">实时票房</span>
-                <span class="ranking-section__th ranking-section__th--round">较上轮</span>
-              </div>
-              <div class="ranking-section__viewport" id="ranking-viewport">
-                <div class="ranking-section__track" id="ranking-track">
-                  <div class="ranking-section__list" id="ranking-list"></div>
-                </div>
-              </div>
-            </section>
-          </div>
-
-          <div class="live-zone live-zone--trailer">
-            <section class="trailer-section" id="trailer-section" aria-label="热映预告">
-              <div class="trailer-section__header">
-                <h2 class="trailer-section__title">
-                  <span class="trailer-section__icon" aria-hidden="true">🎬</span>
-                  热映预告
-                </h2>
-                <span class="trailer-section__now" id="trailer-now">正在播放：--</span>
-              </div>
-              <div class="trailer-section__main" id="trailer-frame">
-                <video
-                  id="trailer-video"
-                  class="trailer-section__video trailer-section__video--hidden"
-                  muted
-                  playsinline
-                  preload="metadata"
-                ></video>
-                <div class="trailer-section__overlay">
-                  <div class="trailer-section__copy">
-                    <h3 class="trailer-section__movie" id="trailer-overlay-title">《--》</h3>
-                    <p class="trailer-section__tagline" id="trailer-overlay-tagline"></p>
-                    <p class="trailer-section__release" id="trailer-overlay-release">2026 敬请期待</p>
-                  </div>
-                  <p class="trailer-section__slogan">更大的世界 正在上映</p>
-                </div>
-                <div class="trailer-section__play" aria-hidden="true">
-                  <span class="trailer-section__play-icon"></span>
-                </div>
-                <div class="trailer-section__empty" id="trailer-empty" hidden>
-                  <p id="trailer-empty-title">暂无可播放预告</p>
-                  <p class="trailer-section__empty-hint">请确认 ui/trailers/ 中已有 TOP1–3 预告文件</p>
-                </div>
-                <div class="trailer-section__dots" id="trailer-posters"></div>
-              </div>
-            </section>
-
-            <footer class="live-footer">
-              <p class="live-footer__note">实时数据仅供参考 · 数据来源：猫眼专业版</p>
-            </footer>
-          </div>
-        </div>
-
-        <div class="delta-overlay" id="delta-overlay" aria-hidden="true"></div>
+    <div class="stage">
+      <div class="bg-layer" aria-hidden="true">
+        <div class="bg-veil"></div>
+        <div class="bg-glow bg-glow--a"></div>
+        <div class="bg-glow bg-glow--b"></div>
+        <div class="bg-beam bg-beam--l"></div>
+        <div class="bg-beam bg-beam--r"></div>
+        <div class="bg-stars"></div>
+        <div class="bg-curtain"></div>
       </div>
+
+      <section class="hero">
+        <div class="hero__top">
+          <div class="hero__live">
+            <span class="live-dot"></span>
+            <span class="hero__live-label">LIVE</span>
+          </div>
+          <button class="titlebar__btn titlebar__btn--login" id="btn-login" title="登录">登录</button>
+        </div>
+
+        <h1 class="hero__title">票房赛马榜</h1>
+        <p class="hero__subtitle">
+          多榜齐看 · 谁是今日冠军
+          <span class="hero__source">信息取自公开资讯</span>
+        </p>
+
+        <div class="hero__champ" id="champ-banner">
+          <span class="hero__champ-label">今日冠军</span>
+          <span class="hero__champ-name" id="champ-name">--</span>
+        </div>
+
+        <div class="nation-strip" id="nation-strip">
+          <div class="nation-pill nation-pill--main">
+            <span class="nation-pill__label">今日大盘</span>
+            <span class="nation-pill__row">
+              <span class="nation-pill__value mtsi-font" id="nation-box">--</span>
+              <span class="nation-pill__unit js-nation-unit">万</span>
+            </span>
+          </div>
+          <div class="nation-pill" id="champ-box-pill">
+            <span class="nation-pill__label">冠军票房</span>
+            <span class="nation-pill__row">
+              <span class="nation-pill__value mtsi-font" id="champ-box">--</span>
+              <span class="nation-pill__unit" id="champ-box-unit">万</span>
+            </span>
+          </div>
+          <div class="nation-pill" id="nation-shows-pill">
+            <span class="nation-pill__label">排片</span>
+            <span class="nation-pill__value" id="nation-shows">--</span>
+          </div>
+          <div class="nation-pill" id="nation-views-pill">
+            <span class="nation-pill__label">观影人次</span>
+            <span class="nation-pill__value" id="nation-views">--</span>
+          </div>
+        </div>
+
+        <p class="hero__time" id="update-time">实时更新 --:--:--</p>
+      </section>
+
+      <div id="status" class="status status--loading">正在启动票房服务…</div>
+
+      <section class="race-list" id="race-list" aria-label="票房榜前十"></section>
+
+      <footer class="stage-footer">
+        数据仅供娱乐参考，非官方统计，以实际上映为准
+      </footer>
+
+      <div class="delta-overlay" id="delta-overlay" aria-hidden="true"></div>
     </div>
 
-    <script type="module">
-      const mode = new URLSearchParams(location.search).get("preview");
-      if (mode === "admin") {
-        import("./admin-preview.js");
-      } else {
-        import("./app.js");
-      }
-    </script>
+    <script type="module" src="app.js"></script>
   </body>
 </html>
