@@ -16,6 +16,10 @@ function sha256Of(content) {
   return crypto.createHash("sha256").update(content).digest("hex");
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function withTempEnv(fn) {
   const appData = fs.mkdtempSync(path.join(os.tmpdir(), "maoyan-health-"));
   const prev = process.env.LOCALAPPDATA;
@@ -46,17 +50,28 @@ function reloadModules() {
   }
 }
 
-async function testApplyOrderAndHealthFlow() {
+async function waitForPending(health, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const pending = health.readPendingUpdate();
+    if (pending?.token) return pending;
+    await sleep(20);
+  }
+  throw new Error("pending update never appeared");
+}
+
+async function testApplyOrderAndHealthHandshake() {
   await withTempEnv(async () => {
     reloadModules();
     const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "maoyan-install-"));
+    const health = require("../lib/update/health");
+    const realConsumeHealthOk = health.consumeHealthOk;
     const {
       runApplyUpdate,
       _resetApplyTestState,
       _setApplyTestDeps,
       _getApplyActionLog,
     } = require("../lib/update/apply");
-    const health = require("../lib/update/health");
 
     _resetApplyTestState();
 
@@ -72,28 +87,26 @@ async function testApplyOrderAndHealthFlow() {
     makeFile(source, newBinary);
     makeFile(versionFile, "1.0");
 
-    let launchCalled = false;
     let pendingBeforeLaunch = false;
+    let allowHelperConsume = false;
 
     _setApplyTestDeps({
       waitForPidExit: async () => "EXITED",
-      killProcess: async () => {},
-      sleep: async (ms) => {
-        if (ms > 100) return;
-        await new Promise((r) => setTimeout(r, ms));
+      killProcess: async () => true,
+      sleep,
+      consumeHealthOk: (token) => {
+        if (!allowHelperConsume) return null;
+        return realConsumeHealthOk(token);
       },
       launchExeOnce: () => {
         pendingBeforeLaunch = Boolean(health.readPendingUpdate()?.token);
-        launchCalled = true;
         return 4242;
-      },
-      readHealthOk: (token) => {
-        if (!launchCalled) return null;
-        return { ok: true, token };
       },
     });
 
-    const code = await runApplyUpdate({
+    process.env.PORTABLE_EXECUTABLE_FILE = target;
+
+    const applyPromise = runApplyUpdate({
       oldPid: 9999,
       installDir,
       exeName: "MaoyanOverlay.exe",
@@ -103,29 +116,39 @@ async function testApplyOrderAndHealthFlow() {
       previousVersion: "1.0",
     });
 
+    const pending = await waitForPending(health);
+    const token = pending.token;
+    assert.strictEqual(pendingBeforeLaunch, true, "pending must exist before launch");
+    assert.ok(!fs.existsSync(health.healthOkPath(token)), "health ack must not exist before confirm");
+
+    const confirmed = await health.confirmUpdateHealth();
+    assert.strictEqual(confirmed, true);
+    assert.ok(
+      fs.existsSync(health.healthOkPath(token)),
+      "confirmUpdateHealth must leave health ack for helper to consume",
+    );
+
+    allowHelperConsume = true;
+
+    const code = await applyPromise;
     const log = _getApplyActionLog();
     const launchIdx = log.indexOf("LAUNCH_NEW");
     const pendingIdx = log.indexOf("WRITE_PENDING");
     assert.ok(pendingIdx >= 0 && launchIdx > pendingIdx, `bad order: ${log.join(">")}`);
-    assert.strictEqual(pendingBeforeLaunch, true, "pending must exist before launch");
     assert.strictEqual(code, 0);
-    assert.ok(fs.existsSync(bak), ".bak kept until new app confirms health");
-
-    process.env.PORTABLE_EXECUTABLE_FILE = target;
-    const confirmed = await health.confirmUpdateHealth();
-    assert.strictEqual(confirmed, true);
-    assert.ok(!fs.existsSync(bak), ".bak removed after new app confirms health");
+    assert.ok(!fs.existsSync(bak));
+    assert.ok(!health.readPendingUpdate());
+    assert.ok(!fs.existsSync(health.healthOkPath(token)), "helper must consume health ack");
     assert.strictEqual(fs.readFileSync(versionFile, "utf-8"), "1.1");
     assert.strictEqual(fs.readFileSync(target, "utf-8"), newBinary);
-    assert.ok(!health.readPendingUpdate());
-    delete process.env.PORTABLE_EXECUTABLE_FILE;
 
+    delete process.env.PORTABLE_EXECUTABLE_FILE;
     fs.rmSync(installDir, { recursive: true, force: true });
   });
-  console.log("OK: apply order pending-before-launch and health flow");
+  console.log("OK: real confirmUpdateHealth handshake consumed by helper");
 }
 
-async function testHealthTimeoutRollback() {
+async function testHealthTimeoutRollbackSuccess() {
   await withTempEnv(async () => {
     reloadModules();
     const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "maoyan-install-"));
@@ -133,10 +156,12 @@ async function testHealthTimeoutRollback() {
       runApplyUpdate,
       _resetApplyTestState,
       _setApplyTestDeps,
+      _setHealthWaitTimeoutMs,
     } = require("../lib/update/apply");
     const health = require("../lib/update/health");
 
     _resetApplyTestState();
+    _setHealthWaitTimeoutMs(400);
 
     const oldBinary = "old-binary-v1.0";
     const newBinary = "new-binary-v1.1";
@@ -154,10 +179,10 @@ async function testHealthTimeoutRollback() {
       waitForPidExit: async () => "EXITED",
       killProcess: async (pid) => {
         killedPid = pid;
+        return true;
       },
-      sleep: async () => {},
+      sleep,
       launchExeOnce: () => 5151,
-      readHealthOk: () => null,
     });
 
     const code = await runApplyUpdate({
@@ -178,7 +203,105 @@ async function testHealthTimeoutRollback() {
     assert.ok(!health.readPendingUpdate());
     fs.rmSync(installDir, { recursive: true, force: true });
   });
-  console.log("OK: health timeout rolls back exe and version.txt");
+  console.log("OK: health timeout rollback success path");
+}
+
+async function testRollbackBlockedWhenKillFails() {
+  await withTempEnv(async () => {
+    reloadModules();
+    const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "maoyan-install-"));
+    const {
+      rollbackFailedHealthUpdate,
+      _resetApplyTestState,
+      _setApplyTestDeps,
+      UPDATE_ROLLBACK_BLOCKED_PROCESS_ALIVE,
+    } = require("../lib/update/apply");
+    const health = require("../lib/update/health");
+
+    _resetApplyTestState();
+    makeFile(path.join(installDir, "MaoyanOverlay.exe"), "broken-new");
+    makeFile(path.join(installDir, "MaoyanOverlay.exe.bak"), "old-good");
+    makeFile(path.join(installDir, "version.txt"), "1.0");
+    health.writePendingUpdate({
+      token: "blocked",
+      installDir,
+      exeName: "MaoyanOverlay.exe",
+      targetVersion: "1.1",
+      previousVersion: "1.0",
+      expectedSha256: "aa",
+    });
+
+    _setApplyTestDeps({
+      killProcess: async () => false,
+      sleep,
+    });
+
+    const code = await rollbackFailedHealthUpdate({
+      installDir,
+      exeName: "MaoyanOverlay.exe",
+      target: path.join(installDir, "MaoyanOverlay.exe"),
+      bak: path.join(installDir, "MaoyanOverlay.exe.bak"),
+      previousVersion: "1.0",
+      newPid: 7777,
+      reason: "test kill blocked",
+    });
+
+    assert.strictEqual(code, UPDATE_ROLLBACK_BLOCKED_PROCESS_ALIVE);
+    assert.ok(fs.existsSync(path.join(installDir, "MaoyanOverlay.exe.bak")));
+    assert.ok(health.readPendingUpdate());
+    assert.strictEqual(fs.readFileSync(path.join(installDir, "MaoyanOverlay.exe"), "utf-8"), "broken-new");
+    fs.rmSync(installDir, { recursive: true, force: true });
+  });
+  console.log("OK: kill failure keeps pending and bak");
+}
+
+async function testRollbackBlockedWhenRestoreFails() {
+  await withTempEnv(async () => {
+    reloadModules();
+    const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "maoyan-install-"));
+    const {
+      rollbackFailedHealthUpdate,
+      _resetApplyTestState,
+      _setApplyTestDeps,
+      UPDATE_ROLLBACK_FAILED,
+    } = require("../lib/update/apply");
+    const health = require("../lib/update/health");
+
+    _resetApplyTestState();
+    const target = path.join(installDir, "MaoyanOverlay.exe");
+    makeFile(target, "broken-new");
+    makeFile(path.join(installDir, "version.txt"), "1.0");
+    health.writePendingUpdate({
+      token: "restore-fail",
+      installDir,
+      exeName: "MaoyanOverlay.exe",
+      targetVersion: "1.1",
+      previousVersion: "1.0",
+      expectedSha256: "aa",
+    });
+
+    _setApplyTestDeps({
+      killProcess: async () => true,
+      sleep,
+    });
+
+    const code = await rollbackFailedHealthUpdate({
+      installDir,
+      exeName: "MaoyanOverlay.exe",
+      target,
+      bak: path.join(installDir, "MaoyanOverlay.exe.bak"),
+      previousVersion: "1.0",
+      newPid: 8888,
+      reason: "test restore fail",
+    });
+
+    assert.strictEqual(code, UPDATE_ROLLBACK_FAILED);
+    assert.ok(health.readPendingUpdate());
+    assert.strictEqual(fs.readFileSync(target, "utf-8"), "broken-new");
+    assert.strictEqual(fs.readFileSync(path.join(installDir, "version.txt"), "utf-8"), "1.0");
+    fs.rmSync(installDir, { recursive: true, force: true });
+  });
+  console.log("OK: rollbackFromBackup failure keeps pending and bak");
 }
 
 async function testStalePendingShaRejected() {
@@ -186,7 +309,6 @@ async function testStalePendingShaRejected() {
     reloadModules();
     const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "maoyan-install-"));
     const health = require("../lib/update/health");
-    const { hashFile } = require("../lib/update/downloader");
 
     const exePath = path.join(installDir, "MaoyanOverlay.exe");
     const bak = path.join(installDir, "MaoyanOverlay.exe.bak");
@@ -201,7 +323,6 @@ async function testStalePendingShaRejected() {
       previousVersion: "1.0",
       expectedSha256: "deadbeef".repeat(8),
     });
-    assert.ok(health.readPendingUpdate(), "pending must exist before confirm");
 
     process.env.PORTABLE_EXECUTABLE_FILE = exePath;
     delete require.cache[require.resolve("../lib/update/paths")];
@@ -210,8 +331,8 @@ async function testStalePendingShaRejected() {
 
     const ok = await healthLive.confirmUpdateHealth();
     assert.strictEqual(ok, false);
-    assert.ok(fs.existsSync(bak), "stale pending must not delete backup");
-    assert.ok(healthLive.readPendingUpdate(), "stale pending must remain after failed confirm");
+    assert.ok(fs.existsSync(bak));
+    assert.ok(healthLive.readPendingUpdate());
     delete process.env.PORTABLE_EXECUTABLE_FILE;
     fs.rmSync(installDir, { recursive: true, force: true });
   });
@@ -246,8 +367,10 @@ async function testPendingBlocksSecondReplace() {
 }
 
 async function main() {
-  await testApplyOrderAndHealthFlow();
-  await testHealthTimeoutRollback();
+  await testApplyOrderAndHealthHandshake();
+  await testHealthTimeoutRollbackSuccess();
+  await testRollbackBlockedWhenKillFails();
+  await testRollbackBlockedWhenRestoreFails();
   await testStalePendingShaRejected();
   await testPendingBlocksSecondReplace();
   console.log("\nALL PASSED (updater health rollback)");

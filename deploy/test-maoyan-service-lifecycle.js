@@ -86,15 +86,49 @@ async function testShutdownWaitBeforeRestart() {
     exitSeen = true;
   });
 
+  svc._testSetWaitForPidGone(async () => true);
   svc._testSetState({ maoyanProcess: oldChild, startedByUs: true, apiStatus: { ready: true } });
-  await svc.shutdownMaoyanServiceAndWait(1000);
+  const stopped = await svc.shutdownMaoyanServiceAndWait(200);
 
   const state = svc._testGetState();
+  assert.strictEqual(stopped, true);
   assert.strictEqual(exitSeen, true);
   assert.strictEqual(state.maoyanProcess, null);
   assert.strictEqual(state.startedByUs, false);
   assert.strictEqual(state.apiStatus.ready, false);
   console.log("OK: shutdownMaoyanServiceAndWait clears own child state after exit");
+}
+
+async function testStuckChildBlocksRestart() {
+  const svc = loadService();
+  svc._testResetMaoyanState();
+
+  const stuckChild = makeFakeChild(4001);
+  stuckChild.kill = () => true;
+
+  let maoyanStartCount = 0;
+  svc._testSetWaitForPidGone(async () => false);
+  svc._testSetSpawn((cmd, args) => {
+    if (cmd === "taskkill") return makeFakeChild(0);
+    maoyanStartCount += 1;
+    return makeFakeChild(4002);
+  });
+  svc._testSetCheckHealth(async () => false);
+  svc._testSetState({
+    maoyanProcess: stuckChild,
+    startedByUs: true,
+    apiStatus: { ready: true, error: "", apiBase: "http://127.0.0.1:8765" },
+  });
+
+  const stopped = await svc.shutdownMaoyanServiceAndWait(200);
+  assert.strictEqual(stopped, false);
+
+  const status = await svc.ensureMaoyanService({ apiBase: "http://127.0.0.1:8765" });
+  assert.strictEqual(status.ready, false);
+  assert.match(status.error, /未能退出/);
+  assert.strictEqual(maoyanStartCount, 0);
+  assert.strictEqual(svc._testGetState().maoyanProcess, stuckChild);
+  console.log("OK: stuck own child blocks new maoyan spawn");
 }
 
 async function testUnknownServiceNotKilled() {
@@ -118,6 +152,7 @@ async function main() {
   testOldChildExitDoesNotPolluteNewChild();
   await testHealthFailureKillsOwnProcessOnly();
   await testShutdownWaitBeforeRestart();
+  await testStuckChildBlocksRestart();
   await testUnknownServiceNotKilled();
   console.log("\nALL PASSED (maoyan service lifecycle)");
 }

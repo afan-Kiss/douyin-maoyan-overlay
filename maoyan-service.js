@@ -14,6 +14,7 @@ let apiStatus = { ready: false, error: "", apiBase: "http://127.0.0.1:8765" };
 
 let _spawnImpl = spawn;
 let _checkHealthImpl = null;
+let _testWaitForPidGoneFn = null;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -230,6 +231,9 @@ function startMaoyanProcess(dir) {
 }
 
 async function waitForPidGone(pid, timeoutMs = 10000) {
+  if (_testWaitForPidGoneFn) {
+    return _testWaitForPidGoneFn(pid, timeoutMs);
+  }
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (!pid) return true;
@@ -274,7 +278,7 @@ function shutdownMaoyanService() {
 }
 
 async function shutdownMaoyanServiceAndWait(timeoutMs = 10000) {
-  if (!startedByUs || !maoyanProcess) return;
+  if (!startedByUs || !maoyanProcess) return true;
 
   const child = maoyanProcess;
   const pid = child.pid;
@@ -305,13 +309,19 @@ async function shutdownMaoyanServiceAndWait(timeoutMs = 10000) {
     setTimeout(done, timeoutMs);
   });
 
-  await waitForPidGone(pid, timeoutMs);
-
-  if (maoyanProcess === child) {
-    maoyanProcess = null;
-    startedByUs = false;
-    apiStatus.ready = false;
+  const gone = await waitForPidGone(pid, timeoutMs);
+  if (gone) {
+    if (maoyanProcess === child) {
+      maoyanProcess = null;
+      startedByUs = false;
+      apiStatus.ready = false;
+    }
+    return true;
   }
+
+  apiStatus.ready = false;
+  apiStatus.error = "旧票房服务进程未能退出，请稍后重试";
+  return false;
 }
 
 async function waitForHealth(apiBase, timeoutMs = 90000) {
@@ -349,7 +359,11 @@ async function ensureMaoyanServiceInner(config) {
   }
 
   if (maoyanProcess) {
-    await shutdownMaoyanServiceAndWait();
+    const stopped = await shutdownMaoyanServiceAndWait();
+    if (!stopped) {
+      apiStatus.error = "旧票房服务进程未能退出，请稍后重试";
+      return apiStatus;
+    }
   }
 
   const maoyanDir = resolveMaoyanDir();
@@ -448,6 +462,7 @@ function _testResetMaoyanState() {
   apiStatus = { ready: false, error: "", apiBase: "http://127.0.0.1:8765" };
   _spawnImpl = spawn;
   _checkHealthImpl = null;
+  _testWaitForPidGoneFn = null;
 }
 
 function _testGetState() {
@@ -483,6 +498,10 @@ function _testSetCheckHealth(fn) {
   _checkHealthImpl = fn || null;
 }
 
+function _testSetWaitForPidGone(fn) {
+  _testWaitForPidGoneFn = fn || null;
+}
+
 module.exports = {
   ensureMaoyanService,
   getApiStatus,
@@ -500,6 +519,7 @@ module.exports = {
   _testHandleChildExit,
   _testSetSpawn,
   _testSetCheckHealth,
+  _testSetWaitForPidGone,
   DATA_DIR: LEGACY_DATA_DIR,
   SERVER_DIR,
 };
