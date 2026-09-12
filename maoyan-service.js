@@ -84,6 +84,21 @@ function resolveNodeBin() {
   return "node";
 }
 
+function resolveCmdExe() {
+  const comspec = String(process.env.ComSpec || "").trim();
+  if (comspec) {
+    try {
+      if (fs.existsSync(comspec)) return comspec;
+    } catch {
+      /* ignore */
+    }
+  }
+  const systemRoot = process.env.SystemRoot || process.env.windir || "C:\\Windows";
+  const fallback = path.join(systemRoot, "System32", "cmd.exe");
+  if (fs.existsSync(fallback)) return fallback;
+  return "cmd.exe";
+}
+
 function resolveRuntime() {
   if (isElectronPackaged()) {
     return {
@@ -411,13 +426,16 @@ function startMaoyanLogin() {
       .join(" && ");
     const cmdLine = `title 猫眼登录 && ${envLines}`;
 
-    const child = spawn("cmd.exe", ["/c", "start", "cmd", "/k", cmdLine], {
+    const cmdExe = resolveCmdExe();
+    const child = spawn(cmdExe, ["/c", "start", "cmd", "/k", cmdLine], {
       cwd: SERVER_DIR,
       detached: true,
       stdio: "ignore",
       windowsHide: false,
       env: {
         ...process.env,
+        ComSpec: cmdExe,
+        SystemRoot: process.env.SystemRoot || process.env.windir || "C:\\Windows",
         ...runtime.env,
         MAOYAN_DATA_DIR: dataDir,
       },
