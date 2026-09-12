@@ -9,20 +9,20 @@
   --bubble-float: 44px;
 
   /* 直播大字号：在 10 卡密度下仍保证主信息可读 */
-  --font-hero-title: 56px;
-  --font-hero-sub: 18px;
-  --font-nation-box: 32px;
-  --font-nation-label: 14px;
-  --font-movie-title: 24px;
-  --font-movie-rank: 17px;
-  --font-region: 18px;
+  --font-hero-title: 48px;
+  --font-hero-sub: 16px;
+  --font-nation-box: 28px;
+  --font-nation-label: 12px;
+  --font-movie-title: 22px;
+  --font-movie-rank: 15px;
+  --font-region: 16px;
   --font-metric-label: 11px;
-  --font-metric-value: 13px;
+  --font-metric-value: 12px;
   --font-table: 11px;
-  --font-delta: 14px;
-  --font-footer: 13px;
-  --font-time: 14px;
-  --font-champ: 17px;
+  --font-delta: 13px;
+  --font-footer: 12px;
+  --font-time: 12px;
+  --font-champ: 15px;
 
   --font-sans: "HarmonyOS Sans SC", "HarmonyOS Sans", "PingFang SC", "Microsoft YaHei", sans-serif;
   --color-frame-border: rgba(214, 169, 72, 0.38);
@@ -197,7 +197,7 @@ body {
 
 .hero {
   flex: 0 0 auto;
-  padding: 6px 12px 2px;
+  padding: 4px 12px 2px;
   text-align: center;
   -webkit-app-region: drag;
 }
@@ -429,7 +429,7 @@ body {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 3px;
   padding: 2px 10px 2px;
   -webkit-app-region: no-drag;
 }
@@ -441,7 +441,7 @@ body {
   flex-direction: column;
   justify-content: flex-start;
   gap: 2px;
-  padding: 3px 8px 3px;
+  padding: 3px 7px 2px;
   border-radius: 10px;
   background: var(--color-card-bg);
   border: 1px solid var(--color-card-border);
@@ -644,8 +644,8 @@ body {
 .race-card__metrics {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 2px 4px;
-  padding: 1px 0 2px;
+  gap: 1px 4px;
+  padding: 0 0 1px;
   min-width: 0;
   overflow: visible;
   position: relative;
@@ -657,23 +657,24 @@ body {
   min-width: 0;
   text-align: left;
   display: flex;
-  flex-direction: column;
-  gap: 0;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 3px;
 }
 
 .metric__label {
-  display: block;
+  display: inline;
+  flex: 0 0 auto;
   font-size: var(--font-metric-label);
   color: var(--text-mute);
   font-weight: 600;
-  line-height: 1.05;
+  line-height: 1.15;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .metric__value {
-  display: block;
+  display: inline;
+  min-width: 0;
   font-size: var(--font-metric-value);
   color: var(--color-metric-value);
   font-weight: 750;
@@ -681,7 +682,7 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  line-height: 1.05;
+  line-height: 1.15;
 }
 
 .metric__value .trend--up {
@@ -717,21 +718,21 @@ body {
   table-layout: fixed;
   font-size: var(--font-table);
   font-variant-numeric: tabular-nums;
-  line-height: 1.2;
+  line-height: 1.15;
 }
 
 .race-card__table thead th {
   background: #6e1c24;
   color: var(--gold-bright);
   font-weight: 700;
-  padding: 2px 2px;
+  padding: 1px 2px;
   text-align: center;
   white-space: nowrap;
   border-bottom: 1px solid rgba(212, 168, 90, 0.35);
 }
 
 .race-card__table tbody td {
-  padding: 2px 2px;
+  padding: 1px 2px;
   text-align: center;
   color: rgba(255, 240, 220, 0.92);
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
@@ -834,16 +835,16 @@ body {
 
 @media (min-width: 900px) {
   :root {
-    --font-hero-title: 64px;
-    --font-hero-sub: 20px;
-    --font-nation-box: 34px;
-    --font-movie-title: 26px;
-    --font-movie-rank: 18px;
-    --font-region: 20px;
-    --font-metric-label: 12px;
-    --font-metric-value: 14px;
-    --font-table: 12px;
-    --font-delta: 15px;
-    --font-champ: 18px;
+    --font-hero-title: 52px;
+    --font-hero-sub: 17px;
+    --font-nation-box: 30px;
+    --font-movie-title: 22px;
+    --font-movie-rank: 16px;
+    --font-region: 17px;
+    --font-metric-label: 11px;
+    --font-metric-value: 12px;
+    --font-table: 11px;
+    --font-delta: 13px;
+    --font-champ: 16px;
   }
 }
