@@ -5,6 +5,7 @@ const {
   saveSettings,
   DEFAULT_SETTINGS,
   stripSensitiveSettings,
+  FONT_RANGES,
 } = require("./lib/settings");
 const {
   issueUpdateCommand,
@@ -50,6 +51,10 @@ function startAdminServer(options = {}) {
 
   app.get("/api/settings/defaults", (_req, res) => {
     res.json(stripSensitiveSettings(DEFAULT_SETTINGS));
+  });
+
+  app.get("/api/settings/font-ranges", (_req, res) => {
+    res.json(FONT_RANGES);
   });
 
   app.post("/api/settings", (req, res) => {

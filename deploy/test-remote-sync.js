@@ -163,11 +163,142 @@ async function testRemoteSyncClient() {
   }
 }
 
+async function testSameRevisionDifferentContent() {
+  const settingsPath = path.join(
+    fs.mkdtempSync(path.join(os.tmpdir(), "maoyan-sync-")),
+    "overlay-settings.json",
+  );
+  writeSettings(settingsPath, {
+    schemaVersion: 2,
+    revision: 10,
+    fonts: { heroTitle: 50 },
+    admin: { port: 8783, password: "" },
+  });
+
+  const admin = await startAdminWithPath(settingsPath);
+  const clientPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "maoyan-client-")), "overlay-settings.json");
+  writeSettings(clientPath, {
+    schemaVersion: 2,
+    revision: 10,
+    fonts: { heroTitle: 50 },
+  });
+
+  try {
+    process.env.MAOYAN_SETTINGS_PATH = clientPath;
+    delete require.cache[require.resolve("../lib/settings")];
+    delete require.cache[require.resolve("../lib/remote-sync")];
+
+    writeSettings(settingsPath, {
+      schemaVersion: 2,
+      revision: 10,
+      fonts: { heroTitle: 64 },
+      admin: { port: 8783, password: "" },
+    });
+    delete require.cache[require.resolve("../lib/settings")];
+
+    const { startRemoteSync, stopRemoteSync } = require("../lib/remote-sync");
+    let changed = false;
+    startRemoteSync(admin.baseUrl, () => {
+      changed = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    stopRemoteSync();
+
+    delete require.cache[require.resolve("../lib/settings")];
+    const client = require("../lib/settings").loadSettings();
+    assert.strictEqual(client.fonts.heroTitle, 64);
+    assert.strictEqual(changed, true);
+    console.log("OK: first remote sync applies even when revision matches local");
+  } finally {
+    admin.close();
+    delete process.env.MAOYAN_SETTINGS_PATH;
+  }
+}
+
+async function testStaleRequestDiscardedAfterSwitch() {
+  const pathA = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "maoyan-sync-")), "overlay-settings.json");
+  const pathB = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "maoyan-sync-")), "overlay-settings.json");
+  writeSettings(pathA, {
+    schemaVersion: 2,
+    revision: 5,
+    fonts: { heroTitle: 11 },
+    admin: { port: 8784, password: "" },
+  });
+  writeSettings(pathB, {
+    schemaVersion: 2,
+    revision: 99,
+    fonts: { heroTitle: 77 },
+    admin: { port: 8785, password: "" },
+  });
+
+  const adminA = await startAdminWithPath(pathA);
+  const adminB = await startAdminWithPath(pathB);
+  const clientPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "maoyan-client-")), "overlay-settings.json");
+  writeSettings(clientPath, {
+    schemaVersion: 2,
+    revision: 1,
+    fonts: { heroTitle: 30 },
+  });
+
+  try {
+    process.env.MAOYAN_SETTINGS_PATH = clientPath;
+    delete require.cache[require.resolve("../lib/settings")];
+    delete require.cache[require.resolve("../lib/remote-sync")];
+
+    const originalFetch = global.fetch;
+    let releaseSlowA;
+    global.fetch = async (url, options) => {
+      const href = String(url);
+      if (href.startsWith(adminA.baseUrl)) {
+        await new Promise((resolve, reject) => {
+          const signal = options?.signal;
+          if (signal?.aborted) {
+            reject(Object.assign(new Error("Aborted"), { name: "AbortError" }));
+            return;
+          }
+          const onAbort = () => {
+            signal?.removeEventListener("abort", onAbort);
+            reject(Object.assign(new Error("Aborted"), { name: "AbortError" }));
+          };
+          signal?.addEventListener("abort", onAbort);
+          releaseSlowA = () => {
+            signal?.removeEventListener("abort", onAbort);
+            resolve();
+          };
+        });
+      }
+      return originalFetch(url, options);
+    };
+
+    const { startRemoteSync, stopRemoteSync } = require("../lib/remote-sync");
+    startRemoteSync(adminA.baseUrl);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    stopRemoteSync();
+    startRemoteSync(adminB.baseUrl);
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    if (releaseSlowA) releaseSlowA();
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    stopRemoteSync();
+    global.fetch = originalFetch;
+
+    delete require.cache[require.resolve("../lib/settings")];
+    const client = require("../lib/settings").loadSettings();
+    assert.strictEqual(client.fonts.heroTitle, 77);
+    console.log("OK: stale remote A response does not override remote B");
+  } finally {
+    adminA.close();
+    adminB.close();
+    delete process.env.MAOYAN_SETTINGS_PATH;
+  }
+}
+
 async function main() {
   const settingsPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "maoyan-sync-")), "overlay-settings.json");
   await testPasswordMaskRoundTrip(settingsPath);
   await testRevisionMonotonic();
   await testRemoteSyncClient();
+  await testSameRevisionDifferentContent();
+  await testStaleRequestDiscardedAfterSwitch();
   console.log("\nALL PASSED (remote sync)");
 }
 

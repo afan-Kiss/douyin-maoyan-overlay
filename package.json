@@ -15,6 +15,10 @@
     "test:migration": "node deploy/test-settings-migration.js",
     "test:remote-sync": "node deploy/test-remote-sync.js",
     "test:updater-edge": "node deploy/test-updater-edge.js",
+    "test:updater-health": "node deploy/test-updater-health-rollback.js",
+    "test:update-push": "node deploy/test-update-push-singleflight.js",
+    "test:maoyan-lifecycle": "node deploy/test-maoyan-service-lifecycle.js",
+    "test:admin-ranges": "node deploy/test-admin-font-ranges.js",
     "push:github": "node deploy/push-github.js"
   },
   "dependencies": {

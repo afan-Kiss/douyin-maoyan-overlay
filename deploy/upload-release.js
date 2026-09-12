@@ -153,20 +153,49 @@ async function main() {
   console.log(`上传 ${uniqueName} (${(fileSize / 1024 / 1024).toFixed(1)} MB) …`);
   await uploadFile(sftp, exePath, `${REMOTE_DIR}/${uniqueName}`);
 
+  const remoteExe = `${REMOTE_DIR}/${uniqueName}`;
+  const statOut = await exec(conn, `stat -c '%s' '${remoteExe}'`);
+  const remoteSize = Number(String(statOut).trim());
+  if (!Number.isFinite(remoteSize) || remoteSize !== fileSize) {
+    throw new Error(
+      `远程 EXE 大小校验失败: local=${fileSize} remote=${statOut.trim()}`,
+    );
+  }
+  console.log(`远程 EXE 大小校验通过: ${remoteSize} bytes`);
+
+  const exeVerify = await exec(
+    conn,
+    `curl -sk 'https://127.0.0.1/maoyan-updates/${uniqueName}' -H 'Host: xiangyuzhubao.xyz' -o /dev/null -w 'EXE_HTTP=%{http_code} SIZE=%{size_download}\\n'`,
+  );
+  const exeHttpMatch = /EXE_HTTP=(\d+)/.exec(exeVerify);
+  const exeSizeMatch = /SIZE=(\d+)/.exec(exeVerify);
+  const exeHttp = exeHttpMatch ? Number(exeHttpMatch[1]) : 0;
+  const exeDownloaded = exeSizeMatch ? Number(exeSizeMatch[1]) : 0;
+  if (exeHttp !== 200 || exeDownloaded !== fileSize) {
+    throw new Error(
+      `远程 EXE HTTP 校验失败: http=${exeHttp} size=${exeDownloaded} expected=${fileSize}`,
+    );
+  }
+  console.log("远程 EXE HTTP/大小校验通过");
+
   const remoteManifestTmp = `${REMOTE_DIR}/latest.json.tmp`;
   const remoteManifest = `${REMOTE_DIR}/latest.json`;
   console.log("上传 latest.json（临时文件）…");
   await uploadFile(sftp, manifestPath, remoteManifestTmp);
   await exec(conn, `mv -f '${remoteManifestTmp}' '${remoteManifest}'`);
 
-  await exec(
-    conn,
-    `curl -sk 'https://127.0.0.1/maoyan-updates/${uniqueName}' -H 'Host: xiangyuzhubao.xyz' -o /dev/null -w 'EXE_HTTP=%{http_code} SIZE=%{size_download}\\n'`,
-  );
-  await exec(
+  const manifestVerify = await exec(
     conn,
     `curl -sk 'https://127.0.0.1/maoyan-updates/latest.json' -H 'Host: xiangyuzhubao.xyz'`,
   );
+  const parsed = JSON.parse(manifestVerify);
+  if (String(parsed.sha256).toLowerCase() !== sha256.toLowerCase()) {
+    throw new Error("latest.json manifest sha256 校验失败");
+  }
+  if (String(parsed.fileName) !== uniqueName) {
+    throw new Error("latest.json manifest fileName 校验失败");
+  }
+  console.log("latest.json manifest 校验通过");
 
   await pushUpdateCommand(conn, version);
   conn.end();

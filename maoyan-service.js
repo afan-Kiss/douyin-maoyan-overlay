@@ -208,9 +208,8 @@ function startMaoyanProcess(dir) {
     });
 
     child.on("exit", (code) => {
-      if (maoyanProcess === child) {
-        maoyanProcess = null;
-      }
+      if (maoyanProcess !== child) return;
+      maoyanProcess = null;
       if (startedByUs) {
         startedByUs = false;
         apiStatus.ready = false;
@@ -286,31 +285,36 @@ async function ensureMaoyanServiceInner(config) {
   return apiStatus;
 }
 
+function quoteCmdPath(value) {
+  return `"${String(value).replace(/"/g, '""')}"`;
+}
+
 function startMaoyanLogin() {
   const dataDir = getDataDir();
   fs.mkdirSync(dataDir, { recursive: true });
   const runtime = resolveRuntime();
-  const quotedBin = runtime.bin.includes(" ") ? `"${runtime.bin}"` : runtime.bin;
-  const envPrefix = runtime.env.ELECTRON_RUN_AS_NODE
-    ? `set ELECTRON_RUN_AS_NODE=1&& set MAOYAN_DATA_DIR=${dataDir}&& `
-    : `set MAOYAN_DATA_DIR=${dataDir}&& `;
 
   if (process.platform === "win32") {
-    const child = spawn(
-      "cmd.exe",
-      ["/c", "start", "cmd", "/k", `title 猫眼登录 && ${envPrefix}${quotedBin} login.js`],
-      {
-        cwd: SERVER_DIR,
-        detached: true,
-        stdio: "ignore",
-        windowsHide: false,
-        env: {
-          ...process.env,
-          ...runtime.env,
-          MAOYAN_DATA_DIR: dataDir,
-        },
+    const envLines = [
+      `set "MAOYAN_DATA_DIR=${dataDir.replace(/"/g, '""')}"`,
+      runtime.env.ELECTRON_RUN_AS_NODE ? 'set "ELECTRON_RUN_AS_NODE=1"' : null,
+      `${quoteCmdPath(runtime.bin)} login.js`,
+    ]
+      .filter(Boolean)
+      .join(" && ");
+    const cmdLine = `title 猫眼登录 && ${envLines}`;
+
+    const child = spawn("cmd.exe", ["/c", "start", "cmd", "/k", cmdLine], {
+      cwd: SERVER_DIR,
+      detached: true,
+      stdio: "ignore",
+      windowsHide: false,
+      env: {
+        ...process.env,
+        ...runtime.env,
+        MAOYAN_DATA_DIR: dataDir,
       },
-    );
+    });
     child.unref();
     return { ok: true };
   }
@@ -336,8 +340,9 @@ async function getApiStatus() {
     if (!alive) {
       apiStatus.ready = false;
       apiStatus.error = "票房服务已断开，正在尝试恢复…";
-      startedByUs = false;
-      maoyanProcess = null;
+      if (startedByUs && maoyanProcess) {
+        shutdownMaoyanService();
+      }
     }
   }
   return { ...apiStatus, loggedIn };
@@ -369,6 +374,13 @@ function shutdownMaoyanService() {
   startedByUs = false;
 }
 
+function _testResetMaoyanState() {
+  maoyanProcess = null;
+  startedByUs = false;
+  ensurePromise = null;
+  apiStatus = { ready: false, error: "", apiBase: "http://127.0.0.1:8765" };
+}
+
 module.exports = {
   ensureMaoyanService,
   getApiStatus,
@@ -378,6 +390,7 @@ module.exports = {
   startMaoyanLogin,
   buildApiBase,
   getDataDir,
+  _testResetMaoyanState,
   DATA_DIR: LEGACY_DATA_DIR,
   SERVER_DIR,
 };

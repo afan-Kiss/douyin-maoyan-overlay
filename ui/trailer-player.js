@@ -29,6 +29,11 @@ let lastTop1Key = "";
 let playingMediaKey = "";
 let currentVideoSrc = "";
 let generation = 0;
+let activeLoadGeneration = -1;
+let activeLoadSrc = "";
+let activeLoadMediaKey = "";
+let activeLoadSeq = 0;
+let loadHandlers = [];
 
 function $(id) {
   return document.getElementById(id);
@@ -56,6 +61,107 @@ function schedule(fn, ms) {
 
 function isCurrentGeneration(gen = generation) {
   return gen === generation;
+}
+
+function resolveMediaUrl(src) {
+  if (!src) return "";
+  try {
+    return new URL(src, window.location.href).href;
+  } catch {
+    return String(src);
+  }
+}
+
+function urlsMatch(a, b) {
+  if (!a || !b) return false;
+  return resolveMediaUrl(a) === resolveMediaUrl(b);
+}
+
+function isActiveLoadEvent() {
+  if (activeLoadGeneration < 0 || activeLoadGeneration !== generation) return false;
+  const current = videoEl?.currentSrc || videoEl?.src || "";
+  return Boolean(activeLoadSrc && urlsMatch(activeLoadSrc, current));
+}
+
+function bindActiveLoad(item, gen = generation) {
+  activeLoadSeq += 1;
+  activeLoadGeneration = gen;
+  activeLoadSrc = item?.src || "";
+  activeLoadMediaKey = itemMediaKey(item);
+  return activeLoadSeq;
+}
+
+function clearActiveLoad() {
+  detachLoadEvents();
+  activeLoadGeneration = -1;
+  activeLoadSrc = "";
+  activeLoadMediaKey = "";
+  activeLoadSeq = 0;
+}
+
+function detachLoadEvents() {
+  if (!videoEl) return;
+  for (const { type, handler } of loadHandlers) {
+    videoEl.removeEventListener(type, handler);
+  }
+  loadHandlers = [];
+}
+
+function isBoundLoad(gen, loadSeq, loadSrc) {
+  const current = videoEl?.currentSrc || videoEl?.src || "";
+  return (
+    loadSeq === activeLoadSeq &&
+    gen === activeLoadGeneration &&
+    urlsMatch(loadSrc, activeLoadSrc) &&
+    urlsMatch(loadSrc, current)
+  );
+}
+
+function attachLoadEvents(gen, loadSeq, loadSrc) {
+  detachLoadEvents();
+  if (!videoEl) return;
+
+  const add = (type, handler) => {
+    videoEl.addEventListener(type, handler);
+    loadHandlers.push({ type, handler });
+  };
+
+  add("canplay", () => {
+    if (!isBoundLoad(gen, loadSeq, loadSrc) || !videoEl?.src) return;
+    switching = false;
+    hideEmpty();
+    fadeVideo(true);
+    schedule(() => tryPlay(gen), FADE_IN_MS);
+  });
+
+  add("playing", () => {
+    if (!isBoundLoad(gen, loadSeq, loadSrc)) return;
+    failStreak = 0;
+  });
+
+  add("ended", () => {
+    if (!isBoundLoad(gen, loadSeq, loadSrc) || switching || !playlist.length) return;
+    fadeVideo(false);
+    schedule(() => {
+      if (!isCurrentGeneration(gen) || !isBoundLoad(gen, loadSeq, loadSrc)) return;
+      if (playlist.length === 1) {
+        videoEl.currentTime = 0;
+        fadeVideo(true);
+        tryPlay(gen);
+        return;
+      }
+      switchToIndex(currentIndex + 1, true, gen);
+    }, FADE_OUT_MS);
+  });
+
+  add("error", () => {
+    if (!isBoundLoad(gen, loadSeq, loadSrc)) return;
+    const item = playlist[currentIndex];
+    advanceOnError(
+      `load failed: ${item?.title || "unknown"} (${item?.src || ""})`,
+      gen,
+    );
+  });
 }
 
 function clearFramePoster() {
@@ -94,6 +200,7 @@ function showNoTrailer(message = "暂无可播放预告") {
   playlist = [];
   playingMediaKey = "";
   currentVideoSrc = "";
+  clearActiveLoad();
 
   frameEl?.classList.add("trailer-section__main--empty");
   if (emptyEl) emptyEl.hidden = false;
@@ -132,7 +239,7 @@ function tryPlay(gen = generation) {
   if (ret && typeof ret.catch === "function") {
     ret.catch(() => {
       schedule(() => {
-        if (!isCurrentGeneration(gen)) return;
+        if (!isCurrentGeneration(gen) || !isActiveLoadEvent()) return;
         videoEl.play().catch(() => advanceOnError("autoplay blocked", gen));
       }, 400);
     });
@@ -173,15 +280,19 @@ function loadCurrent(fromSwitch, gen = generation) {
     schedule(() => {
       if (!isCurrentGeneration(gen)) return;
       currentVideoSrc = item.src;
+      const loadSeq = bindActiveLoad(item, gen);
       videoEl.src = item.src;
       videoEl.load();
+      attachLoadEvents(gen, loadSeq, item.src);
     }, FADE_OUT_MS);
     return;
   }
 
   currentVideoSrc = item.src;
+  const loadSeq = bindActiveLoad(item, gen);
   videoEl.src = item.src;
   videoEl.load();
+  attachLoadEvents(gen, loadSeq, item.src);
 }
 
 function switchToIndex(index, animate, gen = generation) {
@@ -217,52 +328,12 @@ function advanceOnError(reason, gen = generation) {
   switchToIndex(currentIndex + 1, true, gen);
 }
 
-function onCanPlay() {
-  const gen = generation;
-  if (!isCurrentGeneration(gen) || !videoEl?.src) return;
-  failStreak = 0;
-  switching = false;
-  hideEmpty();
-  fadeVideo(true);
-  schedule(() => tryPlay(gen), FADE_IN_MS);
-}
-
-function onEnded() {
-  const gen = generation;
-  if (!isCurrentGeneration(gen) || switching || !playlist.length) return;
-  fadeVideo(false);
-  schedule(() => {
-    if (!isCurrentGeneration(gen)) return;
-    if (playlist.length === 1) {
-      videoEl.currentTime = 0;
-      fadeVideo(true);
-      tryPlay(gen);
-      return;
-    }
-    switchToIndex(currentIndex + 1, true, gen);
-  }, FADE_OUT_MS);
-}
-
-function onError() {
-  const gen = generation;
-  if (!isCurrentGeneration(gen)) return;
-  const item = playlist[currentIndex];
-  advanceOnError(`load failed: ${item?.title || "unknown"} (${item?.src || ""})`, gen);
-}
-
 function bindVideoEvents() {
-  if (!videoEl || boundHandlers) return;
-  boundHandlers = { canplay: onCanPlay, ended: onEnded, error: onError };
-  videoEl.addEventListener("canplay", boundHandlers.canplay);
-  videoEl.addEventListener("ended", boundHandlers.ended);
-  videoEl.addEventListener("error", boundHandlers.error);
+  /* 每次 src 变更时通过 attachLoadEvents 绑定 */
 }
 
 function unbindVideoEvents() {
-  if (!videoEl || !boundHandlers) return;
-  videoEl.removeEventListener("canplay", boundHandlers.canplay);
-  videoEl.removeEventListener("ended", boundHandlers.ended);
-  videoEl.removeEventListener("error", boundHandlers.error);
+  detachLoadEvents();
   boundHandlers = null;
 }
 
@@ -314,6 +385,7 @@ export function syncTrailerWithRanking(movies, catalog = getMovieMediaCatalog())
   const gen = generation;
   clearTimers();
   switching = false;
+  clearActiveLoad();
 
   const sorted = [...(movies || [])].sort((a, b) => a.rank - b.rank);
   const top1 = sorted.find((m) => m.rank === 1);
@@ -375,9 +447,23 @@ export function destroyTrailerPlayer() {
   lastTop1Key = "";
   playingMediaKey = "";
   currentVideoSrc = "";
+  clearActiveLoad();
 }
 
 /** @deprecated 使用 syncTrailerWithRanking */
 export function syncTrailerWithMovie(movie) {
   syncTrailerWithRanking(movie ? [movie] : []);
+}
+
+/** 仅供自动化测试读取内部状态 */
+export function __getTrailerDebugState() {
+  return {
+    generation,
+    activeLoadGeneration,
+    activeLoadSeq,
+    activeLoadSrc,
+    playingMediaKey,
+    failStreak,
+    playlistLength: playlist.length,
+  };
 }

@@ -94,6 +94,30 @@ function testPartialFieldsFilled() {
   console.log("OK: missing fields filled with v2 defaults");
 }
 
+function testExactLegacyOnly() {
+  const cases = [
+    { heroTitle: 32, expected: 64 },
+    { heroTitle: 24, expected: 24 },
+    { heroTitle: 31, expected: 31 },
+    { heroTitle: 50, expected: 50 },
+    { table: 12, expected: 30 },
+    { table: 10, expected: 14 },
+  ];
+
+  for (const item of cases) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "maoyan-migrate-"));
+    const file = path.join(dir, "overlay-settings.json");
+    const key = Object.keys(item).find((k) => k !== "expected");
+    writeJson(file, {
+      schemaVersion: 1,
+      fonts: { [key]: item[key] },
+    });
+    const loaded = loadViaSubprocess(file);
+    assert.strictEqual(loaded.fonts[key], item.expected, `${key}=${item[key]}`);
+  }
+  console.log("OK: only exact legacy defaults migrate");
+}
+
 function testSchemaV2NoRemigration() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "maoyan-migrate-"));
   const file = path.join(dir, "overlay-settings.json");
@@ -117,6 +141,7 @@ function main() {
   testLegacyDefaultsMigrate();
   testCustomValuesPreserved();
   testPartialFieldsFilled();
+  testExactLegacyOnly();
   testSchemaV2NoRemigration();
   console.log("\nALL PASSED (settings migration)");
 }

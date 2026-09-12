@@ -1,6 +1,10 @@
-const { parseApplyUpdateArgs, runApplyUpdate, prepareUpdateEnvironment } = require("./lib/update");
+const {
+  parseApplyUpdateArgs,
+  runApplyUpdate,
+  prepareUpdateEnvironmentEarly,
+} = require("./lib/update");
 
-prepareUpdateEnvironment();
+prepareUpdateEnvironmentEarly();
 
 const applyArgs = parseApplyUpdateArgs(process.argv);
 if (applyArgs) {

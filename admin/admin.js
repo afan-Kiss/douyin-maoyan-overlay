@@ -13,7 +13,7 @@ const EDIT_TARGETS = {
     label: "副标题",
     desc: "「今日大盘 · 猫眼排行」副标题",
     fields: [
-      { path: "fonts.heroSubtitle", type: "number", label: "字号（px）", min: 8, max: 48 },
+      { path: "fonts.heroSubtitle", type: "number", label: "字号（px）", min: 12, max: 48 },
       { path: "colors.accentSoft", type: "color", label: "装饰线 / 柔和强调色" },
     ],
   },
@@ -38,9 +38,9 @@ const EDIT_TARGETS = {
     label: "指标标签",
     desc: "「实时票房」「观影人次」等标签",
     fields: [
-      { path: "fonts.nationLabel", type: "number", label: "字号（px）", min: 8, max: 48 },
-      { path: "fonts.metricLabel", type: "number", label: "指标标签字号（px）", min: 8, max: 48 },
-      { path: "fonts.metricValue", type: "number", label: "指标数值字号（px）", min: 8, max: 48 },
+      { path: "fonts.nationLabel", type: "number", label: "字号（px）", min: 12, max: 48 },
+      { path: "fonts.metricLabel", type: "number", label: "指标标签字号（px）", min: 10, max: 36 },
+      { path: "fonts.metricValue", type: "number", label: "指标数值字号（px）", min: 10, max: 48 },
     ],
   },
   summaryCard: {
@@ -65,7 +65,7 @@ const EDIT_TARGETS = {
     desc: "第 4–10 名表格区域",
     fields: [
       { path: "fonts.table", type: "number", label: "表格字号（px）", min: 14, max: 48 },
-      { path: "fonts.region", type: "number", label: "区域字号（px）", min: 8, max: 48 },
+      { path: "fonts.region", type: "number", label: "区域字号（px）", min: 10, max: 40 },
       { path: "colors.cardBg", type: "rgba", label: "行背景" },
       { path: "colors.cardBorder", type: "rgba", label: "行边框" },
     ],
@@ -75,13 +75,13 @@ const EDIT_TARGETS = {
     desc: "底部「热映预告」标题",
     fields: [
       { path: "colors.accent", type: "color", label: "强调色" },
-      { path: "fonts.movieTitle", type: "number", label: "标题字号（px）", min: 8, max: 48 },
+      { path: "fonts.movieTitle", type: "number", label: "标题字号（px）", min: 16, max: 72 },
     ],
   },
   footer: {
     label: "页脚",
     desc: "底部数据来源说明",
-    fields: [{ path: "fonts.footer", type: "number", label: "字号（px）", min: 8, max: 48 }],
+    fields: [{ path: "fonts.footer", type: "number", label: "字号（px）", min: 8, max: 24 }],
   },
   bubble: {
     label: "上涨气泡",
@@ -101,9 +101,42 @@ const EDIT_TARGETS = {
   },
 };
 
+const FONT_PATH_KEYS = {
+  "fonts.heroTitle": "heroTitle",
+  "fonts.heroSubtitle": "heroSubtitle",
+  "fonts.nationBox": "nationBox",
+  "fonts.nationLabel": "nationLabel",
+  "fonts.movieTitle": "movieTitle",
+  "fonts.movieRank": "movieRank",
+  "fonts.region": "region",
+  "fonts.metricLabel": "metricLabel",
+  "fonts.metricValue": "metricValue",
+  "fonts.table": "table",
+  "fonts.footer": "footer",
+};
+
 let current = null;
 let selectedTarget = null;
 let previewReady = false;
+
+async function loadFontRanges() {
+  try {
+    const resp = await fetch("/api/settings/font-ranges");
+    if (!resp.ok) return;
+    const ranges = await resp.json();
+    for (const meta of Object.values(EDIT_TARGETS)) {
+      for (const field of meta.fields) {
+        const key = FONT_PATH_KEYS[field.path];
+        if (key && ranges[key]) {
+          field.min = ranges[key][0];
+          field.max = ranges[key][1];
+        }
+      }
+    }
+  } catch {
+    /* 使用 EDIT_TARGETS 内置 fallback */
+  }
+}
 
 function $(id) {
   return document.getElementById(id);
@@ -430,6 +463,7 @@ $("btn-push-update")?.addEventListener("click", pushUpdate);
 
 buildQuickChips();
 
-loadSettings()
+loadFontRanges()
+  .then(() => loadSettings())
   .then(() => loadUpdateStatus())
   .catch(() => toast("加载设置失败", true));

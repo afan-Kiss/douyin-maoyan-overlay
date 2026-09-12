@@ -13,7 +13,7 @@ const { loadSettings, saveSettings } = require("./lib/settings");
 const { resolveWindowSize } = require("./lib/window-size");
 const { startRemoteSync, stopRemoteSync } = require("./lib/remote-sync");
 const { startAdminServer, stopAdminServer } = require("./admin-server");
-const { UpdateManager, currentVersionDisplay } = require("./lib/update");
+const { UpdateManager, currentVersionDisplay, confirmUpdateHealth } = require("./lib/update");
 const { ensureAutoStart } = require("./lib/auto-start");
 const { startUpdatePush, stopUpdatePush } = require("./lib/update-push");
 
@@ -94,6 +94,13 @@ function createWindow() {
 
   mainWindow.once("ready-to-show", () => {
     mainWindow.show();
+    try {
+      if (confirmUpdateHealth()) {
+        console.log("更新健康确认完成，已清理备份");
+      }
+    } catch (error) {
+      console.warn("更新健康确认失败:", error.message);
+    }
   });
 
   mainWindow.on("closed", () => {
