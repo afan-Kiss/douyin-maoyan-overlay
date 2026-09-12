@@ -46,6 +46,8 @@ const lastGoodNation = {};
 const lastDeltaDisplay = new Map();
 let latestMovies = [];
 let latestSpeedMap = {};
+let latestNation = null;
+let latestParsedMeta = null;
 let pollGeneration = 0;
 let FULL_ENRICH_INTERVAL_MS = 60000;
 const DELTA_PERSIST_MS = 4000;
@@ -332,7 +334,18 @@ function purgeMovieState(id) {
 
 function getMovieBoxAmount(movie) {
   if (movie.todayBox > 0) return movie.todayBox;
-  if (movie.todayBoxHtml) return decodeBoxFromHtml(movie.todayBoxHtml, movie.todayUnit);
+  if (movie.todayBoxHtml) {
+    const decoded = decodeBoxFromHtml(movie.todayBoxHtml, movie.todayUnit);
+    if (decoded > 0) return decoded;
+  }
+  if (!isEmptyField(movie.todayBoxText)) {
+    const n = parseFloat(String(movie.todayBoxText).replace(/,/g, "").replace(/万|亿/g, ""));
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  if (!isEmptyField(movie.dailyIncrease)) {
+    const n = parseFloat(String(movie.dailyIncrease).replace(/,/g, "").replace(/万|亿/g, ""));
+    if (Number.isFinite(n) && n > 0) return n;
+  }
   return 0;
 }
 
@@ -571,7 +584,8 @@ function updateRaceCardDelta(card, movie, isNew) {
 
   if (!isNew && movie.todayBoxHtml && storedHtml && storedHtml !== movie.todayBoxHtml) {
     delta = computeBoxIncrease(stored, storedHtml, movie.todayBoxHtml, unit);
-  } else if (!isNew && decoded > 0 && stored != null && decoded > stored) {
+  }
+  if (delta <= 0 && !isNew && decoded > 0 && stored != null && decoded > stored) {
     delta = decoded - stored;
   }
 
@@ -580,6 +594,11 @@ function updateRaceCardDelta(card, movie, isNew) {
     deltaEl.textContent = text;
     deltaEl.classList.add("has-rise");
     lastDeltaDisplay.set(key, { text, until: Date.now() + DELTA_PERSIST_MS });
+    const anchor =
+      card.querySelector(".race-card__title") ||
+      card.querySelector(".js-mainland") ||
+      deltaEl;
+    showBoxDeltaWhenReady(anchor, delta, unit);
     return;
   }
 
@@ -596,10 +615,11 @@ function updateRaceCardDelta(card, movie, isNew) {
 
 function getBoxAnchor(card) {
   return (
-    card.querySelector(".js-day-box") ||
+    card.querySelector(".race-card__title") ||
     card.querySelector(".js-mainland") ||
+    card.querySelector(".js-day-box") ||
     card.querySelector('[data-metric="dailyIncrease"] .metric__value') ||
-    card.querySelector(".race-card__title")
+    card.querySelector(".race-card__delta")
   );
 }
 
@@ -607,23 +627,17 @@ function trackBoxDelta(card, movie, isNew) {
   const key = String(movie.movieId);
   const unit = movie.todayUnit || "万";
   const stored = prevValues.get(key);
-  const storedHtml = prevBoxHtml.get(key);
   const decoded = getMovieBoxAmount(movie);
-  const anchor = getBoxAnchor(card);
 
-  if (movie.todayBoxHtml) {
-    const next = safeDecodeBox(movie.todayBoxHtml, unit);
-    if (storedHtml !== movie.todayBoxHtml) {
-      maybeShowBoxIncrease(anchor, stored, storedHtml, movie.todayBoxHtml, unit, isNew);
-      if (next > 0 || !storedHtml) prevBoxHtml.set(key, movie.todayBoxHtml);
-    }
-    if (next > 0) prevValues.set(key, next);
-    else if (decoded > 0) prevValues.set(key, decoded);
-  } else if (decoded > 0) {
+  // Always track numeric amounts so bubbles work even when MTSI html decode fails
+  if (decoded > 0) {
     if (!isNew && stored != null && decoded > stored) {
-      showBoxDeltaWhenReady(anchor, decoded - stored, unit);
+      // bubble is shown in updateRaceCardDelta to avoid double pop
     }
     prevValues.set(key, decoded);
+  }
+  if (movie.todayBoxHtml) {
+    prevBoxHtml.set(key, movie.todayBoxHtml);
   }
 }
 
@@ -701,8 +715,8 @@ function ensureRaceCard(movie) {
     card?.remove();
     card = buildRaceCard(movie);
     cardPool.set(key, card);
-    trackBoxDelta(card, movie, isFirstSeen(key));
     updateRaceCardDelta(card, movie, isFirstSeen(key));
+    trackBoxDelta(card, movie, isFirstSeen(key));
     return card;
   }
   updateRaceCard(card, movie, isFirstSeen(key));
@@ -733,37 +747,62 @@ function renderList(movies) {
   updateChampion(list);
 }
 
-function updateChampion(movies) {
-  const top = (movies || []).find((m) => m.rank === 1) || movies?.[0];
-  if (!top) {
-    champBannerEl?.classList.add("is-hidden");
-    champBoxPillEl?.classList.add("is-hidden");
-    return;
+function formatBoxAmount(amount) {
+  if (!Number.isFinite(amount) || amount <= 0) return "--";
+  if (amount >= 1000) return amount.toFixed(1);
+  return amount.toFixed(2);
+}
+
+function resolveDisplayBoxAmount(html, unit, numeric, text) {
+  if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  const fromHtml = safeDecodeBox(html, unit);
+  if (fromHtml > 0) return fromHtml;
+  if (!isEmptyField(text)) {
+    const n = parseFloat(String(text).replace(/,/g, "").replace(/万|亿/g, ""));
+    if (Number.isFinite(n) && n > 0) return n;
   }
+  return 0;
+}
 
-  champBannerEl?.classList.remove("is-hidden");
-  setTextIfChanged(champNameEl, `《${top.name}》`);
+function setPlainBoxValue(el, amount) {
+  if (!el) return;
+  const text = formatBoxAmount(amount);
+  el.classList.remove("mtsi-font");
+  if (el.textContent === text) return;
+  el.textContent = text;
+}
 
-  const unit = top.todayUnit || "万";
-  if (champBoxUnitEl) champBoxUnitEl.textContent = unit;
+function formatUpdateLabel(parsed) {
+  const WEEK = ["日", "一", "二", "三", "四", "五", "六"];
+  let d = null;
+  if (parsed?.updateTimestamp) {
+    d = new Date(Number(parsed.updateTimestamp));
+  }
+  if ((!d || Number.isNaN(d.getTime())) && parsed?.updateTimeText) {
+    d = new Date(String(parsed.updateTimeText).replace(/-/g, "/"));
+  }
+  if (!d || Number.isNaN(d.getTime())) d = new Date();
 
-  if (top.todayBoxHtml) {
-    champBoxPillEl?.classList.remove("is-hidden");
-    if (champBoxEl && champBoxEl.innerHTML !== top.todayBoxHtml) {
-      champBoxEl.classList.add("mtsi-font");
-      champBoxEl.innerHTML = top.todayBoxHtml;
+  const pad = (n) => String(n).padStart(2, "0");
+  let y = d.getFullYear();
+  let m = d.getMonth() + 1;
+  let day = d.getDate();
+  const calendarDay = String(parsed?.calendar?.today || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(calendarDay)) {
+    const [cy, cm, cd] = calendarDay.split("-").map(Number);
+    if (cy && cm && cd) {
+      y = cy;
+      m = cm;
+      day = cd;
+      const synced = new Date(y, m - 1, day, d.getHours(), d.getMinutes(), d.getSeconds());
+      if (!Number.isNaN(synced.getTime())) d = synced;
     }
-  } else if (top.todayBox > 0) {
-    champBoxPillEl?.classList.remove("is-hidden");
-    setTextIfChanged(champBoxEl, top.todayBox.toFixed(2));
-    champBoxEl?.classList.remove("mtsi-font");
-  } else if (!isEmptyField(top.dailyIncrease)) {
-    champBoxPillEl?.classList.remove("is-hidden");
-    setTextIfChanged(champBoxEl, String(top.dailyIncrease).replace(/万$/, ""));
-    champBoxEl?.classList.remove("mtsi-font");
-  } else {
-    champBoxPillEl?.classList.add("is-hidden");
   }
+
+  const datePart = `${y}-${pad(m)}-${pad(day)}`;
+  const weekPart = `周${WEEK[d.getDay()]}`;
+  const timePart = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  return `实时更新 ${datePart} ${weekPart} ${timePart}`;
 }
 
 function setEncodedBoxValue(el, html, fallbackText = "--") {
@@ -779,32 +818,62 @@ function setEncodedBoxValue(el, html, fallbackText = "--") {
   el.textContent = fallbackText;
 }
 
+function updateChampion(movies) {
+  const top = (movies || []).find((m) => m.rank === 1) || movies?.[0];
+  if (!top) {
+    champBannerEl?.classList.add("is-hidden");
+    champBoxPillEl?.classList.add("is-hidden");
+    return;
+  }
+
+  champBannerEl?.classList.remove("is-hidden");
+  setTextIfChanged(champNameEl, `《${top.name}》`);
+
+  const unit = top.todayUnit || "万";
+  if (champBoxUnitEl) champBoxUnitEl.textContent = unit;
+
+  const amount = resolveDisplayBoxAmount(
+    top.todayBoxHtml,
+    unit,
+    top.todayBox,
+    top.todayBoxText || top.dailyIncrease
+  );
+  if (amount > 0) {
+    champBoxPillEl?.classList.remove("is-hidden");
+    setPlainBoxValue(champBoxEl, amount);
+  } else if (top.todayBoxHtml) {
+    champBoxPillEl?.classList.remove("is-hidden");
+    setEncodedBoxValue(champBoxEl, top.todayBoxHtml);
+  } else {
+    champBoxPillEl?.classList.add("is-hidden");
+  }
+}
+
 function updateNation(nation, parsed) {
   nation = stabilizeNation(nation);
   const unitEl = document.querySelector(".js-nation-unit");
   const unit = nation.todayUnit || "万";
   const prevNation = prevValues.get("__nation__");
-  const prevHtml = prevBoxHtml.get("__nation__");
+  const nationAmount = resolveDisplayBoxAmount(
+    nation.todayBoxHtml,
+    unit,
+    nation.todayBox,
+    nation.todayBoxText
+  );
 
-  if (nation.todayBoxHtml) {
-    const changed = prevHtml !== nation.todayBoxHtml;
-    const nationAmount =
-      nation.todayBox > 0 ? nation.todayBox : safeDecodeBox(nation.todayBoxHtml, unit);
-    if (changed) {
-      maybeShowBoxIncrease(
-        nationBoxEl,
-        prevNation,
-        prevHtml,
-        nation.todayBoxHtml,
-        unit,
-        prevNation == null
-      );
-      setEncodedBoxValue(nationBoxEl, nation.todayBoxHtml);
-      if (nationAmount > 0 || !prevHtml) prevBoxHtml.set("__nation__", nation.todayBoxHtml);
+  if (nationAmount > 0) {
+    if (prevNation != null && nationAmount > prevNation) {
+      const delta = nationAmount - prevNation;
+      const minDelta = getOverlaySettings()?.bubble?.minDelta ?? 0.001;
+      if (delta >= minDelta) showBoxDeltaWhenReady(nationBoxEl, delta, unit);
     }
-    if (nationAmount > 0) prevValues.set("__nation__", nationAmount);
-  } else if (nation.todayBox > 0) {
-    setEncodedBoxValue(nationBoxEl, "", nation.todayBox.toFixed(2));
+    setPlainBoxValue(nationBoxEl, nationAmount);
+    prevValues.set("__nation__", nationAmount);
+    if (nation.todayBoxHtml) prevBoxHtml.set("__nation__", nation.todayBoxHtml);
+  } else if (nation.todayBoxHtml) {
+    setEncodedBoxValue(nationBoxEl, nation.todayBoxHtml);
+  } else {
+    setPlainBoxValue(nationBoxEl, 0);
   }
 
   if (unitEl) unitEl.textContent = unit;
@@ -815,11 +884,7 @@ function updateNation(nation, parsed) {
   $("nation-views-pill")?.classList.toggle("is-hidden", isEmptyField(nation.viewCountDesc));
 
   if (updateTimeEl) {
-    const ts = parsed?.updateTimeText || new Date().toLocaleString("zh-CN");
-    const timePart = String(ts).includes(" ")
-      ? String(ts).split(" ").pop()
-      : new Date().toLocaleTimeString("zh-CN", { hour12: false });
-    updateTimeEl.textContent = `实时更新 ${timePart}`;
+    updateTimeEl.textContent = formatUpdateLabel(parsed);
   }
 }
 
@@ -869,15 +934,32 @@ function scheduleBackgroundEnrich(requestPollGen, parsed, speed) {
 }
 
 function scheduleDecodeRetry() {
-  if (!latestMovies.length) return;
   setTimeout(() => {
+    if (latestNation) {
+      const amount = resolveDisplayBoxAmount(
+        latestNation.todayBoxHtml,
+        latestNation.todayUnit || "万",
+        latestNation.todayBox,
+        latestNation.todayBoxText
+      );
+      if (amount > 0) {
+        latestNation = { ...latestNation, todayBox: amount };
+        updateNation(latestNation, latestParsedMeta || {});
+      }
+    }
+
+    if (!latestMovies.length) return;
     const needsRetry = latestMovies.some(
       (m) => m.todayBoxHtml && getMovieBoxAmount(stabilizeMovie(m)) <= 0
     );
-    if (!needsRetry) return;
+    if (!needsRetry) {
+      // still refresh champion plain numbers if possible
+      renderList(latestMovies.map(stabilizeMovie));
+      return;
+    }
     const movies = enrichMoviesQuick(latestMovies, latestSpeedMap).map(stabilizeMovie);
     renderList(movies);
-  }, 600);
+  }, 800);
 }
 
 async function refreshData() {
@@ -907,6 +989,8 @@ async function refreshData() {
 
     pollGeneration += 1;
     latestMovies = parsed.movies;
+    latestNation = parsed.nation;
+    latestParsedMeta = parsed;
     const speed = buildSpeedMap(parsed.movies);
     latestSpeedMap = speed;
     const movies = enrichMoviesQuick(parsed.movies, speed).map(stabilizeMovie);
