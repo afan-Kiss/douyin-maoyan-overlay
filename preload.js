@@ -11,7 +11,13 @@ contextBridge.exposeInMainWorld("overlay", {
   getApiStatus: () => ipcRenderer.invoke("get-api-status"),
   ensureApi: () => ipcRenderer.invoke("ensure-api"),
   isLoggedIn: () => ipcRenderer.invoke("is-logged-in"),
-  startLogin: () => ipcRenderer.invoke("start-login"),
+  isLoginRunning: () => ipcRenderer.invoke("is-login-running"),
+  startLogin: (options) => ipcRenderer.invoke("start-login", options),
+  onLoginResult: (callback) => {
+    const handler = (_event, result) => callback(result);
+    ipcRenderer.on("login-result", handler);
+    return () => ipcRenderer.removeListener("login-result", handler);
+  },
   onApiReady: (callback) => {
     const handler = (_event, status) => callback(status);
     ipcRenderer.on("api-ready", handler);

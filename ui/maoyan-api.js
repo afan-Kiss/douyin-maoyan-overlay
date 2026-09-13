@@ -1,5 +1,26 @@
 /** 内置票房服务 API */
 
+export class MaoyanApiError extends Error {
+  constructor(message, { code = "api_error", detail = "", action = null, retryable = false } = {}) {
+    super(message || detail || code);
+    this.name = "MaoyanApiError";
+    this.code = code;
+    this.detail = detail || message;
+    this.action = action;
+    this.retryable = retryable;
+  }
+}
+
+async function readApiError(resp) {
+  const body = await resp.json().catch(() => ({}));
+  return new MaoyanApiError(body.detail || `请求失败 ${resp.status}`, {
+    code: body.code || `http_${resp.status}`,
+    detail: body.detail || `请求失败 ${resp.status}`,
+    action: body.action || null,
+    retryable: body.retryable === true,
+  });
+}
+
 const DASHBOARD_PARAMS = {
   orderType: "0",
   uuid: "",
@@ -18,20 +39,62 @@ export async function fetchDashboard(apiBase, movieId = "") {
     `${apiBase}/i/api/dashboard-ajax/movie?` +
     new URLSearchParams({ ...DASHBOARD_PARAMS, movieId: String(movieId || "") });
   const resp = await fetch(url, { signal: AbortSignal.timeout(60000) });
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({}));
-    throw new Error(err.detail || `请求失败 ${resp.status}`);
-  }
+  if (!resp.ok) throw await readApiError(resp);
   return resp.json();
 }
 
-async function fetchMovieApi(apiBase, apiPath, movieId, extra = {}) {
+async function fetchMovieApi(apiBase, apiPath, movieId, extra = {}, timeoutMs = 20000) {
   const url =
     `${apiBase}${apiPath}?` +
     new URLSearchParams({ movieId: String(movieId), WuKongReady: "h5", ...extra });
-  const resp = await fetch(url, { signal: AbortSignal.timeout(6000) });
-  if (!resp.ok) return null;
+  const resp = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+  if (!resp.ok) throw await readApiError(resp);
   return resp.json();
+}
+
+let apiSigWarmed = false;
+let lastEnrichErrors = [];
+
+export function resetApiSigWarm() {
+  apiSigWarmed = false;
+}
+
+export function getLastEnrichErrors() {
+  return lastEnrichErrors.slice();
+}
+
+function summarizeEnrichError(error) {
+  if (error instanceof MaoyanApiError) {
+    return {
+      code: error.code,
+      detail: error.detail,
+      action: error.action,
+    };
+  }
+  return {
+    code: "api_error",
+    detail: error?.message || "请求失败",
+    action: null,
+  };
+}
+
+async function warmMovieApiSignatures(apiBase, movieId) {
+  if (apiSigWarmed || !apiBase || !movieId) return false;
+  try {
+    const url =
+      `${apiBase}/api/refresh?` +
+      new URLSearchParams({ movieId: String(movieId), boxLevel: "1" });
+    const resp = await fetch(url, { signal: AbortSignal.timeout(45000) });
+    if (!resp.ok) return false;
+    apiSigWarmed = true;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function fetchBoxShow(apiBase, movieId, boxLevel = 1) {
@@ -191,6 +254,9 @@ export async function injectFontStyle(fontStyle) {
 
 export function decodeFontNum(numHtml) {
   if (!numHtml) return "";
+  if (typeof document === "undefined") {
+    return String(numHtml).replace(/<[^>]+>/g, "").trim();
+  }
   const el = ensureDecoder();
   el.innerHTML = numHtml;
   const text = (el.textContent || "").trim();
@@ -274,6 +340,73 @@ function unwrapPayload(raw) {
   return raw?.data?.data ?? raw?.data ?? raw;
 }
 
+function isFailedApiPayload(raw) {
+  const inner = unwrapPayload(raw);
+  if (!inner || typeof inner !== "object") return true;
+  if (typeof inner.detail === "string" && inner.detail.trim()) {
+    const msg = inner.detail.trim();
+    if (
+      /签名|不存在|失败|错误|超时|请刷新|请稍后再试|没找到浏览器/.test(msg)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function pickDescValue(...values) {
+  for (const val of values) {
+    if (val == null) continue;
+    const text = String(val).trim();
+    if (text && text !== "--" && text !== "-") return text;
+  }
+  return "";
+}
+
+function mapBoxShowRowsToDaily(rows, todayStr) {
+  if (!Array.isArray(rows) || !rows.length) return [];
+  const sorted = [...rows]
+    .filter((row) => row?.showDate)
+    .sort((a, b) => Number(a.showDate) - Number(b.showDate));
+  if (!sorted.length) return [];
+
+  const todayKey = todayStr ? Number(String(todayStr).replace(/-/g, "")) : 0;
+  let todayIdx = todayKey
+    ? sorted.findIndex((row) => Number(row.showDate) === todayKey)
+    : -1;
+  if (todayIdx < 0) todayIdx = Math.max(0, sorted.length - 1);
+
+  const labels = ["今日", "明日", "后天"];
+  const result = [];
+  for (let i = 0; i < 3; i++) {
+    const row = sorted[todayIdx + i];
+    if (!row) break;
+    const box = pickDescValue(
+      row.boxDesc,
+      row.boxOfficeDesc,
+      row.sumBoxDesc,
+      row.splitBoxDesc,
+      row.valueDesc
+    );
+    const forecast = pickDescValue(
+      row.predictionDesc,
+      row.predBoxDesc,
+      row.forecastDesc,
+      row.predictionBoxDesc,
+      row.boxPredictionDesc
+    );
+    result.push({
+      label: labels[i],
+      box: box ? formatDescMoney(box) : "--",
+      forecast: forecast ? formatDescMoney(forecast) : "--",
+      boxRate: row.boxRate || row.boxOfficeRate || "--",
+      showCountRate: row.showCountRate || "--",
+      avgSeatView: row.viewSeatRate || row.avgSeatView || row.seatRate || "--",
+    });
+  }
+  return result;
+}
+
 function deepFind(obj, keys, depth = 0) {
   if (!obj || depth > 6) return undefined;
   if (typeof obj !== "object") return undefined;
@@ -326,7 +459,8 @@ function pickPrevSeriesPoint(series, name) {
   return s.data[s.data.length - 2];
 }
 
-function parseBoxShowMetrics(raw) {
+function parseBoxShowMetrics(raw, todayStr = "") {
+  if (isFailedApiPayload(raw)) return null;
   const inner = unwrapPayload(raw);
   if (!inner) return null;
 
@@ -374,18 +508,29 @@ function parseBoxShowMetrics(raw) {
     yesterdaySamePeriodText: yesterdaySamePeriod > 0 ? formatMoneyWan(yesterdaySamePeriod) : "--",
     totalViews,
     presaleTotal: summary["累计综合票房(含预售)"]?.valueDesc || "--",
+    dailyRows: mapBoxShowRowsToDaily(rows, todayStr),
   };
 }
 
 function parsePredictionMetrics(raw) {
+  if (isFailedApiPayload(raw)) return null;
   const inner = unwrapPayload(raw);
   if (!inner) return null;
+
+  const detailObj =
+    inner.detail && typeof inner.detail === "object" && !Array.isArray(inner.detail)
+      ? inner.detail
+      : null;
 
   const list =
     inner.predictionBoxList ||
     inner.boxPredictionList ||
     inner.list ||
     inner.dayList ||
+    detailObj?.predictionBoxList ||
+    detailObj?.boxPredictionList ||
+    detailObj?.list ||
+    detailObj?.dayList ||
     [];
 
   const result = {
@@ -402,13 +547,28 @@ function parsePredictionMetrics(raw) {
     const dayLabels = ["今日", "明日", "后天"];
     for (let i = 0; i < Math.min(list.length, 3); i++) {
       const item = list[i];
+      const boxRaw = pickDescValue(
+        item.realBoxDesc,
+        item.todayBoxDesc,
+        item.boxOfficeDesc,
+        item.splitBoxDesc,
+        item.boxDesc
+      );
+      const forecastRaw = pickDescValue(
+        item.predictionDesc,
+        item.predBoxDesc,
+        item.forecastDesc,
+        item.predictionBoxDesc,
+        item.valueDesc,
+        item.boxDesc
+      );
       result.dailyForecast.push({
-        label: item.dateDesc || item.title || dayLabels[i] || `D+${i}`,
-        forecast: item.boxDesc || item.valueDesc || item.predictionDesc || "--",
-        box: item.boxDesc || item.todayBoxDesc || "--",
-        boxRate: item.boxRate || "--",
+        label: item.dateDesc || item.title || item.dayDesc || dayLabels[i] || `D+${i}`,
+        forecast: forecastRaw ? formatDescMoney(forecastRaw) : "--",
+        box: boxRaw ? formatDescMoney(boxRaw) : "--",
+        boxRate: item.boxRate || item.boxOfficeRate || "--",
         showCountRate: item.showCountRate || "--",
-        avgSeatView: item.viewSeatRate || item.avgSeatView || "--",
+        avgSeatView: item.viewSeatRate || item.avgSeatView || item.seatRate || "--",
       });
     }
     const todayItem = list[0];
@@ -455,6 +615,7 @@ function parsePredictionMetrics(raw) {
 }
 
 function parseGlobalMetrics(raw) {
+  if (isFailedApiPayload(raw)) return null;
   const inner = unwrapPayload(raw);
   if (!inner) return null;
 
@@ -488,6 +649,7 @@ function findRegionBox(obj, labels) {
 }
 
 function parseTechMetrics(raw) {
+  if (isFailedApiPayload(raw)) return null;
   const inner = unwrapPayload(raw);
   if (!inner) return null;
 
@@ -666,29 +828,66 @@ export function mergeMovieDetail(base, detail = {}) {
   };
 }
 
+function mergeDailyRowField(primary, fallback, isToday, todayFallback) {
+  const pick = (val) => {
+    const text = String(val ?? "").trim();
+    return text && text !== "--" && text !== "-" ? text : "";
+  };
+  return (
+    pick(primary) ||
+    pick(fallback) ||
+    (isToday ? pick(todayFallback) : "") ||
+    "--"
+  );
+}
+
 function buildDailyTable(base, prediction, detail) {
   const labels = ["今日", "明日", "后天"];
   const forecasts = prediction.dailyForecast || [];
+  const boxShowRows = detail.boxShow?.dailyRows || [];
   const rows = [];
 
   for (let i = 0; i < 3; i++) {
     const pf = forecasts[i] || {};
+    const bs = boxShowRows[i] || {};
     const isToday = i === 0;
+    const todayBoxPlain =
+      base.todayBox > 0
+        ? `${base.todayBox.toFixed(2)}万`
+        : base.todayBoxText !== "--"
+          ? `${base.todayBoxText}万`
+          : "";
     rows.push({
-      label: pf.label || labels[i],
+      label: pf.label || bs.label || labels[i],
       box: isToday
-        ? base.todayBox > 0
-          ? `${base.todayBox.toFixed(2)}万`
-          : base.todayBoxText !== "--"
-            ? `${base.todayBoxText}万`
-            : "--"
-        : pf.box || "--",
+        ? todayBoxPlain || mergeDailyRowField(pf.box, bs.box, false, "")
+        : mergeDailyRowField(pf.box, bs.box, false, ""),
       boxHtml: isToday ? base.todayBoxHtml : "",
       boxUnit: isToday ? base.todayUnit : "万",
-      forecast: pf.forecast || (isToday ? detail.speed?.estimatedDayForecastText || "--" : "--"),
-      boxRate: isToday ? base.boxRate : pf.boxRate || "--",
-      showCountRate: isToday ? base.showCountRate : pf.showCountRate || "--",
-      avgSeatView: isToday ? base.avgSeatView : pf.avgSeatView || "--",
+      forecast: mergeDailyRowField(
+        pf.forecast,
+        bs.forecast,
+        isToday,
+        detail.speed?.estimatedDayForecastText || base.dynamicForecast
+      ),
+      boxRate: mergeDailyRowField(
+        isToday ? base.boxRate : pf.boxRate,
+        bs.boxRate,
+        isToday,
+        base.boxRate
+      ),
+      showCountRate: mergeDailyRowField(
+        isToday ? base.showCountRate : pf.showCountRate,
+        bs.showCountRate,
+        isToday,
+        base.showCountRate
+      ),
+      avgSeatView: mergeDailyRowField(
+        isToday ? base.avgSeatView : pf.avgSeatView,
+        bs.avgSeatView,
+        isToday,
+        base.avgSeatView
+      ),
     });
   }
   return rows;
@@ -755,19 +954,84 @@ export function enrichMoviesQuick(movies, speed = {}) {
   );
 }
 
+async function fetchMovieExtraDetail(apiBase, movie, todayStr, speed = {}) {
+  const detail = {
+    trends: await fetchMovieTrends(apiBase, movie, todayStr),
+    boxShow: {},
+    prediction: {},
+    global: {},
+    tech: {},
+    speed,
+  };
+
+  const extraErrors = [];
+  const captureExtraError = (label, error) => {
+    if (error) extraErrors.push({ label, error });
+  };
+
+  let predictionRaw = null;
+  try {
+    predictionRaw = await fetchPredictionBox(apiBase, movie.movieId);
+  } catch (error) {
+    captureExtraError("预测票房", error);
+  }
+  let parsedPrediction = predictionRaw ? parsePredictionMetrics(predictionRaw) : null;
+  if (!parsedPrediction?.dailyForecast?.length) {
+    await sleep(800);
+    try {
+      predictionRaw = await fetchPredictionBox(apiBase, movie.movieId);
+      parsedPrediction = predictionRaw ? parsePredictionMetrics(predictionRaw) : null;
+    } catch (error) {
+      captureExtraError("预测票房", error);
+    }
+  }
+  if (parsedPrediction) detail.prediction = parsedPrediction;
+
+  const [boxShowRaw, globalRaw, techRaw] = await Promise.all([
+    fetchBoxShow(apiBase, movie.movieId, 1).catch((error) => {
+      captureExtraError("日期票房", error);
+      return null;
+    }),
+    fetchBoxShowna(apiBase, movie.movieId).catch((error) => {
+      captureExtraError("全球票房", error);
+      return null;
+    }),
+    fetchTechData(apiBase, movie.movieId).catch((error) => {
+      captureExtraError("下映时间", error);
+      return null;
+    }),
+  ]);
+
+  if (boxShowRaw) detail.boxShow = parseBoxShowMetrics(boxShowRaw, todayStr) || {};
+  if (globalRaw) {
+    const parsed = parseGlobalMetrics(globalRaw);
+    if (parsed) detail.global = parsed;
+  }
+  if (techRaw) {
+    const parsed = parseTechMetrics(techRaw);
+    if (parsed) detail.tech = parsed;
+  }
+
+  detail.extraErrors = extraErrors;
+  return detail;
+}
+
 export async function enrichMoviesLight(apiBase, movies, options = {}) {
   const concurrency = options.concurrency || 3;
   const todayStr = options.todayStr || "";
   const trendLimit = options.trendLimit ?? 5;
+  const enableExtraApis = options.enableExtraApis !== false;
   const results = enrichMoviesQuick(movies, options.speed || {});
 
   const targets = movies.slice(0, trendLimit);
   const enriched = await mapPool(targets, concurrency, async (movie) => {
-    const trends = await fetchMovieTrends(apiBase, movie, todayStr);
-    return mergeMovieDetail(movie, {
-      trends,
-      speed: options.speed?.[String(movie.movieId)] || {},
-    });
+    const speed = options.speed?.[String(movie.movieId)] || {};
+    if (!enableExtraApis) {
+      const trends = await fetchMovieTrends(apiBase, movie, todayStr);
+      return mergeMovieDetail(movie, { trends, speed });
+    }
+    const detail = await fetchMovieExtraDetail(apiBase, movie, todayStr, speed);
+    return mergeMovieDetail(movie, detail);
   });
 
   for (let i = 0; i < enriched.length; i++) {
@@ -779,40 +1043,37 @@ export async function enrichMoviesLight(apiBase, movies, options = {}) {
 
 export async function enrichMovies(apiBase, movies, options = {}) {
   const concurrency = options.concurrency || 2;
-  const enableExtraApis = options.enableExtraApis === true;
+  const enableExtraApis = options.enableExtraApis !== false;
   const todayStr = options.todayStr || "";
   const trendLimit = options.trendLimit ?? 5;
 
+  lastEnrichErrors = [];
   const results = enrichMoviesQuick(movies, options.speed || {});
   const targets = movies.slice(0, trendLimit);
+
+  if (enableExtraApis && targets.length) {
+    await warmMovieApiSignatures(apiBase, targets[0].movieId);
+  }
 
   await mapPool(targets, concurrency, async (movie) => {
     const idx = movies.indexOf(movie);
     if (idx < 0) return;
 
-    const detail = {
-      trends: await fetchMovieTrends(apiBase, movie, todayStr),
-      boxShow: {},
-      prediction: {},
-      global: {},
-      tech: {},
-      speed: options.speed?.[String(movie.movieId)] || {},
-    };
-
-    if (enableExtraApis) {
-      const [boxShowRaw, predictionRaw, globalRaw, techRaw] = await Promise.all([
-        fetchBoxShow(apiBase, movie.movieId, 1).catch(() => null),
-        fetchPredictionBox(apiBase, movie.movieId).catch(() => null),
-        fetchBoxShowna(apiBase, movie.movieId).catch(() => null),
-        fetchTechData(apiBase, movie.movieId).catch(() => null),
-      ]);
-
-      if (boxShowRaw) detail.boxShow = parseBoxShowMetrics(boxShowRaw) || {};
-      if (predictionRaw) detail.prediction = parsePredictionMetrics(predictionRaw) || {};
-      if (globalRaw) detail.global = parseGlobalMetrics(globalRaw) || {};
-      if (techRaw) detail.tech = parseTechMetrics(techRaw) || {};
+    const speed = options.speed?.[String(movie.movieId)] || {};
+    if (!enableExtraApis) {
+      const trends = await fetchMovieTrends(apiBase, movie, todayStr);
+      results[idx] = mergeMovieDetail(movie, { trends, speed });
+      return;
     }
 
+    const detail = await fetchMovieExtraDetail(apiBase, movie, todayStr, speed);
+    for (const item of detail.extraErrors || []) {
+      lastEnrichErrors.push({
+        movieId: movie.movieId,
+        label: item.label,
+        ...summarizeEnrichError(item.error),
+      });
+    }
     results[idx] = mergeMovieDetail(movie, detail);
   });
 

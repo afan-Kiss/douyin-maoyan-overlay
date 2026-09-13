@@ -1,6 +1,17 @@
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { STORAGE_STATE, getChromeExecutable } from "./config.js";
+import { createRequire } from "module";
+
+const require = createRequire(import.meta.url);
+const { storageFileExists, storageFileLooksLoggedIn } = require("../../lib/storage-auth.js");
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const MAX_CHARS = 50000;
+const MAX_LOG_BYTES = 2 * 1024 * 1024;
 
 const API_NAMES = {
   getBoxShow: "日期票房",
@@ -12,6 +23,49 @@ const API_NAMES = {
   refresh: "刷新签名",
   unknown: "未知接口",
 };
+
+let lastSignatureSuccessAt = null;
+let lastSignatureError = null;
+let lastDashboardSuccessAt = null;
+
+function getDataDir() {
+  return process.env.MAOYAN_DATA_DIR || path.join(__dirname, "..", "..", "data");
+}
+
+function getLogFilePath() {
+  const dir = path.join(getDataDir(), "logs");
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, "server.log");
+}
+
+function rotateLogIfNeeded(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return;
+    const stat = fs.statSync(filePath);
+    if (stat.size < MAX_LOG_BYTES) return;
+    const rotated = `${filePath}.1`;
+    if (fs.existsSync(rotated)) fs.unlinkSync(rotated);
+    fs.renameSync(filePath, rotated);
+  } catch {
+    /* ignore rotation errors */
+  }
+}
+
+function sanitizeForLog(text) {
+  return String(text || "")
+    .replace(/(Cookie|mtgsig|signKey|token)=[^;\s]+/gi, "$1=[redacted]")
+    .replace(/"mtgsig"\s*:\s*"[^"]+"/gi, '"mtgsig":"[redacted]"');
+}
+
+function writeFileLog(text) {
+  try {
+    const filePath = getLogFilePath();
+    rotateLogIfNeeded(filePath);
+    fs.appendFileSync(filePath, `${text}\n`, "utf-8");
+  } catch {
+    /* file log must not break service */
+  }
+}
 
 function nowText() {
   const d = new Date();
@@ -119,16 +173,19 @@ class Logger {
     const prefix = indent ? "    " : `[${nowText()}] `;
     const line = `${prefix}${text}`;
     const add = line.length + 1;
+    const safeLine = sanitizeForLog(line);
 
     if (this.totalChars + add > MAX_CHARS) {
       console.clear();
       this.totalChars = 0;
       const tip = `[${nowText()}] 日志太多了，已自动清空`;
       console.log(tip);
+      writeFileLog(tip);
       this.totalChars = tip.length + 1;
     }
 
     console.log(line);
+    writeFileLog(safeLine);
     this.totalChars += add;
   }
 
@@ -247,6 +304,8 @@ class Logger {
     const ctx = this._ctx();
 
     if (ok) {
+      lastSignatureSuccessAt = new Date().toISOString();
+      lastSignatureError = null;
       const summary = detail ? `用时${ms}秒，${detail}` : `用时${ms}秒`;
       if (ctx) {
         ctx.setSig(`capture(${summary})`);
@@ -254,6 +313,7 @@ class Logger {
         this._emit(`签名更新完成，${summary}`);
       }
     } else {
+      lastSignatureError = detail || "签名更新失败";
       for (const line of this._sigBuffer) {
         this._emit(`签名：${line}`);
       }
@@ -271,8 +331,13 @@ class Logger {
     this.sigEnd(false, reason);
   }
 
+  markDashboardSuccess() {
+    lastDashboardSuccessAt = new Date().toISOString();
+  }
+
   start(port) {
     this._emit(`服务已启动，地址：http://127.0.0.1:${port}`);
+    this._emit(`日志文件：${getLogFilePath()}`);
     this._emit(`日期票房示例：http://127.0.0.1:${port}/i/api/movie/getBoxShow?movieId=电影编号&boxLevel=1`);
   }
 
@@ -288,8 +353,8 @@ class Logger {
     this._emit("程序已退出");
   }
 
-  chromeOk() {
-    this._emit("浏览器已就绪");
+  chromeOk(chromePath = "") {
+    this._emit(chromePath ? `浏览器已就绪：${chromePath}` : "浏览器已就绪");
   }
 
   chromeMissing() {
@@ -306,6 +371,11 @@ class Logger {
 
   info(text) {
     this._emit(String(text));
+  }
+
+  error(text, err) {
+    const msg = err?.stack || err?.message || "";
+    this._emit(`${text}${msg ? `：${sanitizeForLog(msg)}` : ""}`);
   }
 
   onRequest() {}
@@ -348,6 +418,13 @@ class Logger {
   }
 }
 
+const NON_RETRYABLE_SIG_ERRORS = new Set([
+  "chrome_not_found",
+  "login_in_progress",
+  "login_required",
+  "browser_launch_failed",
+]);
+
 export function explainError(e) {
   const name = String(e?.name || "");
   const msg = String(e?.message || "");
@@ -368,28 +445,57 @@ export function explainError(e) {
     return "请求地址有误，将自动重新抓签名";
   }
   if (msg.includes("sig_capture_failed") || msg.includes("签名")) {
-    return "没抓到有效签名，请先运行 login.bat 登录";
+    return "没抓到有效签名，请先完成猫眼登录（可点击右上角登录）";
   }
   if (msg.length > 0 && msg.length < 80 && !/[a-z]{5,}/i.test(msg)) {
     return msg;
   }
   if (msg.length > 0 && msg.length < 120) {
-  return msg.replace(/playwright/gi, "浏览器").replace(/chrome/gi, "浏览器");
+    return msg.replace(/playwright/gi, "浏览器").replace(/chrome/gi, "浏览器");
   }
   return "程序运行出错，请重启服务再试";
+}
+
+export function isNonRetryableSigError(error) {
+  const msg = String(error?.message || error || "");
+  return NON_RETRYABLE_SIG_ERRORS.has(msg);
+}
+
+export function buildDiagnostics() {
+  const chromePath = getChromeExecutable();
+  const chromeFound = Boolean(chromePath);
+  const chromePathValid = chromeFound && fs.existsSync(chromePath);
+  const loginStateExists = storageFileExists(STORAGE_STATE);
+  const loginVerified = storageFileLooksLoggedIn(STORAGE_STATE);
+  const loginLock = fs.existsSync(path.join(getDataDir(), "login.lock"));
+
+  return {
+    serviceReady: true,
+    chromeFound,
+    chromePathValid,
+    chromePath: chromePathValid ? chromePath : "",
+    loginStateExists,
+    loginVerified,
+    loginInProgress: loginLock,
+    browserLaunchAvailable: chromePathValid && !loginLock,
+    signatureAvailable: Boolean(lastSignatureSuccessAt),
+    lastSignatureSuccessAt,
+    lastSignatureError,
+    lastDashboardSuccessAt,
+  };
 }
 
 export const log = new Logger();
 
 export function resolveApiName(req) {
-  const path = req.path || "";
-  if (path.includes("getBoxShowna")) return "getBoxShowna";
-  if (path.includes("getPredictionBox")) return "getPredictionBox";
-  if (path.includes("getTechData")) return "getTechData";
-  if (path.includes("getWantData")) return "getWantData";
-  if (path.includes("getBoxShow") || path.includes("boxshow")) return "getBoxShow";
-  if (path.includes("dashboard")) return "dashboard";
-  if (path.includes("refresh")) return "refresh";
+  const reqPath = req.path || "";
+  if (reqPath.includes("getBoxShowna")) return "getBoxShowna";
+  if (reqPath.includes("getPredictionBox")) return "getPredictionBox";
+  if (reqPath.includes("getTechData")) return "getTechData";
+  if (reqPath.includes("getWantData")) return "getWantData";
+  if (reqPath.includes("getBoxShow") || reqPath.includes("boxshow")) return "getBoxShow";
+  if (reqPath.includes("dashboard")) return "dashboard";
+  if (reqPath.includes("refresh")) return "refresh";
   return "unknown";
 }
 

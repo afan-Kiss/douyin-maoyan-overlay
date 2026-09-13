@@ -7,6 +7,9 @@ import {
   enrichMoviesLight,
   enrichMoviesQuick,
   estimateSpeedMetrics,
+  resetApiSigWarm,
+  getLastEnrichErrors,
+  MaoyanApiError,
 } from "./maoyan-api.js";
 import { applyOverlaySettings, getOverlaySettings } from "./settings-applier.js";
 import { bindDesignViewport } from "./viewport-fit.js";
@@ -21,14 +24,9 @@ const nationShowsEl = $("nation-shows");
 const nationViewsEl = $("nation-views");
 const nationSeatEl = $("nation-seat");
 const heroDateEl = $("hero-date");
-const champTextEl = $("champ-text");
-const champBannerEl = $("champ-banner");
 const champBoxEl = $("champ-box");
 const champBoxUnitEl = $("champ-box-unit");
 const champBoxPillEl = $("champ-box-pill");
-
-const CROWN_SVG =
-  '<svg class="race-card__crown" viewBox="0 0 24 18" aria-hidden="true"><path fill="#ffd978" stroke="#8a4a10" stroke-width="0.8" d="M2 14 L4 5 L8 10 L12 3 L16 10 L20 5 L22 14 Z"/></svg>';
 
 let config = {};
 let pollTimer = null;
@@ -56,6 +54,14 @@ let latestParsedMeta = null;
 let pollGeneration = 0;
 let FULL_ENRICH_INTERVAL_MS = 60000;
 const DELTA_PERSIST_MS = 4000;
+let partialDataWarning = "";
+
+function isEmptyField(val) {
+  if (val == null) return true;
+  if (Array.isArray(val)) return !val.length;
+  const text = String(val).trim();
+  return !text || text === "--" || text === "-";
+}
 
 const PRESERVE_MOVIE_FIELDS = [
   "todayBoxHtml",
@@ -85,11 +91,14 @@ const PRESERVE_MOVIE_FIELDS = [
 ];
 
 const METRIC_DEFS = [
-  { key: "endDate", label: "下映日期", get: (m) => m.endDate },
   {
-    key: "remainingDays",
-    label: "剩余",
-    get: (m) => (isEmptyField(m.remainingDays) ? "" : `${m.remainingDays}天`),
+    key: "endDate",
+    label: "下映日期",
+    get: (m) => {
+      if (isEmptyField(m.endDate) && isEmptyField(m.remainingDays)) return "";
+      const days = isEmptyField(m.remainingDays) ? "" : ` 剩余${m.remainingDays}天`;
+      return `${m.endDate || "--"}${days}`;
+    },
   },
   {
     key: "dynamicForecast",
@@ -97,9 +106,9 @@ const METRIC_DEFS = [
     get: (m) => m.dynamicForecast,
     trend: (m) => m.dynamicTrend,
   },
-  { key: "yesterdayTotal", label: "昨日", get: (m) => m.yesterdayTotal },
   { key: "dailyIncrease", label: "日增", get: (m) => m.dailyIncrease },
   { key: "hourSpeed", label: "时速", get: (m) => m.hourSpeedText },
+  { key: "yesterdayTotal", label: "昨日", get: (m) => m.yesterdayTotal },
   {
     key: "yesterdaySamePeriod",
     label: "昨日同期",
@@ -117,6 +126,9 @@ const METRIC_DEFS = [
     get: (m) => m.totalForecast,
     trend: (m) => m.totalTrend,
   },
+  { key: "boxRate", label: "票房占比", get: (m) => m.boxRate },
+  { key: "showCountRate", label: "排片占比", get: (m) => m.showCountRate },
+  { key: "avgSeatView", label: "实时上座", get: (m) => m.avgSeatView },
 ];
 
 function updateMovieCache(key, movie) {
@@ -162,9 +174,30 @@ function preferNonEmptyFields(...sources) {
 
 function setStatus(type, text) {
   if (!statusEl) return;
-  statusEl.className = `status status--${type}`;
-  statusEl.textContent = text;
-  statusEl.style.display = type === "ok" ? "none" : "block";
+  const showPartial = type === "ok" && partialDataWarning;
+  const finalType = showPartial ? "error" : type;
+  const finalText = showPartial ? partialDataWarning : text;
+  statusEl.className = `status status--${finalType}`;
+  statusEl.textContent = finalText;
+  statusEl.style.display = finalType === "ok" ? "none" : "block";
+}
+
+function updatePartialDataWarning(errors = []) {
+  if (!errors.length) {
+    partialDataWarning = "";
+    return;
+  }
+  const loginIssue = errors.find((e) => e.action === "login" || /login|登录/.test(String(e.code)));
+  const detail = loginIssue?.detail || errors[0]?.detail || "部分详细数据获取失败";
+  partialDataWarning = `部分详细数据获取失败：${detail}`;
+}
+
+function isLoginRelatedError(error) {
+  if (error instanceof MaoyanApiError) {
+    return error.action === "login" || /login|401|403/.test(String(error.code));
+  }
+  const msg = String(error?.message || "");
+  return /登录|签名|401|403/.test(msg);
 }
 
 function escapeHtml(s) {
@@ -204,7 +237,7 @@ function showBoxDelta(anchorEl, delta, unit = "万") {
   el.className = "delta-bubble";
   el.textContent = formatDelta(delta, unit);
   el.style.left = `${rect.left + rect.width * 0.5}px`;
-  el.style.top = `${rect.top}px`;
+  el.style.top = `${Math.max(8, rect.top - 6)}px`;
   deltaOverlayEl.appendChild(el);
 
   requestAnimationFrame(() => el.classList.add("delta-bubble--pop"));
@@ -244,6 +277,32 @@ function maybeShowBoxIncrease(anchorEl, prevAmount, prevHtml, nextHtml, unit, is
   if (delta > 0) showBoxDeltaWhenReady(anchorEl, delta, unit);
 }
 
+function mergeDailyTableRows(prevRows, nextRows) {
+  const labels = ["今日", "明日", "后天"];
+  const prevMap = new Map((prevRows || []).map((row) => [String(row.label || "").trim(), row]));
+  const nextMap = new Map((nextRows || []).map((row) => [String(row.label || "").trim(), row]));
+  const pickCell = (label, idx, field) => {
+    const prev = prevMap.get(label) || prevRows?.[idx] || {};
+    const next = nextMap.get(label) || nextRows?.[idx] || {};
+    const candidates = [next[field], prev[field]];
+    for (const val of candidates) {
+      if (!isEmptyField(val) && val !== "--") return val;
+    }
+    return next[field] ?? prev[field] ?? "--";
+  };
+
+  return labels.map((label, idx) => ({
+    label,
+    box: pickCell(label, idx, "box"),
+    boxHtml: pickCell(label, idx, "boxHtml"),
+    boxUnit: pickCell(label, idx, "boxUnit"),
+    forecast: pickCell(label, idx, "forecast"),
+    boxRate: pickCell(label, idx, "boxRate"),
+    showCountRate: pickCell(label, idx, "showCountRate"),
+    avgSeatView: pickCell(label, idx, "avgSeatView"),
+  }));
+}
+
 function stabilizeMovie(movie) {
   const key = String(movie.movieId);
   const prev = lastGoodMovies.get(key) || {};
@@ -251,10 +310,12 @@ function stabilizeMovie(movie) {
 
   for (const field of PRESERVE_MOVIE_FIELDS) {
     if (field === "dailyTable") {
-      if (!Array.isArray(stable.dailyTable) || !stable.dailyTable.length) {
-        if (Array.isArray(prev.dailyTable) && prev.dailyTable.length) {
-          stable.dailyTable = prev.dailyTable;
-        }
+      const prevTable = Array.isArray(prev.dailyTable) ? prev.dailyTable : [];
+      const nextTable = Array.isArray(stable.dailyTable) ? stable.dailyTable : [];
+      if (nextTable.length) {
+        stable.dailyTable = mergeDailyTableRows(prevTable, nextTable);
+      } else if (prevTable.length) {
+        stable.dailyTable = prevTable;
       }
       continue;
     }
@@ -299,7 +360,8 @@ function mergeEnrichedMovies(baseMovies, enrichedMovies, speed = {}) {
     if (!isEmptyField(movie.avgSeatView)) merged.avgSeatView = movie.avgSeatView;
     if (!isEmptyField(movie.sumBoxDesc)) merged.sumBoxDesc = movie.sumBoxDesc;
     if (Array.isArray(enriched.dailyTable) && enriched.dailyTable.length) {
-      merged.dailyTable = enriched.dailyTable;
+      const prevTable = Array.isArray(movie.dailyTable) ? movie.dailyTable : [];
+      merged.dailyTable = mergeDailyTableRows(prevTable, enriched.dailyTable);
     }
     return stabilizeMovie(merged);
   });
@@ -360,13 +422,6 @@ function trendArrow(trend) {
   return "";
 }
 
-function isEmptyField(val) {
-  if (val == null) return true;
-  if (Array.isArray(val)) return !val.length;
-  const text = String(val).trim();
-  return !text || text === "--" || text === "-";
-}
-
 function buildSpeedMap(movies) {
   const now = Date.now();
   const map = {};
@@ -403,16 +458,26 @@ function setHtmlIfChanged(el, next) {
   return true;
 }
 
-function fitNowrapEl(el) {
+function fitNowrapEl(el, { minSize = 20, allowWrap = false } = {}) {
   if (!el) return;
   el.style.fontSize = "";
+  if (allowWrap) {
+    el.style.whiteSpace = "normal";
+    el.style.display = "-webkit-box";
+    el.style.webkitLineClamp = "2";
+    el.style.webkitBoxOrient = "vertical";
+    el.style.overflow = "hidden";
+    const computed = parseFloat(getComputedStyle(el).fontSize) || minSize;
+    if (computed < minSize) el.style.fontSize = `${minSize}px`;
+    return;
+  }
   const parent = el.parentElement;
   const limit = parent?.clientWidth || el.clientWidth;
   if (!limit) return;
-  const computed = parseFloat(getComputedStyle(el).fontSize) || 20;
+  const computed = parseFloat(getComputedStyle(el).fontSize) || minSize;
   let size = computed;
   let guard = 0;
-  while (guard < 28 && size > 10 && el.scrollWidth > limit + 1) {
+  while (guard < 20 && size > minSize && el.scrollWidth > limit + 1) {
     size -= 1;
     el.style.fontSize = `${size}px`;
     guard += 1;
@@ -421,22 +486,6 @@ function fitNowrapEl(el) {
 
 function mainlandValue(movie) {
   return movie.mainlandBox || movie.sumBoxDesc || "";
-}
-
-function buildRegionsHtml(movie) {
-  const regions = [
-    { label: "中国港澳台", value: movie.hmtBox },
-    { label: "海外", value: movie.overseasBox },
-  ].filter((item) => !isEmptyField(item.value));
-
-  if (!regions.length) return "";
-
-  return regions
-    .map(
-      (item) =>
-        `<span class="region"><em>${item.label}</em><strong>${escapeHtml(item.value)}</strong></span>`
-    )
-    .join("");
 }
 
 function buildMetricsHtml(movie) {
@@ -456,7 +505,23 @@ function buildMetricsHtml(movie) {
   return items
     .map(
       (item) =>
-        `<div class="metric" data-metric="${item.key}"><span class="metric__label">${item.label}</span><span class="metric__value">${item.value}</span></div>`
+        `<div class="metric" data-metric="${item.key}"><span class="metric__label">${item.label}：</span><span class="metric__value">${item.value}</span></div>`
+    )
+    .join("");
+}
+
+function buildRegionsHtml(movie) {
+  const regions = [
+    { label: "中国港澳台", value: movie.hmtBox },
+    { label: "海外", value: movie.overseasBox },
+  ].filter((item) => !isEmptyField(item.value));
+
+  if (!regions.length) return "";
+
+  return regions
+    .map(
+      (item) =>
+        `<span class="region"><em>${item.label}：</em><strong>${escapeHtml(item.value)}</strong></span>`
     )
     .join("");
 }
@@ -475,62 +540,105 @@ function dailyTableSignature(rows) {
   );
 }
 
+function ensureDailyTable(movie) {
+  const labels = ["今日", "明日", "后天"];
+  const src = Array.isArray(movie.dailyTable) ? movie.dailyTable : [];
+  const byLabel = new Map(src.map((row) => [String(row.label || "").trim(), row]));
+
+  const todayBoxPlain =
+    movie.todayBox > 0
+      ? `${Number(movie.todayBox).toFixed(2)}${movie.todayUnit || "万"}`
+      : !isEmptyField(movie.todayBoxText)
+        ? `${movie.todayBoxText}${movie.todayUnit || "万"}`
+        : !isEmptyField(movie.dailyIncrease)
+          ? String(movie.dailyIncrease)
+          : "";
+
+  return labels.map((label, i) => {
+    const prev = byLabel.get(label) || src[i] || {};
+    const isToday = i === 0;
+    const box =
+      !isEmptyField(prev.box) && prev.box !== "--"
+        ? prev.box
+        : isToday && todayBoxPlain
+          ? todayBoxPlain
+          : "--";
+    return {
+      label,
+      box,
+      // 优先用明文，避免猫眼加密字体显示成点
+      boxHtml: isToday && isEmptyField(box) ? prev.boxHtml || movie.todayBoxHtml || "" : "",
+      boxUnit: prev.boxUnit || movie.todayUnit || "万",
+      forecast:
+        !isEmptyField(prev.forecast) && prev.forecast !== "--"
+          ? prev.forecast
+          : isToday && !isEmptyField(movie.dynamicForecast)
+            ? movie.dynamicForecast
+            : "--",
+      boxRate:
+        !isEmptyField(prev.boxRate) && prev.boxRate !== "--"
+          ? prev.boxRate
+          : isToday && !isEmptyField(movie.boxRate)
+            ? movie.boxRate
+            : "--",
+      showCountRate:
+        !isEmptyField(prev.showCountRate) && prev.showCountRate !== "--"
+          ? prev.showCountRate
+          : isToday && !isEmptyField(movie.showCountRate)
+            ? movie.showCountRate
+            : "--",
+      avgSeatView:
+        !isEmptyField(prev.avgSeatView) && prev.avgSeatView !== "--"
+          ? prev.avgSeatView
+          : isToday && !isEmptyField(movie.avgSeatView)
+            ? movie.avgSeatView
+            : "--",
+    };
+  });
+}
+
 function dailyTableHtml(rows) {
-  const filteredRows = (rows || []).filter(
-    (row) =>
-      !isEmptyField(row.box) ||
-      !isEmptyField(row.boxHtml) ||
-      !isEmptyField(row.forecast) ||
-      !isEmptyField(row.boxRate) ||
-      !isEmptyField(row.showCountRate) ||
-      !isEmptyField(row.avgSeatView)
-  );
-  if (!filteredRows.length) return "";
+  const list = Array.isArray(rows) && rows.length ? rows : [];
+  if (!list.length) return "";
 
   const columns = [
     {
       key: "box",
       label: "票房(含预售)",
       render: (row) => {
+        if (!isEmptyField(row.box) && row.box !== "--") {
+          return `<span class="num--hot">${escapeHtml(row.box)}</span>`;
+        }
         if (row.boxHtml) {
           return `<span class="mtsi-font js-day-box num--hot">${row.boxHtml}</span><span class="unit">${escapeHtml(row.boxUnit || "万")}</span>`;
         }
-        return `<span class="num--hot">${escapeHtml(row.box)}</span>`;
+        return `<span class="num--hot">--</span>`;
       },
-      hasValue: (row) => !isEmptyField(row.box) || !isEmptyField(row.boxHtml),
     },
     {
       key: "forecast",
       label: "预测",
-      render: (row) => escapeHtml(row.forecast),
-      hasValue: (row) => !isEmptyField(row.forecast),
+      render: (row) => escapeHtml(row.forecast || "--"),
     },
     {
       key: "boxRate",
-      label: "票房占比",
-      render: (row) => escapeHtml(row.boxRate),
-      hasValue: (row) => !isEmptyField(row.boxRate),
+      label: "票房%",
+      render: (row) => escapeHtml(row.boxRate || "--"),
     },
     {
       key: "showCountRate",
-      label: "排片占比",
-      render: (row) => escapeHtml(row.showCountRate),
-      hasValue: (row) => !isEmptyField(row.showCountRate),
+      label: "排片%",
+      render: (row) => escapeHtml(row.showCountRate || "--"),
     },
     {
       key: "avgSeatView",
       label: "上座率",
-      render: (row) => escapeHtml(row.avgSeatView),
-      hasValue: (row) => !isEmptyField(row.avgSeatView),
+      render: (row) => escapeHtml(row.avgSeatView || "--"),
     },
-  ].filter((col) => filteredRows.some((row) => col.hasValue(row)));
+  ];
 
-  if (!columns.length) return "";
-
-  const head = `<tr><th>日期</th>${columns
-    .map((col) => `<th>${col.label}</th>`)
-    .join("")}</tr>`;
-  const body = filteredRows
+  const head = `<tr><th>日期</th>${columns.map((col) => `<th>${col.label}</th>`).join("")}</tr>`;
+  const body = list
     .map((row) => {
       const cells = columns.map((col) => `<td class="num">${col.render(row)}</td>`).join("");
       return `<tr><td>${escapeHtml(row.label)}</td>${cells}</tr>`;
@@ -540,31 +648,97 @@ function dailyTableHtml(rows) {
   return `<table class="race-card__table"><thead>${head}</thead><tbody>${body}</tbody></table>`;
 }
 
+const RACE_TOP_COUNT = 10;
+const PODIUM_COUNT = 3;
+
+function isPodiumRank(rank) {
+  return Number(rank) > 0 && Number(rank) <= PODIUM_COUNT;
+}
+
 function cardClassName(movie) {
-  const rank = Math.min(Number(movie.rank) || 99, 10);
-  const compact = rank >= 6 ? " race-card--compact" : "";
+  const rank = Math.min(Number(movie.rank) || 99, RACE_TOP_COUNT);
+  const compact = !isPodiumRank(rank) ? " race-card--compact race-row" : "";
   return `race-card race-card--rank${rank}${compact}`;
+}
+
+function formatCompactBox(movie) {
+  const amount = getMovieBoxAmount(movie);
+  if (amount > 0) return `${formatBoxAmount(amount)}${movie.todayUnit || "万"}`;
+  if (!isEmptyField(movie.todayBoxText)) return `${movie.todayBoxText}${movie.todayUnit || "万"}`;
+  return "--";
+}
+
+function raceRowTemplate(movie) {
+  const boxText = formatCompactBox(movie);
+  return `
+    <div class="race-row__inner">
+      <span class="race-card__rank">NO.${movie.rank}</span>
+      <h2 class="race-card__title race-row__title">《${escapeHtml(movie.name)}》</h2>
+      <div class="race-row__metrics">
+        <span class="race-row__metric"><em>实时</em><strong class="js-day-box">${escapeHtml(boxText)}</strong></span>
+        <span class="race-row__metric"><em>占比</em><strong>${escapeHtml(movie.boxRate || "--")}</strong></span>
+        <span class="race-row__metric"><em>排片</em><strong>${escapeHtml(movie.showCountRate || "--")}</strong></span>
+        <span class="race-row__metric"><em>上座</em><strong>${escapeHtml(movie.avgSeatView || "--")}</strong></span>
+      </div>
+    </div>
+  `;
+}
+
+function buildRaceRow(movie) {
+  const card = document.createElement("article");
+  card.className = cardClassName(movie);
+  card.dataset.movieId = String(movie.movieId);
+  card.dataset.rank = String(movie.rank);
+  card.innerHTML = raceRowTemplate(movie);
+  requestAnimationFrame(() => {
+    fitNowrapEl(card.querySelector(".race-row__title"), { minSize: 20, allowWrap: true });
+  });
+  return card;
+}
+
+function updateRaceRow(card, movie, isNew = false) {
+  const prevRank = Number(card.dataset.rank || 0);
+  card.className = cardClassName(movie);
+  card.dataset.rank = String(movie.rank);
+  if (prevRank && prevRank !== movie.rank) {
+    card.classList.remove("is-flash");
+    void card.offsetWidth;
+    card.classList.add("is-flash");
+  }
+  setTextIfChanged(card.querySelector(".race-card__rank"), `NO.${movie.rank}`);
+  if (setTextIfChanged(card.querySelector(".race-card__title"), `《${movie.name}》`)) {
+    fitNowrapEl(card.querySelector(".race-row__title"), { minSize: 20, allowWrap: true });
+  }
+  const boxText = formatCompactBox(movie);
+  setTextIfChanged(card.querySelector(".js-day-box"), boxText);
+  const metrics = card.querySelectorAll(".race-row__metric strong");
+  if (metrics[1]) setTextIfChanged(metrics[1], movie.boxRate || "--");
+  if (metrics[2]) setTextIfChanged(metrics[2], movie.showCountRate || "--");
+  if (metrics[3]) setTextIfChanged(metrics[3], movie.avgSeatView || "--");
+  updateRaceCardDelta(card, movie, isNew);
+  trackBoxDelta(card, movie, isNew);
 }
 
 function raceCardTemplate(movie) {
   const mainland = mainlandValue(movie);
   const regions = buildRegionsHtml(movie);
   const metrics = buildMetricsHtml(movie);
-  const table = dailyTableHtml(movie.dailyTable);
+  const dailyTable = ensureDailyTable(movie);
+  const table = dailyTableHtml(dailyTable);
   const mainlandText = isEmptyField(mainland) ? "--" : String(mainland);
 
   return `
-    <span class="race-card__badge">今日冠军</span>
     <div class="race-card__head">
       <span class="race-card__rank">NO.${movie.rank}</span>
       <div class="race-card__title-wrap">
         <h2 class="race-card__title">《${escapeHtml(movie.name)}》</h2>
-        ${CROWN_SVG}
       </div>
-      <span class="race-card__delta"></span>
       <div class="race-card__mainland${isEmptyField(mainland) ? " is-empty" : ""}">
-        <em>中国内地：</em>
-        <strong class="js-mainland">${isEmptyField(mainland) ? "--" : escapeHtml(mainlandText)}</strong>
+        <span class="race-card__delta"></span>
+        <div class="race-card__mainland-row">
+          <em>中国内地：</em>
+          <strong class="js-mainland">${isEmptyField(mainland) ? "--" : escapeHtml(mainlandText)}</strong>
+        </div>
       </div>
     </div>
     <div class="race-card__regions${regions ? "" : " is-empty"}">${regions}</div>
@@ -581,11 +755,11 @@ function buildRaceCard(movie) {
   card.innerHTML = raceCardTemplate(movie);
   const wrap = card.querySelector(".race-card__table-wrap");
   if (wrap && !wrap.classList.contains("is-empty")) {
-    wrap.dataset.tableSig = dailyTableSignature(movie.dailyTable);
+    wrap.dataset.tableSig = dailyTableSignature(ensureDailyTable(movie));
   }
   requestAnimationFrame(() => {
-    fitNowrapEl(card.querySelector(".race-card__title"));
-    fitNowrapEl(card.querySelector(".js-mainland"));
+    fitNowrapEl(card.querySelector(".race-card__title"), { minSize: 30, allowWrap: true });
+    fitNowrapEl(card.querySelector(".js-mainland"), { minSize: 26 });
   });
   return card;
 }
@@ -613,11 +787,7 @@ function updateRaceCardDelta(card, movie, isNew) {
     deltaEl.textContent = text;
     deltaEl.classList.add("has-rise");
     lastDeltaDisplay.set(key, { text, until: Date.now() + DELTA_PERSIST_MS });
-    const anchor =
-      card.querySelector(".race-card__title") ||
-      card.querySelector(".js-mainland") ||
-      deltaEl;
-    showBoxDeltaWhenReady(anchor, delta, unit);
+    showBoxDeltaWhenReady(getDeltaBubbleAnchor(card), delta, unit);
     return;
   }
 
@@ -632,13 +802,19 @@ function updateRaceCardDelta(card, movie, isNew) {
   deltaEl.classList.remove("has-rise");
 }
 
+function getDeltaBubbleAnchor(card) {
+  return (
+    card.querySelector('[data-metric="dailyIncrease"] .metric__value') ||
+    card.querySelector(".race-card__delta") ||
+    card.querySelector(".race-card__title")
+  );
+}
+
 function getBoxAnchor(card) {
   return (
-    card.querySelector(".race-card__title") ||
+    getDeltaBubbleAnchor(card) ||
     card.querySelector(".js-mainland") ||
-    card.querySelector(".js-day-box") ||
-    card.querySelector('[data-metric="dailyIncrease"] .metric__value') ||
-    card.querySelector(".race-card__delta")
+    card.querySelector(".js-day-box")
   );
 }
 
@@ -681,7 +857,7 @@ function updateRaceCard(card, movie, isNew = false) {
 
   setTextIfChanged(card.querySelector(".race-card__rank"), `NO.${movie.rank}`);
   if (setTextIfChanged(card.querySelector(".race-card__title"), `《${movie.name}》`)) {
-    fitNowrapEl(card.querySelector(".race-card__title"));
+    fitNowrapEl(card.querySelector(".race-card__title"), { minSize: 30, allowWrap: true });
   }
 
   const mainland = mainlandValue(movie);
@@ -691,7 +867,7 @@ function updateRaceCard(card, movie, isNew = false) {
     mainlandWrap.classList.toggle("is-empty", isEmptyField(mainland));
     if (!isEmptyField(mainland)) {
       setTextIfChanged(mainlandEl, mainland);
-      fitNowrapEl(mainlandEl);
+      fitNowrapEl(mainlandEl, { minSize: 26 });
     }
   }
 
@@ -709,10 +885,11 @@ function updateRaceCard(card, movie, isNew = false) {
     if (metricsHtml) setHtmlIfChanged(metricsEl, metricsHtml);
   }
 
-  const tableHtml = dailyTableHtml(movie.dailyTable);
+  const dailyTable = ensureDailyTable(movie);
+  const tableHtml = dailyTableHtml(dailyTable);
   const tableWrap = card.querySelector(".race-card__table-wrap");
   if (tableWrap) {
-    const sig = dailyTableSignature(movie.dailyTable);
+    const sig = dailyTableSignature(dailyTable);
     tableWrap.classList.toggle("is-empty", !tableHtml);
     if (tableHtml && tableWrap.dataset.tableSig !== sig) {
       tableWrap.innerHTML = tableHtml;
@@ -732,23 +909,57 @@ function isFirstSeen(movieId) {
 function ensureRaceCard(movie) {
   const key = String(movie.movieId);
   let card = cardPool.get(key);
-  if (!card || !card.classList.contains("race-card")) {
+  const podium = isPodiumRank(movie.rank);
+  const isRow = card?.classList.contains("race-row");
+  if (!card || !card.classList.contains("race-card") || (podium && isRow) || (!podium && !isRow)) {
     card?.remove();
-    card = buildRaceCard(movie);
+    card = podium ? buildRaceCard(movie) : buildRaceRow(movie);
     cardPool.set(key, card);
-    updateRaceCardDelta(card, movie, isFirstSeen(key));
-    trackBoxDelta(card, movie, isFirstSeen(key));
+    if (podium) {
+      updateRaceCardDelta(card, movie, isFirstSeen(key));
+      trackBoxDelta(card, movie, isFirstSeen(key));
+    } else {
+      updateRaceRow(card, movie, isFirstSeen(key));
+    }
     return card;
   }
-  updateRaceCard(card, movie, isFirstSeen(key));
+  if (podium) updateRaceCard(card, movie, isFirstSeen(key));
+  else updateRaceRow(card, movie, isFirstSeen(key));
   return card;
+}
+
+function renderLoadingSkeleton() {
+  if (!raceListEl) return;
+  raceListEl.innerHTML = Array.from({ length: RACE_TOP_COUNT }, (_, i) => {
+    const rank = i + 1;
+    return `
+      <article class="race-card race-card--skeleton race-card--rank${rank}" aria-hidden="true">
+        <div class="race-card__head">
+          <span class="race-card__rank skeleton-block">NO.${rank}</span>
+          <div class="race-card__title-wrap">
+            <h2 class="race-card__title skeleton-block">加载中</h2>
+          </div>
+          <div class="race-card__mainland skeleton-block"></div>
+        </div>
+        <div class="race-card__metrics">
+          ${Array.from({ length: 9 }, () => '<div class="metric skeleton-block"></div>').join("")}
+        </div>
+        <div class="race-card__table-wrap skeleton-block"></div>
+      </article>
+    `;
+  }).join("");
 }
 
 function renderList(movies) {
   if (!raceListEl) return;
 
-  const list = (movies || []).slice().sort((a, b) => a.rank - b.rank);
+  const list = (movies || [])
+    .slice()
+    .sort((a, b) => a.rank - b.rank)
+    .slice(0, RACE_TOP_COUNT);
   const activeIds = new Set(list.map((m) => String(m.movieId)));
+
+  raceListEl.querySelectorAll(".race-card--skeleton").forEach((el) => el.remove());
 
   for (const [id, card] of cardPool) {
     if (!activeIds.has(id)) {
@@ -757,12 +968,14 @@ function renderList(movies) {
     }
   }
 
-  for (const movie of list) {
+  const cards = list.map((movie) => {
     const card = ensureRaceCard(movie);
-    const index = Math.max(0, movie.rank - 1);
-    const ref = raceListEl.children[index];
-    if (ref !== card) raceListEl.insertBefore(card, ref || null);
     prevRankMap.set(String(movie.movieId), movie.rank);
+    return card;
+  });
+
+  if (cards.length) {
+    raceListEl.replaceChildren(...cards);
   }
 
   updateChampion(list);
@@ -852,14 +1065,9 @@ function setEncodedBoxValue(el, html, fallbackText = "--") {
 function updateChampion(movies) {
   const top = (movies || []).find((m) => m.rank === 1) || movies?.[0];
   if (!top) {
-    champBannerEl?.classList.add("is-hidden");
     champBoxPillEl?.classList.add("is-hidden");
     return;
   }
-
-  champBannerEl?.classList.remove("is-hidden");
-  setTextIfChanged(champTextEl, `今日冠军：${top.name}`);
-  fitNowrapEl(champTextEl);
 
   const unit = top.todayUnit || "万";
   if (champBoxUnitEl) champBoxUnitEl.textContent = unit;
@@ -934,23 +1142,22 @@ function scheduleBackgroundEnrich(requestPollGen, parsed, speed) {
 
   (async () => {
     try {
-      const loggedIn = await window.overlay?.isLoggedIn?.();
+      if (await window.overlay?.isLoginRunning?.()) return;
+
       const enrichOpts = {
         concurrency: config.enrichConcurrency || 2,
         todayStr: parsed.calendar?.today || "",
         speed,
-        trendLimit: config.trendLimit || 5,
-        enableExtraApis: Boolean(loggedIn),
+        trendLimit: config.trendLimit || RACE_TOP_COUNT,
+        enableExtraApis: true,
       };
 
-      const task = needFull
-        ? enrichMovies(config.apiBase, parsed.movies, enrichOpts)
-        : enrichMoviesLight(config.apiBase, parsed.movies, enrichOpts);
+      const task = enrichMovies(config.apiBase, parsed.movies, enrichOpts);
 
       const enriched = await Promise.race([
         task,
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("enrich_timeout")), 30000)
+          setTimeout(() => reject(new Error("enrich_timeout")), 120000)
         ),
       ]);
 
@@ -960,9 +1167,16 @@ function scheduleBackgroundEnrich(requestPollGen, parsed, speed) {
       const currentSpeed = buildSpeedMap(baseMovies);
       const movies = mergeEnrichedMovies(baseMovies, enriched, currentSpeed);
       renderList(movies);
+      updatePartialDataWarning(getLastEnrichErrors());
+      setStatus("ok", "");
       if (needFull) lastFullEnrich = Date.now();
     } catch (err) {
       console.warn("后台补充字段失败", err);
+      if (isLoginRelatedError(err)) {
+        await updateLoginButton(true);
+        partialDataWarning = `部分详细数据获取失败：${err.detail || err.message || "请重新登录"}`;
+        setStatus("ok", "");
+      }
     } finally {
       if (gen === enrichGeneration) enrichingBackground = false;
     }
@@ -1015,9 +1229,7 @@ async function refreshData() {
     }
 
     const raw = await fetchDashboard(config.apiBase);
-    await injectFontStyle(raw.fontStyle);
-
-    const parsed = parseDashboard(raw, config.topCount || 10);
+    const parsed = parseDashboard(raw, config.topCount || RACE_TOP_COUNT);
     if (!parsed.movies.length) {
       if (!hasDisplayedData) setStatus("loading", "等待票房数据…");
       return;
@@ -1037,7 +1249,15 @@ async function refreshData() {
     hasDisplayedData = true;
     setStatus("ok", "");
     scheduleBackgroundEnrich(pollGeneration, parsed, speed);
-    scheduleDecodeRetry();
+    void injectFontStyle(raw.fontStyle)
+      .then(() => {
+        if (!latestMovies.length) return;
+        const decoded = enrichMoviesQuick(latestMovies, latestSpeedMap).map(stabilizeMovie);
+        renderList(decoded);
+        if (latestNation) updateNation(latestNation, latestParsedMeta || {});
+        scheduleDecodeRetry();
+      })
+      .catch((err) => console.warn("字体加载失败", err));
     await updateLoginButton();
   } catch (e) {
     const msg = String(e.message || "");
@@ -1051,9 +1271,10 @@ async function refreshData() {
       else setStatus("ok", "");
       const status = await window.overlay?.ensureApi?.();
       if (status?.apiBase) config.apiBase = status.apiBase;
-    } else if (msg.includes("签名") || msg.includes("登录")) {
+    } else if (e instanceof MaoyanApiError || isLoginRelatedError(e)) {
       await updateLoginButton(true);
-      setStatus("error", "登录已过期，请点击右上角「登录」完成登录");
+      const detail = e instanceof MaoyanApiError ? e.detail : msg;
+      setStatus("error", detail || "登录已过期，请点击右上角「登录」完成登录");
     } else if (!hasDisplayedData) {
       setStatus("error", msg || "拉取数据失败，正在重试…");
     } else {
@@ -1080,7 +1301,7 @@ async function syncOverlaySettings() {
 
   applyOverlaySettings(settings);
   config.pollIntervalMs = settings.pollIntervalMs;
-  config.topCount = settings.topCount;
+  config.topCount = Number(settings.topCount) || RACE_TOP_COUNT;
   config.enrichConcurrency = settings.enrich?.concurrency;
   config.trendLimit = settings.enrich?.trendLimit;
   FULL_ENRICH_INTERVAL_MS = settings.enrich?.fullIntervalMs || 60000;
@@ -1104,19 +1325,26 @@ function startServiceRetryLoop() {
 }
 
 async function waitForApiReady() {
+  if (!window.overlay) {
+    return { ready: false, error: "界面桥接未就绪，请重启软件" };
+  }
+
   setStatus("loading", "正在自动启动票房数据服务…");
-  let status = await window.overlay?.getApiStatus?.();
+  let status = await window.overlay.getApiStatus();
   if (status?.ready) return status;
-  status = await window.overlay?.ensureApi?.();
+  status = await window.overlay.ensureApi();
   if (status?.ready) return status;
 
   return new Promise((resolve) => {
     let off = null;
     const timeout = setTimeout(() => {
       off?.();
-      resolve({ ready: false, error: "票房服务启动超时，请稍后重试" });
-    }, 120000);
-    off = window.overlay?.onApiReady?.((next) => {
+      resolve({
+        ready: false,
+        error: "票房服务启动超时（45 秒），请确认已运行 setup.bat 或重启软件",
+      });
+    }, 45_000);
+    off = window.overlay.onApiReady((next) => {
       clearTimeout(timeout);
       off?.();
       resolve(next);
@@ -1128,7 +1356,35 @@ async function updateLoginButton(forceShow = false) {
   const btn = $("btn-login");
   if (!btn) return;
   const loggedIn = forceShow ? false : await window.overlay?.isLoggedIn?.();
-  btn.classList.toggle("is-hidden", Boolean(loggedIn) && !forceShow);
+  btn.classList.remove("is-hidden");
+  btn.textContent = loggedIn ? "重新登录" : "登录";
+  btn.title = loggedIn ? "重新登录猫眼账号" : "登录猫眼账号";
+}
+
+async function finishLoginSuccess() {
+  await updateLoginButton(false);
+  resetApiSigWarm();
+  partialDataWarning = "";
+  lastFullEnrich = 0;
+  setStatus("loading", "登录成功，正在拉取票房数据…");
+  const status = await window.overlay?.ensureApi?.();
+  if (status?.apiBase) config.apiBase = status.apiBase;
+  startPolling();
+}
+
+function handleLoginFailure(result) {
+  const detail =
+    result?.detail ||
+    result?.error ||
+    (result?.code === "login_cancelled"
+      ? "未完成登录"
+      : result?.code === "login_timeout"
+        ? "登录超时，请重新点击登录"
+        : "登录失败，请重试");
+  setStatus("error", detail);
+  if (result?.code === "chrome_not_found" || result?.code === "browser_launch_failed") {
+    $("btn-login")?.classList.add("is-highlight");
+  }
 }
 
 async function handleLoginClick() {
@@ -1136,47 +1392,78 @@ async function handleLoginClick() {
     clearInterval(loginWatchTimer);
     loginWatchTimer = null;
   }
-  setStatus("loading", "正在打开登录窗口，请在浏览器中完成登录…");
-  await window.overlay?.startLogin?.();
-  setStatus("loading", "登录完成后按回车保存，软件将自动继续拉取数据");
+  $("btn-login")?.classList.remove("is-highlight");
+  const relogin = await window.overlay?.isLoggedIn?.();
+  setStatus("loading", relogin ? "正在打开登录窗口，请重新完成登录…" : "正在打开登录窗口，请在浏览器中完成登录…");
+
+  let offResult = null;
+  const waitForResult = new Promise((resolve) => {
+    offResult = window.overlay?.onLoginResult?.((result) => resolve(result));
+  });
+
+  const loginResult = await window.overlay?.startLogin?.({ relogin });
+  if (loginResult && loginResult.ok === false) {
+    offResult?.();
+    handleLoginFailure(loginResult);
+    return;
+  }
+
+  setStatus("loading", "请在浏览器中完成登录，成功后窗口将自动关闭");
 
   const deadline = Date.now() + 10 * 60 * 1000;
-  loginWatchTimer = setInterval(async () => {
-    if (Date.now() > deadline) {
-      clearInterval(loginWatchTimer);
-      loginWatchTimer = null;
-      setStatus("error", "登录超时，请重新点击「登录」");
-      return;
-    }
-    const loggedIn = await window.overlay?.isLoggedIn?.();
-    if (!loggedIn) return;
+  const result = await Promise.race([
+    waitForResult,
+    new Promise((resolve) => {
+      loginWatchTimer = setInterval(async () => {
+        if (Date.now() > deadline) {
+          clearInterval(loginWatchTimer);
+          loginWatchTimer = null;
+          resolve({ ok: false, code: "login_timeout", detail: "登录超时，请重新点击「登录」" });
+          return;
+        }
+        const running = await window.overlay?.isLoginRunning?.();
+        if (running) return;
+        const loggedIn = await window.overlay?.isLoggedIn?.();
+        if (loggedIn) {
+          clearInterval(loginWatchTimer);
+          loginWatchTimer = null;
+          resolve({ ok: true, loggedIn: true });
+        }
+      }, 2000);
+    }),
+  ]);
+
+  offResult?.();
+  if (loginWatchTimer) {
     clearInterval(loginWatchTimer);
     loginWatchTimer = null;
-    await updateLoginButton(false);
-    setStatus("loading", "登录成功，正在拉取票房数据…");
-    const status = await window.overlay?.ensureApi?.();
-    if (status?.apiBase) config.apiBase = status.apiBase;
-    lastFullEnrich = 0;
-    startPolling();
-  }, 2000);
+  }
+
+  if (result?.ok && result?.loggedIn) {
+    await finishLoginSuccess();
+    return;
+  }
+  handleLoginFailure(result);
 }
 
 async function init() {
   bindDesignViewport();
+  renderLoadingSkeleton();
   $("btn-login")?.addEventListener("click", handleLoginClick);
   if (heroDateEl) setTextIfChanged(heroDateEl, resolveDisplayDate(null));
 
   config = (await window.overlay?.getConfig()) || {
     apiBase: "http://127.0.0.1:8765",
     pollIntervalMs: 5000,
-    topCount: 10,
+    topCount: RACE_TOP_COUNT,
   };
+  config.topCount = Number(config.topCount) || RACE_TOP_COUNT;
 
   await syncOverlaySettings();
   window.overlay?.onSettingsChanged?.((settings) => {
     applyOverlaySettings(settings);
     config.pollIntervalMs = settings.pollIntervalMs;
-    config.topCount = settings.topCount;
+    config.topCount = Number(settings.topCount) || RACE_TOP_COUNT;
     config.enrichConcurrency = settings.enrich?.concurrency;
     config.trendLimit = settings.enrich?.trendLimit;
     FULL_ENRICH_INTERVAL_MS = settings.enrich?.fullIntervalMs || 60000;
@@ -1207,4 +1494,17 @@ async function init() {
   startPolling();
 }
 
-init();
+setTimeout(() => {
+  if (hasDisplayedData) return;
+  if (statusEl?.classList.contains("status--loading")) {
+    setStatus(
+      "error",
+      "加载超时：请先运行 setup.bat 安装依赖，或点击右上角「登录」完成猫眼登录"
+    );
+  }
+}, 60_000);
+
+init().catch((err) => {
+  console.error("界面初始化失败", err);
+  setStatus("error", err?.message || "界面初始化失败，请重启软件");
+});

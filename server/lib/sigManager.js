@@ -1,10 +1,12 @@
 import fs from "fs";
+import path from "path";
 import { chromium } from "playwright";
 import {
   BOX_PAGE,
   BROWSER_API_CACHE_TTL,
   DASHBOARD_CACHE_TTL,
   COOKIE_FILE,
+  DATA_DIR,
   MAX_CACHE_ENTRIES,
   SIG_TTL_SECONDS,
   STORAGE_STATE,
@@ -19,13 +21,21 @@ import {
   sessionCachePath,
   wukongSessionCachePath,
 } from "./config.js";
-import { log } from "./logger.js";
+import { log, explainError, isNonRetryableSigError } from "./logger.js";
 import {
   buildMygsig,
   generateSignKey,
   generateUid,
   randomUuid,
 } from "./maoyanSign.js";
+
+function isLoginInProgress() {
+  try {
+    return fs.existsSync(path.join(DATA_DIR, "login.lock"));
+  } catch {
+    return false;
+  }
+}
 
 function safeRequestUrl(entry, movieId, boxLevel) {
   const raw = entry?.url;
@@ -551,6 +561,10 @@ export class SigManager {
   }
 
   async launchBrowserContext() {
+    if (isLoginInProgress()) {
+      throw new Error("login_in_progress");
+    }
+
     const chromePath = getChromeExecutable();
     if (!chromePath || !fs.existsSync(chromePath)) {
       log.chromeMissing();
@@ -672,7 +686,7 @@ export class SigManager {
           }
 
           if (!onBox) {
-            log.sigStep("没进到票房页，请先运行 login.bat 登录");
+            log.sigStep("没进到票房页，请先完成猫眼登录");
           }
 
           await page.waitForTimeout(800);
@@ -739,21 +753,31 @@ export class SigManager {
     boxLevel = String(boxLevel);
 
     let captured = null;
+    let lastError = null;
     for (let attempt = 1; attempt <= 2; attempt++) {
       if (attempt > 1) log.retry(attempt);
       try {
         captured = await this.captureMtgsig(movieId, boxLevel);
-      } catch {
+      } catch (error) {
+        lastError = error;
+        if (isNonRetryableSigError(error)) {
+          throw error;
+        }
         captured = null;
-        log.sigStep("打开浏览器时出错了，准备重试");
+        log.sigStep(`打开浏览器时出错了：${explainError(error)}，准备重试`);
       }
       if (captured?.headers?.mtgsig) break;
       await new Promise((r) => setTimeout(r, 1500));
     }
 
     if (!captured?.headers?.mtgsig) {
+      if (lastError && isNonRetryableSigError(lastError)) {
+        throw lastError;
+      }
       log.sigFail("页面没返回有效签名，请检查网络或先登录");
-      throw new Error("sig_capture_failed");
+      const err = new Error("sig_capture_failed");
+      if (lastError) err.cause = lastError;
+      throw err;
     }
 
     const entry = {
@@ -1009,7 +1033,7 @@ export class SigManager {
           }
 
           if (!onBox) {
-            log.sigStep("没进到票房页，请先运行 login.bat 登录");
+            log.sigStep("没进到票房页，请先完成猫眼登录");
             return captured;
           }
 
@@ -1326,8 +1350,9 @@ export class SigManager {
           refreshedAt: Date.now() / 1000,
         });
         this.pruneCache();
-        log.reqData("fresh");
-        log.reqMode("browser");
+      log.reqData("fresh");
+      log.reqMode("browser");
+        log.markDashboardSuccess();
         return data;
       }
 
@@ -1344,6 +1369,7 @@ export class SigManager {
       });
       this.pruneCache();
       log.reqData("fresh");
+      log.markDashboardSuccess();
       return data;
     });
   }

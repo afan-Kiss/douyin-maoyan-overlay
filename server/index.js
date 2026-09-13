@@ -9,7 +9,7 @@ import {
   getApiPort,
   getChromeExecutable,
 } from "./lib/config.js";
-import { log, requestLogMiddleware, explainError } from "./lib/logger.js";
+import { log, requestLogMiddleware, explainError, buildDiagnostics } from "./lib/logger.js";
 import { isPortListening } from "./lib/port.js";
 import { UpstreamError, manager } from "./lib/sigManager.js";
 
@@ -30,45 +30,137 @@ function parseMovieQuery(req) {
   };
 }
 
-function sendApiError(res, e) {
+function buildApiErrorPayload(e) {
   if (e instanceof UpstreamError) {
-    const detail =
-      e.status === 403
-        ? "猫眼拒绝了请求，可能是签名失效或触发风控"
-        : e.status === 401
-          ? "登录信息失效，请在软件内点击「登录猫眼」重新登录"
-          : e.status === 502 && e.message === "network_failed"
-          ? "连不上猫眼服务器，请检查网络"
-          : `猫眼返回错误，状态码 ${e.status}`;
-    log.reqFail("拉取失败", detail);
-    res.status(e.status >= 400 && e.status < 600 ? e.status : 502).json({
-      detail: "拉取数据失败，请稍后再试",
-    });
-    return;
+    const status = e.status >= 400 && e.status < 600 ? e.status : 502;
+    if (e.status === 403) {
+      return {
+        status,
+        code: "upstream_403",
+        detail: "猫眼拒绝了请求，可能是签名失效或触发风控",
+        retryable: true,
+        action: "refresh",
+      };
+    }
+    if (e.status === 401) {
+      return {
+        status,
+        code: "upstream_401",
+        detail: "猫眼登录状态已失效，请重新登录",
+        retryable: false,
+        action: "login",
+      };
+    }
+    if (e.status === 502 && e.message === "network_failed") {
+      return {
+        status,
+        code: "network_failed",
+        detail: "连不上猫眼服务器，请检查网络",
+        retryable: true,
+        action: null,
+      };
+    }
+    if (e.message === "bad_json") {
+      return {
+        status,
+        code: "internal_error",
+        detail: "猫眼返回了无法解析的数据",
+        retryable: true,
+        action: null,
+      };
+    }
+    return {
+      status,
+      code: "upstream_failed",
+      detail: `猫眼返回错误，状态码 ${e.status}`,
+      retryable: true,
+      action: null,
+    };
   }
-  if (e?.message === "movie_id_required") {
-    log.reqFail("参数错误", "电影编号不能为空");
-    res.status(400).json({ detail: "电影编号不能为空" });
-    return;
+
+  const msg = String(e?.message || "");
+  const map = {
+    movie_id_required: {
+      status: 400,
+      code: "movie_id_required",
+      detail: "电影编号不能为空",
+      retryable: false,
+      action: null,
+    },
+    chrome_not_found: {
+      status: 500,
+      code: "chrome_not_found",
+      detail: "找不到浏览器，请检查 config.ini 配置或安装 Google Chrome",
+      retryable: false,
+      action: null,
+    },
+    browser_launch_failed: {
+      status: 500,
+      code: "browser_launch_failed",
+      detail: explainError(e),
+      retryable: false,
+      action: null,
+    },
+    login_required: {
+      status: 401,
+      code: "login_required",
+      detail: "猫眼登录状态已失效，请重新登录",
+      retryable: false,
+      action: "login",
+    },
+    login_in_progress: {
+      status: 503,
+      code: "login_in_progress",
+      detail: "登录窗口正在打开，请完成登录后再试",
+      retryable: true,
+      action: "wait",
+    },
+    sig_capture_failed: {
+      status: 500,
+      code: "sig_capture_failed",
+      detail: explainError(e?.cause) || "签名获取失败，请刷新浏览器签名或重新登录",
+      retryable: true,
+      action: "refresh",
+    },
+    dashboard_timeout: {
+      status: 504,
+      code: "timeout",
+      detail: "大盘数据请求超时，请稍后再试",
+      retryable: true,
+      action: null,
+    },
+  };
+
+  if (map[msg]) return map[msg];
+
+  if (e?.name === "TimeoutError" || e?.name === "AbortError" || /timeout/i.test(msg)) {
+    return {
+      status: 504,
+      code: "timeout",
+      detail: explainError(e),
+      retryable: true,
+      action: null,
+    };
   }
-  if (e?.message === "chrome_not_found") {
-    log.reqFail("环境错误", "没找到浏览器，请检查 config.ini");
-    res.status(500).json({ detail: "找不到浏览器，请检查 config.ini 配置" });
-    return;
-  }
-  if (e?.message === "sig_capture_failed") {
-    log.reqFail("签名失败", "没抓到有效签名，请先登录猫眼");
-    res.status(500).json({ detail: "签名获取失败，请先登录猫眼" });
-    return;
-  }
-  if (e?.name === "TimeoutError" || e?.name === "AbortError") {
-    log.reqFail("超时", explainError(e));
-    res.status(504).json({ detail: "请求超时，请稍后再试" });
-    return;
-  }
-  const detail = explainError(e);
-  log.reqFail("出错了", detail);
-  res.status(500).json({ detail: "服务内部出错，请稍后再试" });
+
+  return {
+    status: 500,
+    code: "internal_error",
+    detail: explainError(e) || "服务内部出错，请稍后再试",
+    retryable: false,
+    action: null,
+  };
+}
+
+function sendApiError(res, e) {
+  const payload = buildApiErrorPayload(e);
+  log.reqFail(payload.code, payload.detail);
+  res.status(payload.status).json({
+    code: payload.code,
+    detail: payload.detail,
+    retryable: payload.retryable,
+    action: payload.action,
+  });
 }
 
 async function handleBoxShow(req, res) {
@@ -139,6 +231,10 @@ function ensureRuntime() {
     path.join(DIR, "node_modules"),
     path.join(DIR, "..", "node_modules"),
   ];
+  for (const part of String(process.env.NODE_PATH || "").split(path.delimiter)) {
+    const trimmed = part.trim();
+    if (trimmed) depRoots.push(trimmed);
+  }
   const hasDeps = depRoots.some(
     (root) =>
       fs.existsSync(path.join(root, "express")) &&
@@ -162,8 +258,11 @@ function ensureRuntime() {
 }
 
 function installProcessGuards() {
-  process.on("unhandledRejection", () => {
-    log.info("后台任务出错，已自动拦住，服务继续运行");
+  process.on("unhandledRejection", (error) => {
+    log.error("后台任务未捕获异常", error);
+  });
+  process.on("uncaughtException", (error) => {
+    log.error("服务未捕获异常", error);
   });
 }
 
@@ -188,6 +287,17 @@ async function main() {
 
   const app = express();
   const PORT = getApiPort();
+
+  app.use((req, res, next) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    if (req.method === "OPTIONS") {
+      res.sendStatus(204);
+      return;
+    }
+    next();
+  });
 
   app.use(requestLogMiddleware);
 
@@ -224,6 +334,18 @@ async function main() {
 
   app.get("/health", (_req, res) => {
     res.json({ ok: true });
+  });
+
+  app.get("/health/ready", (_req, res) => {
+    const diagnostics = buildDiagnostics();
+    res.json({
+      ok: diagnostics.serviceReady && diagnostics.chromePathValid,
+      ...diagnostics,
+    });
+  });
+
+  app.get("/api/diagnostics", (_req, res) => {
+    res.json(buildDiagnostics());
   });
 
   const boxShowPaths = [
@@ -266,10 +388,11 @@ async function main() {
 
     try {
       await manager.refresh(movieId, boxLevel);
+      log.refreshDone();
       res.json({ ok: true });
-    } catch {
-      log.sigFail("刷新没成功，请检查浏览器配置或先登录");
-      res.status(500).json({ detail: "刷新签名失败，请稍后再试" });
+    } catch (e) {
+      log.sigFail(explainError(e));
+      sendApiError(res, e);
     }
   }
 
