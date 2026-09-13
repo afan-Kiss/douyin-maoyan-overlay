@@ -331,6 +331,118 @@ function resolveTodayBox(todayRaw, todayUnit) {
   return 0;
 }
 
+function pickNonemptyNationField(nation, fields) {
+  for (const field of fields) {
+    const val = nation?.[field];
+    if (val == null) continue;
+    const text = String(val).trim();
+    if (text && text !== "--" && text !== "-") return text;
+  }
+  return "";
+}
+
+function parseDescNumber(desc) {
+  if (!desc) return NaN;
+  const s = String(desc).replace(/,/g, "").trim();
+  const m = s.match(/([\d.]+)/);
+  if (!m) return NaN;
+  let n = Number(m[1]);
+  if (!Number.isFinite(n)) return NaN;
+  if (s.includes("亿")) n *= 10000;
+  return n;
+}
+
+function formatAvgAttendance(avg) {
+  if (!Number.isFinite(avg) || avg <= 0) return "";
+  if (avg >= 10000) return `${(avg / 10000).toFixed(1)}万`;
+  return avg >= 100 ? avg.toFixed(0) : avg.toFixed(1);
+}
+
+export function resolveNationSeatMetric(nation = {}) {
+  const seatRaw = pickNonemptyNationField(nation, [
+    "viewSeatRate",
+    "avgSeatView",
+    "seatRate",
+    "viewSeatRateDesc",
+  ]);
+  if (seatRaw) {
+    const value = seatRaw.includes("%") ? seatRaw : `${seatRaw.replace(/%$/, "")}%`;
+    return { label: "上座率", value, seatRaw };
+  }
+
+  const avgShow = pickNonemptyNationField(nation, ["avgShowView", "avgShowViewDesc"]);
+  if (avgShow) {
+    return { label: "场均人次", value: avgShow, seatRaw: avgShow };
+  }
+
+  const views = parseDescNumber(nation.viewCountDesc);
+  const shows = parseDescNumber(nation.showCountDesc);
+  if (Number.isFinite(views) && Number.isFinite(shows) && shows > 0) {
+    const formatted = formatAvgAttendance(views / shows);
+    if (formatted) {
+      return { label: "场均人次", value: formatted, seatRaw: `views/shows:${formatted}` };
+    }
+  }
+
+  return { label: "上座率", value: "--", seatRaw: "" };
+}
+
+export function resolveChampionBoxWan(movie) {
+  if (!movie) return 0;
+  if (Number.isFinite(movie.todayBox) && movie.todayBox > 0) return movie.todayBox;
+  const fromHtml = resolveTodayBox(decodeFontNum(movie.todayBoxHtml || ""), normalizeUnit(movie.todayUnit));
+  if (fromHtml > 0) return fromHtml;
+  if (movie.todayBoxText && movie.todayBoxText !== "--") {
+    const n = parseBoxNum(movie.todayBoxText, movie.todayUnit || "万");
+    if (n > 0) return n;
+  }
+  return 0;
+}
+
+export function computeMovieBoxDeltaWan(prevAmount, nextAmount) {
+  if (!Number.isFinite(prevAmount) || !Number.isFinite(nextAmount)) return 0;
+  if (prevAmount <= 0 || nextAmount <= prevAmount) return 0;
+  const delta = nextAmount - prevAmount;
+  return delta >= 0.001 ? delta : 0;
+}
+
+export function traceDashboardData(parsed, raw, { enabled = false } = {}) {
+  if (!enabled) return;
+  const nationRaw = raw?.movieList?.nationBoxInfo ?? {};
+  const nation = parsed?.nation ?? {};
+  const top1 = parsed?.movies?.[0];
+  const seat = resolveNationSeatMetric(nationRaw);
+
+  console.log("[DATA_TRACE]");
+  console.log("nation:", {
+    todayBoxRaw: nationRaw.nationBoxSplitUnit?.num ?? "",
+    todayBoxParsedWan: nation.todayBox ?? 0,
+    showCountDesc: nation.showCountDesc,
+    viewCountDesc: nation.viewCountDesc,
+    seatRaw: seat.seatRaw,
+    nationSeatLabel: seat.label,
+    nationSeatValue: seat.value,
+  });
+  if (nation.showCountDesc) {
+    console.log(
+      `[DATA_TRACE] nation.showCountDesc raw = ${nationRaw.showCountDesc} rendered = ${nation.showCountDesc}`,
+    );
+  }
+  if (top1) {
+    console.log("TOP1:", {
+      movieId: top1.movieId,
+      name: top1.name,
+      todayBoxRaw: top1.todayBoxHtml,
+      todayBoxWan: top1.todayBox,
+      boxRate: top1.boxRate,
+      showCountRate: top1.showCountRate,
+      avgSeatView: top1.avgSeatView,
+      sumBoxDesc: top1.sumBoxDesc,
+    });
+    console.log("[DATA_TRACE] championWan:", resolveChampionBoxWan(top1));
+  }
+}
+
 function normalizeUnit(unit) {
   const decoded = decodeFontNum(unit) || String(unit || "").trim();
   if (!decoded || decoded === "万") return "万";
@@ -771,6 +883,7 @@ export function parseDashboard(raw, topCount = 5) {
   const nationSplitRaw = decodeFontNum(nationSplitHtml);
 
   const globalTrends = parseTrends(raw?.movieInfo?.boxTrends, calendar.today);
+  const seatMetric = resolveNationSeatMetric(nation);
 
   return {
     movies,
@@ -785,6 +898,10 @@ export function parseDashboard(raw, topCount = 5) {
       splitBoxUnit: nationSplitUnit,
       showCountDesc: nation.showCountDesc || "--",
       viewCountDesc: nation.viewCountDesc || "--",
+      seatLabel: seatMetric.label,
+      seatValue: seatMetric.value,
+      seatRaw: seatMetric.seatRaw,
+      avgShowView: nation.avgShowView || "",
     },
     calendar: {
       today: calendar.today || "",
@@ -806,32 +923,18 @@ export function mergeMovieDetail(base, detail = {}) {
   const tech = detail.tech || {};
   const speed = detail.speed || {};
 
-  const dailyIncrease = base.todayBox > 0 ? formatMoneyWan(base.todayBox) : "--";
+  const dailyIncrease = trends.increaseDesc || trends.dailyIncrease || boxShow.dailyIncrease || "--";
   const yesterdayDesc = trends.yesterdayDesc || "--";
   const yesterdayBox = trends.yesterdayBox || 0;
 
-  let hourSpeedText = boxShow.hourSpeedText || "--";
-  let hourSpeed = boxShow.hourSpeed || 0;
-  if (!hourSpeed && speed.estimatedHourSpeed > 0) {
-    hourSpeed = speed.estimatedHourSpeed;
-    hourSpeedText = formatMoneyWan(hourSpeed);
-  }
+  const hourSpeedText = boxShow.hourSpeedText || "--";
+  const hourSpeed = boxShow.hourSpeed || 0;
 
-  let dynamicForecast = prediction.dynamicForecast || "--";
-  let dynamicForecastNum = prediction.dynamicForecastNum || 0;
-  let dynamicTrend = prediction.dynamicTrend || "";
-  if (dynamicForecast === "--" && speed.estimatedDayForecast > 0) {
-    dynamicForecastNum = speed.estimatedDayForecast;
-    dynamicForecast = formatMoneyWan(dynamicForecastNum);
-    dynamicTrend = speed.forecastTrend || "";
-  }
+  const dynamicForecast = prediction.dynamicForecast || "--";
+  const dynamicForecastNum = prediction.dynamicForecastNum || 0;
+  const dynamicTrend = prediction.dynamicTrend || "";
 
-  let yesterdaySamePeriodText = boxShow.yesterdaySamePeriodText || "--";
-  if (yesterdaySamePeriodText === "--" && yesterdayBox > 0 && base.todayBox > 0) {
-    const ratio = Math.min(1, base.todayBox / Math.max(yesterdayBox, 1));
-    const est = yesterdayBox * ratio * 0.85;
-    if (est > 0) yesterdaySamePeriodText = formatMoneyWan(est);
-  }
+  const yesterdaySamePeriodText = boxShow.yesterdaySamePeriodText || "--";
 
   const dailyTable = buildDailyTable(base, prediction, detail);
 
@@ -853,8 +956,8 @@ export function mergeMovieDetail(base, detail = {}) {
     yesterdayHourSpeedText: boxShow.yesterdayHourSpeedText || "--",
     yesterdaySamePeriodText,
     totalViews: boxShow.totalViews || "--",
-    totalForecast: prediction.totalForecast || formatDescMoney(base.sumBoxDesc),
-    totalForecastNum: prediction.totalForecastNum || parseBoxNum(base.sumBoxDesc),
+    totalForecast: prediction.totalForecast || "--",
+    totalForecastNum: prediction.totalForecastNum || 0,
     totalTrend: prediction.totalTrend || "",
     dailyTable,
     showCountDesc: base.showCount >= 10000

@@ -154,6 +154,10 @@ async function renderAndInspect(page, movies, nation) {
     const issues = [];
     const fonts = {};
 
+    if (footer) {
+      issues.push("footer DOM 仍存在");
+    }
+
     if (items.length !== 5) {
       issues.push(`race-list 应有 5 项，实际 ${items.length}`);
     }
@@ -164,7 +168,7 @@ async function renderAndInspect(page, movies, nation) {
     if (heroGap > 48) {
       issues.push(`顶部空白过大: hero→TOP1 间距 ${heroGap.toFixed(1)}px`);
     }
-    if (hero && hero.getBoundingClientRect().height > 320) {
+    if (hero && hero.getBoundingClientRect().height > 360) {
       issues.push(`顶部区域过高: ${hero.getBoundingClientRect().height.toFixed(1)}px`);
     }
 
@@ -201,13 +205,15 @@ async function renderAndInspect(page, movies, nation) {
 
     const last = items[items.length - 1];
     const lastBottom = last?.getBoundingClientRect().bottom || 0;
-    const footerTop = footer?.getBoundingClientRect().top || 1920;
-    const gapToFooter = footerTop - lastBottom;
-    if (gapToFooter > 80) {
-      issues.push(`最后一张卡片距 footer 空白过大: ${gapToFooter.toFixed(1)}px`);
+    const gapToBottom = 1920 - lastBottom;
+    if (lastBottom < 1880) {
+      issues.push(`TOP5 未铺满底部: lastBottom=${lastBottom.toFixed(1)}px (<1880)`);
     }
     if (lastBottom > 1920.5) {
       issues.push(`第 5 名 bottom=${lastBottom.toFixed(1)} 超出 1920`);
+    }
+    if (gapToBottom > 50) {
+      issues.push(`底部空白过大: ${gapToBottom.toFixed(1)}px`);
     }
 
     if (document.documentElement.scrollWidth > 1081) {
@@ -227,6 +233,11 @@ async function renderAndInspect(page, movies, nation) {
       fonts[key] = parseFloat(getComputedStyle(el).fontSize);
     };
 
+    sample(document.querySelector(".hero__title"), "heroTitle");
+    sample(document.querySelector(".hero__date"), "heroDate");
+    sample(document.querySelector(".nation-pill__label"), "nationLabel");
+    sample(document.querySelector(".nation-pill__value"), "nationValue");
+    sample(document.getElementById("nation-delta"), "nationDelta");
     sample(rank1?.querySelector(".race-card__title"), "rank1Title");
     sample(rank1?.querySelector(".js-day-box"), "rank1Box");
     sample(follow[0]?.querySelector(".race-card__title"), "followTitle");
@@ -248,7 +259,7 @@ async function renderAndInspect(page, movies, nation) {
       itemCount: items.length,
       scrollWidth: document.documentElement.scrollWidth,
       lastBottom,
-      gapToFooter,
+      gapToBottom,
       heroGap,
       heroHeight: hero?.getBoundingClientRect().height || 0,
       rank1Height: rank1?.getBoundingClientRect().height || 0,
@@ -272,18 +283,18 @@ async function main() {
         getOverlaySettings: async () => ({
           bubble: { enabled: true, minDelta: 0.001, fontSize: 26, durationMs: 3000, floatHeight: 44 },
           fonts: {
-            heroTitle: 60,
-            heroSubtitle: 23,
-            nationBox: 32,
-            nationLabel: 21,
-            movieTitle: 46,
-            movieTitleFollow: 37,
-            movieBoxRank1: 52,
-            movieBoxFollow: 41,
-            movieRank: 25,
-            metricLabel: 22,
-            metricValue: 29,
-            metricValueRank1: 32,
+            heroTitle: 72,
+            heroSubtitle: 28,
+            nationBox: 38,
+            nationLabel: 24,
+            movieTitle: 48,
+            movieTitleFollow: 39,
+            movieBoxRank1: 54,
+            movieBoxFollow: 43,
+            movieRank: 26,
+            metricLabel: 23,
+            metricValue: 30,
+            metricValueRank1: 34,
           },
         }),
         onSettingsChanged: () => () => {},
@@ -305,20 +316,26 @@ async function main() {
     const reportSparse = await renderAndInspect(page, mockMoviesSparse());
 
     assert.strictEqual(reportRich.itemCount, 5, "race-list 应有 5 项");
+    assert.ok(reportRich.lastBottom >= 1880, `第 5 名 bottom=${reportRich.lastBottom} (<1880)`);
     assert.ok(reportRich.lastBottom <= 1920.5, `第 5 名 bottom=${reportRich.lastBottom}`);
     assert.ok(reportRich.scrollWidth <= 1081, `scrollWidth=${reportRich.scrollWidth}`);
-    assert.ok(reportRich.gapToFooter <= 80, `footer gap=${reportRich.gapToFooter}`);
+    assert.ok(reportRich.gapToBottom <= 50, `bottom gap=${reportRich.gapToBottom}`);
     assert.ok(reportRich.heroGap <= 48, `hero gap=${reportRich.heroGap}`);
-    assert.ok(reportRich.heroHeight <= 320, `hero height=${reportRich.heroHeight}`);
+    assert.ok(reportRich.heroHeight <= 360, `hero height=${reportRich.heroHeight}`);
     assert.strictEqual(reportRich.issues.length, 0, reportRich.issues.join("; "));
     assert.strictEqual(reportSparse.issues.length, 0, `sparse: ${reportSparse.issues.join("; ")}`);
 
     const f = reportRich.fonts;
-    assert.ok(f.rank1Box >= 46, `rank1Box=${f.rank1Box}`);
-    assert.ok(f.followBox >= 38, `followBox=${f.followBox}`);
-    assert.ok(f.rank1Title >= 42, `rank1Title=${f.rank1Title}`);
-    assert.ok(f.followTitle >= 35, `followTitle=${f.followTitle}`);
-    assert.ok(f.value >= 27, `metricValue=${f.value}`);
+    assert.ok(f.heroTitle >= 68, `heroTitle=${f.heroTitle}`);
+    assert.ok(f.heroDate >= 26, `heroDate=${f.heroDate}`);
+    assert.ok(f.nationLabel >= 22, `nationLabel=${f.nationLabel}`);
+    assert.ok(f.nationValue >= 36, `nationValue=${f.nationValue}`);
+    assert.ok((f.nationDelta || 24) >= 22, `nationDelta=${f.nationDelta}`);
+    assert.ok(f.rank1Box >= 50, `rank1Box=${f.rank1Box}`);
+    assert.ok(f.followBox >= 40, `followBox=${f.followBox}`);
+    assert.ok(f.rank1Title >= 44, `rank1Title=${f.rank1Title}`);
+    assert.ok(f.followTitle >= 36, `followTitle=${f.followTitle}`);
+    assert.ok(f.value >= 28, `metricValue=${f.value}`);
     assert.ok((f.rank1Bubble || 0) >= 26, `rank1Bubble=${f.rank1Bubble}`);
     assert.ok((f.followBubble || 0) >= 23, `followBubble=${f.followBubble}`);
     assert.ok((reportRich.bubbleHeights["1"] || 0) >= 44, `rank1 bubble height=${reportRich.bubbleHeights["1"]}`);
@@ -368,7 +385,7 @@ async function main() {
       rank1Height: reportRich.rank1Height,
       followHeights: reportRich.followHeights,
       lastBottom: reportRich.lastBottom,
-      gapToFooter: reportRich.gapToFooter,
+      gapToBottom: reportRich.gapToBottom,
       scrollWidth: reportRich.scrollWidth,
       fonts: reportRich.fonts,
       bubbleHeights: reportRich.bubbleHeights,

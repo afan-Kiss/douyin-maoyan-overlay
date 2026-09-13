@@ -12,10 +12,10 @@ export function applyOverlaySettings(settings) {
   const b = settings.bubble || {};
   const f = settings.fonts || {};
   const c = settings.colors || {};
-  const heroTitle = f.heroTitle ?? 60;
-  const heroSub = f.heroSubtitle ?? 23;
-  const nationBox = f.nationBox ?? 32;
-  const nationLabel = f.nationLabel ?? 21;
+  const heroTitle = f.heroTitle ?? 72;
+  const heroSub = f.heroSubtitle ?? 28;
+  const nationBox = f.nationBox ?? 38;
+  const nationLabel = f.nationLabel ?? 24;
   const movieTitleRank1 = f.movieTitleRank1 ?? f.movieTitle ?? 46;
   const movieTitleFollow = f.movieTitleFollow ?? Math.round((f.movieTitle ?? 37) * 1);
   const movieBoxRank1 = f.movieBoxRank1 ?? 52;
@@ -53,8 +53,7 @@ export function applyOverlaySettings(settings) {
   root.style.setProperty("--font-metric-value-rank1", `${metricValueRank1}px`);
   root.style.setProperty("--font-table", `${f.table || 12}px`);
   root.style.setProperty("--font-delta", `${f.metricValue || 14}px`);
-  root.style.setProperty("--font-footer", `${f.footer || 13}px`);
-  root.style.setProperty("--font-champ", `${Math.round((f.heroSubtitle || 18) * 0.95)}px`);
+  root.style.setProperty("--font-champ", `${Math.round((f.heroSubtitle || 28) * 0.95)}px`);
   root.style.setProperty("--font-time", `${f.nationLabel || 14}px`);
   root.style.setProperty("--color-frame-border", "rgba(214, 169, 72, 0.38)");
 

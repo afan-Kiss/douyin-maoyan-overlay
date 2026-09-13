@@ -10,6 +10,10 @@ import {
   resetApiSigWarm,
   getLastEnrichErrors,
   MaoyanApiError,
+  resolveChampionBoxWan,
+  resolveNationSeatMetric,
+  computeMovieBoxDeltaWan,
+  traceDashboardData,
 } from "./maoyan-api.js";
 import { applyOverlaySettings, getOverlaySettings } from "./settings-applier.js";
 import { bindDesignViewport } from "./viewport-fit.js";
@@ -34,6 +38,7 @@ const nationBoxEl = $("nation-box");
 const nationShowsEl = $("nation-shows");
 const nationViewsEl = $("nation-views");
 const nationSeatEl = $("nation-seat");
+const nationSeatLabelEl = $("nation-seat-label");
 const heroDateEl = $("hero-date");
 const champBoxEl = $("champ-box");
 const champBoxUnitEl = $("champ-box-unit");
@@ -399,7 +404,15 @@ function mergeEnrichedMovies(baseMovies, enrichedMovies, speed = {}) {
 
 function stabilizeNation(nation) {
   const stable = { ...nation };
-  for (const field of ["todayBoxHtml", "todayUnit", "showCountDesc", "viewCountDesc"]) {
+  for (const field of [
+    "todayBoxHtml",
+    "todayUnit",
+    "showCountDesc",
+    "viewCountDesc",
+    "seatLabel",
+    "seatValue",
+    "seatRaw",
+  ]) {
     if (isEmptyField(stable[field])) {
       const cached = lastGoodNation[field];
       if (!isEmptyField(cached)) stable[field] = cached;
@@ -412,7 +425,15 @@ function stabilizeNation(nation) {
   if (stable.todayBox <= 0 && lastGoodNation.todayBox > 0) {
     stable.todayBox = lastGoodNation.todayBox;
   }
-  for (const field of ["todayBoxHtml", "todayUnit", "showCountDesc", "viewCountDesc"]) {
+  for (const field of [
+    "todayBoxHtml",
+    "todayUnit",
+    "showCountDesc",
+    "viewCountDesc",
+    "seatLabel",
+    "seatValue",
+    "seatRaw",
+  ]) {
     if (!isEmptyField(stable[field])) lastGoodNation[field] = stable[field];
   }
   if (stable.todayBox > 0) lastGoodNation.todayBox = stable.todayBox;
@@ -961,18 +982,9 @@ function resolveDisplayDate(parsed) {
   return `今日：${y}年${String(m).padStart(2, "0")}月${String(day).padStart(2, "0")}日 周${WEEK[d.getDay()]}`;
 }
 
-function computeNationSeatRate(movies) {
-  const rates = (movies || [])
-    .map((m) => {
-      const raw = m?.avgSeatView ?? m?.dailyTable?.[0]?.avgSeatView;
-      if (isEmptyField(raw)) return null;
-      const n = parseFloat(String(raw).replace(/%/g, ""));
-      return Number.isFinite(n) ? n : null;
-    })
-    .filter((n) => n != null);
-  if (!rates.length) return "--";
-  const avg = rates.reduce((a, b) => a + b, 0) / rates.length;
-  return `${avg.toFixed(1)}%`;
+function isDataTraceEnabled() {
+  if (typeof process !== "undefined" && process?.env?.DATA_TRACE === "1") return true;
+  return new URLSearchParams(location.search).has("dataTrace");
 }
 
 function resolveDisplayBoxAmount(html, unit, numeric, text) {
@@ -999,6 +1011,21 @@ function setEncodedBoxValue(el, html, fallbackText = "--") {
   el.textContent = fallbackText;
 }
 
+function updateNationSeatMetric(nation) {
+  const metric =
+    nation?.seatLabel && nation?.seatValue
+      ? { label: nation.seatLabel, value: nation.seatValue }
+      : resolveNationSeatMetric(nation || {});
+  if (nationSeatLabelEl) {
+    setTextIfChanged(nationSeatLabelEl, metric.label);
+  }
+  if (nationSeatEl) {
+    setTextIfChanged(nationSeatEl, metric.value || "--");
+  }
+  const hideSeat = isEmptyField(metric.value);
+  $("nation-seat-pill")?.classList.toggle("is-hidden", hideSeat);
+}
+
 function updateChampion(movies) {
   const top = (movies || []).find((m) => m.rank === 1) || movies?.[0];
   if (!top) {
@@ -1006,12 +1033,7 @@ function updateChampion(movies) {
     return;
   }
 
-  const amount = resolveDisplayBoxAmount(
-    top.todayBoxHtml,
-    top.todayUnit || "万",
-    top.todayBox,
-    top.todayBoxText || top.dailyIncrease
-  );
+  const amount = resolveChampionBoxWan(top);
   if (amount > 0) {
     champBoxPillEl?.classList.remove("is-hidden");
     setPlainBoxValue(champBoxEl, amount, champBoxUnitEl);
@@ -1020,10 +1042,6 @@ function updateChampion(movies) {
     setEncodedBoxValue(champBoxEl, top.todayBoxHtml);
   } else {
     champBoxPillEl?.classList.add("is-hidden");
-  }
-
-  if (nationSeatEl) {
-    setTextIfChanged(nationSeatEl, computeNationSeatRate(movies));
   }
 }
 
@@ -1059,18 +1077,15 @@ function updateNation(nation, parsed) {
   $("nation-shows-pill")?.classList.toggle("is-hidden", isEmptyField(nation.showCountDesc));
   $("nation-views-pill")?.classList.toggle("is-hidden", isEmptyField(nation.viewCountDesc));
 
+  updateNationSeatMetric(nation);
+
   if (heroDateEl) {
     setTextIfChanged(heroDateEl, resolveDisplayDate(parsed));
   }
 
-  const footerEl = $("footer-update");
-  if (footerEl && parsed) {
-    const timeText = parsed.updateTimeText || "";
-    setTextIfChanged(
-      footerEl,
-      timeText
-        ? `数据来源：猫眼专业版 · 更新 ${timeText}`
-        : "数据来源：猫眼专业版",
+  if (isDataTraceEnabled() && nation.showCountDesc) {
+    console.log(
+      `[DATA_TRACE] nation.showCountDesc raw = ${nation.showCountDesc} rendered = ${nation.showCountDesc}`,
     );
   }
 }
@@ -1205,6 +1220,7 @@ async function refreshData() {
 
     const raw = await fetchDashboard(config.apiBase);
     const parsed = parseDashboard(raw, RACE_TOP_COUNT);
+    traceDashboardData(parsed, raw, { enabled: isDataTraceEnabled() });
     if (!parsed.movies.length) {
       if (!hasDisplayedData) setStatus("loading", "等待票房数据…");
       return;
@@ -1530,6 +1546,10 @@ async function init() {
       formatDeltaWithArrow,
       formatWanForDisplay,
       formatWanDisplayText,
+      parseDashboard,
+      resolveChampionBoxWan,
+      resolveNationSeatMetric,
+      computeMovieBoxDeltaWan,
     };
     setStatus("ok", "");
     return;
