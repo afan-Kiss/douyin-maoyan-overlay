@@ -344,12 +344,9 @@ function pickNonemptyNationField(nation, fields) {
 function parseDescNumber(desc) {
   if (!desc) return NaN;
   const s = String(desc).replace(/,/g, "").trim();
-  const m = s.match(/([\d.]+)/);
-  if (!m) return NaN;
-  let n = Number(m[1]);
-  if (!Number.isFinite(n)) return NaN;
-  if (s.includes("亿")) n *= 10000;
-  return n;
+  if (!s || s === "--") return NaN;
+  const n = parseBoxNum(s, s.includes("亿") ? "亿" : "万");
+  return Number.isFinite(n) && n > 0 ? n : NaN;
 }
 
 function formatAvgAttendance(avg) {

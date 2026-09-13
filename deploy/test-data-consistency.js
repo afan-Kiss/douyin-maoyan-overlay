@@ -110,6 +110,13 @@ async function main() {
   assert.strictEqual(formatWanDisplayText(12300), "1.23亿");
   assert.strictEqual(formatWanDisplayText(3525.5), "3525.5万");
 
+  const computedSeat = resolveNationSeatMetric({
+    viewCountDesc: "104.2万",
+    showCountDesc: "37.3万",
+  });
+  assert.strictEqual(computedSeat.label, "场均人次");
+  assert.strictEqual(computedSeat.value, "2.8");
+
   const missingSeat = resolveNationSeatMetric({
     viewCountDesc: "--",
     showCountDesc: "--",
