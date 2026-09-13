@@ -1,62 +1,49 @@
 /**
- * 详细 enrich 频率：60 秒内仅首次完整 enrich
+ * 详细 enrich 频率：真实 scheduler，60 秒内仅首次完整 enrich
  * node deploy/test-enrich-interval.js
  */
 const assert = require("assert");
+const path = require("path");
+const { pathToFileURL } = require("url");
 
 const POLL_INTERVAL_MS = 5000;
 const FULL_INTERVAL_MS = 60000;
 const POLL_COUNT = 12;
 
-function simulateEnrichSchedule() {
-  let pollCount = 0;
-  let lastFullEnrich = 0;
-  let enrichingBackground = false;
-  let dashboardRefreshCount = 0;
-  let fullEnrichCount = 0;
-  let maxConcurrentEnrich = 0;
-  let concurrentEnrich = 0;
-  let detailApiCalls = 0;
+async function main() {
+  const schedulerPath = pathToFileURL(path.join(__dirname, "..", "ui", "enrich-scheduler.js")).href;
+  const { createEnrichScheduleSimulator } = await import(schedulerPath);
+
+  const sim = createEnrichScheduleSimulator({
+    fullIntervalMs: FULL_INTERVAL_MS,
+    runEnrich: async () => ({ failed: false }),
+  });
 
   for (let i = 0; i < POLL_COUNT; i++) {
-    const now = i * POLL_INTERVAL_MS;
-    dashboardRefreshCount += 1;
-    pollCount += 1;
-
-    const needFull = pollCount === 1 || now - lastFullEnrich >= FULL_INTERVAL_MS;
-    if (!needFull || enrichingBackground) continue;
-
-    enrichingBackground = true;
-    concurrentEnrich += 1;
-    maxConcurrentEnrich = Math.max(maxConcurrentEnrich, concurrentEnrich);
-    fullEnrichCount += 1;
-    detailApiCalls += 1;
-    lastFullEnrich = now;
-    enrichingBackground = false;
-    concurrentEnrich -= 1;
+    await sim.onPoll(i * POLL_INTERVAL_MS);
   }
+  await sim.waitSettled();
 
-  return {
-    dashboardRefreshCount,
-    fullEnrichCount,
-    maxConcurrentEnrich,
-    detailApiCalls,
+  const result = {
+    dashboardRefreshCount: POLL_COUNT,
+    fullEnrichCount: sim.getStats().fullEnrichCount,
+    maxConcurrentEnrich: sim.getStats().maxConcurrentFullEnrich,
+    detailApiCalls: sim.getStats().fullEnrichCount,
   };
-}
-
-function main() {
-  const result = simulateEnrichSchedule();
 
   assert.strictEqual(result.dashboardRefreshCount, POLL_COUNT);
   assert.strictEqual(result.fullEnrichCount, 1, "60s 内应仅 1 次完整 enrich");
   assert.strictEqual(result.detailApiCalls, 1, "dashboard 刷新不得每次调用详细接口");
   assert.strictEqual(result.maxConcurrentEnrich, 1);
 
-  console.log("PASS enrich interval simulation");
+  console.log("PASS enrich interval via real scheduler");
   console.log(`  dashboardRefreshCount=${result.dashboardRefreshCount}`);
   console.log(`  fullEnrichCount=${result.fullEnrichCount}`);
   console.log(`  maxConcurrentEnrich=${result.maxConcurrentEnrich}`);
   console.log("\nALL PASSED (enrich interval)");
 }
 
-main();
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

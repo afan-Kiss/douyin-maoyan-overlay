@@ -10,6 +10,7 @@ const ROOT = path.join(__dirname, "..");
 const TESTS = [
   { name: "repo-integrity", script: "deploy/test-repo-integrity.js", needsChrome: false },
   { name: "box-units", script: "deploy/test-box-units.js", needsChrome: false },
+  { name: "round5-fixes", script: "deploy/test-round5-fixes.js", needsChrome: false },
   { name: "enrich-interval", script: "deploy/test-enrich-interval.js", needsChrome: false },
   { name: "module-load", script: "deploy/test-module-load.js", needsChrome: false },
   { name: "browser-state", script: "deploy/test-browser-state-immutable.js", needsChrome: false },

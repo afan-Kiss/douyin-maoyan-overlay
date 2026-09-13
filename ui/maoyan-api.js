@@ -34,20 +34,29 @@ const DASHBOARD_PARAMS = {
   force_refresh: "true",
 };
 
-export async function fetchDashboard(apiBase, movieId = "") {
+function mergeFetchSignal(parentSignal, timeoutMs) {
+  const parts = [];
+  if (parentSignal) parts.push(parentSignal);
+  if (timeoutMs) parts.push(AbortSignal.timeout(timeoutMs));
+  if (!parts.length) return undefined;
+  if (parts.length === 1) return parts[0];
+  return AbortSignal.any(parts);
+}
+
+export async function fetchDashboard(apiBase, movieId = "", options = {}) {
   const url =
     `${apiBase}/i/api/dashboard-ajax/movie?` +
     new URLSearchParams({ ...DASHBOARD_PARAMS, movieId: String(movieId || "") });
-  const resp = await fetch(url, { signal: AbortSignal.timeout(60000) });
+  const resp = await fetch(url, { signal: mergeFetchSignal(options.signal, 60000) });
   if (!resp.ok) throw await readApiError(resp);
   return resp.json();
 }
 
-async function fetchMovieApi(apiBase, apiPath, movieId, extra = {}, timeoutMs = 20000) {
+async function fetchMovieApi(apiBase, apiPath, movieId, extra = {}, timeoutMs = 20000, parentSignal) {
   const url =
     `${apiBase}${apiPath}?` +
     new URLSearchParams({ movieId: String(movieId), WuKongReady: "h5", ...extra });
-  const resp = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+  const resp = await fetch(url, { signal: mergeFetchSignal(parentSignal, timeoutMs) });
   if (!resp.ok) throw await readApiError(resp);
   return resp.json();
 }
@@ -84,13 +93,13 @@ function summarizeEnrichError(error) {
   };
 }
 
-async function warmMovieApiSignatures(apiBase, movieId) {
+async function warmMovieApiSignatures(apiBase, movieId, parentSignal) {
   if (apiSigWarmed || !apiBase || !movieId) return true;
   const url =
     `${apiBase}/api/refresh?` +
     new URLSearchParams({ movieId: String(movieId), boxLevel: "1" });
   try {
-    const resp = await fetch(url, { signal: AbortSignal.timeout(45000) });
+    const resp = await fetch(url, { signal: mergeFetchSignal(parentSignal, 45000) });
     if (!resp.ok) {
       const err = await readApiError(resp);
       warmLastError = summarizeEnrichError(err);
@@ -111,25 +120,32 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function fetchBoxShow(apiBase, movieId, boxLevel = 1) {
-  return fetchMovieApi(apiBase, "/i/api/movie/getBoxShow", movieId, {
-    boxLevel: String(boxLevel),
-    yodaReady: "h5",
-    csecplatform: "4",
-    csecversion: "4.3.0",
-  });
+export async function fetchBoxShow(apiBase, movieId, boxLevel = 1, parentSignal) {
+  return fetchMovieApi(
+    apiBase,
+    "/i/api/movie/getBoxShow",
+    movieId,
+    {
+      boxLevel: String(boxLevel),
+      yodaReady: "h5",
+      csecplatform: "4",
+      csecversion: "4.3.0",
+    },
+    20000,
+    parentSignal,
+  );
 }
 
-export async function fetchPredictionBox(apiBase, movieId) {
-  return fetchMovieApi(apiBase, "/i/api/movie/getPredictionBox", movieId);
+export async function fetchPredictionBox(apiBase, movieId, parentSignal) {
+  return fetchMovieApi(apiBase, "/i/api/movie/getPredictionBox", movieId, {}, 20000, parentSignal);
 }
 
-export async function fetchBoxShowna(apiBase, movieId) {
-  return fetchMovieApi(apiBase, "/i/api/movie/getBoxShowna", movieId);
+export async function fetchBoxShowna(apiBase, movieId, parentSignal) {
+  return fetchMovieApi(apiBase, "/i/api/movie/getBoxShowna", movieId, {}, 20000, parentSignal);
 }
 
-export async function fetchTechData(apiBase, movieId) {
-  return fetchMovieApi(apiBase, "/i/api/movie/getTechData", movieId);
+export async function fetchTechData(apiBase, movieId, parentSignal) {
+  return fetchMovieApi(apiBase, "/i/api/movie/getTechData", movieId, {}, 20000, parentSignal);
 }
 
 let decoderEl = null;
@@ -939,12 +955,13 @@ export function estimateSpeedMetrics(movieId, todayBox, prevSnapshot, elapsedMs)
   };
 }
 
-async function mapPool(items, limit, worker) {
+async function mapPool(items, limit, worker, parentSignal) {
   const results = new Array(items.length);
   let index = 0;
 
   async function run() {
     while (index < items.length) {
+      if (parentSignal?.aborted) break;
       const i = index++;
       results[i] = await worker(items[i], i);
     }
@@ -955,12 +972,9 @@ async function mapPool(items, limit, worker) {
   return results;
 }
 
-async function fetchMovieTrends(apiBase, movie, todayStr) {
+async function fetchMovieTrends(apiBase, movie, todayStr, parentSignal) {
   try {
-    const trendRaw = await Promise.race([
-      fetchDashboard(apiBase, movie.movieId),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("trend_timeout")), 10000)),
-    ]);
+    const trendRaw = await fetchDashboard(apiBase, movie.movieId, { signal: parentSignal });
     return parseTrends(trendRaw?.movieInfo?.boxTrends, trendRaw?.calendar?.today || todayStr);
   } catch {
     return {};
@@ -973,9 +987,13 @@ export function enrichMoviesQuick(movies, speed = {}) {
   );
 }
 
-async function fetchMovieExtraDetail(apiBase, movie, todayStr, speed = {}) {
+async function fetchMovieExtraDetail(apiBase, movie, todayStr, speed = {}, parentSignal) {
+  if (parentSignal?.aborted) {
+    throw new DOMException("Aborted", "AbortError");
+  }
+
   const detail = {
-    trends: await fetchMovieTrends(apiBase, movie, todayStr),
+    trends: await fetchMovieTrends(apiBase, movie, todayStr, parentSignal),
     boxShow: {},
     prediction: {},
     global: {},
@@ -990,32 +1008,40 @@ async function fetchMovieExtraDetail(apiBase, movie, todayStr, speed = {}) {
 
   let predictionRaw = null;
   try {
-    predictionRaw = await fetchPredictionBox(apiBase, movie.movieId);
+    predictionRaw = await fetchPredictionBox(apiBase, movie.movieId, parentSignal);
   } catch (error) {
+    if (parentSignal?.aborted) throw error;
     captureExtraError("预测票房", error);
   }
   let parsedPrediction = predictionRaw ? parsePredictionMetrics(predictionRaw) : null;
   if (!parsedPrediction?.dailyForecast?.length) {
     await sleep(800);
+    if (parentSignal?.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
     try {
-      predictionRaw = await fetchPredictionBox(apiBase, movie.movieId);
+      predictionRaw = await fetchPredictionBox(apiBase, movie.movieId, parentSignal);
       parsedPrediction = predictionRaw ? parsePredictionMetrics(predictionRaw) : null;
     } catch (error) {
+      if (parentSignal?.aborted) throw error;
       captureExtraError("预测票房", error);
     }
   }
   if (parsedPrediction) detail.prediction = parsedPrediction;
 
   const [boxShowRaw, globalRaw, techRaw] = await Promise.all([
-    fetchBoxShow(apiBase, movie.movieId, 1).catch((error) => {
+    fetchBoxShow(apiBase, movie.movieId, 1, parentSignal).catch((error) => {
+      if (parentSignal?.aborted) throw error;
       captureExtraError("日期票房", error);
       return null;
     }),
-    fetchBoxShowna(apiBase, movie.movieId).catch((error) => {
+    fetchBoxShowna(apiBase, movie.movieId, parentSignal).catch((error) => {
+      if (parentSignal?.aborted) throw error;
       captureExtraError("全球票房", error);
       return null;
     }),
-    fetchTechData(apiBase, movie.movieId).catch((error) => {
+    fetchTechData(apiBase, movie.movieId, parentSignal).catch((error) => {
+      if (parentSignal?.aborted) throw error;
       captureExtraError("下映时间", error);
       return null;
     }),
@@ -1044,15 +1070,16 @@ export async function enrichMoviesLight(apiBase, movies, options = {}) {
   const results = enrichMoviesQuick(movies, options.speed || {});
 
   const targets = movies.slice(0, trendLimit);
+  const parentSignal = options.signal;
   const enriched = await mapPool(targets, concurrency, async (movie) => {
     const speed = options.speed?.[String(movie.movieId)] || {};
     if (!enableExtraApis) {
-      const trends = await fetchMovieTrends(apiBase, movie, todayStr);
+      const trends = await fetchMovieTrends(apiBase, movie, todayStr, parentSignal);
       return mergeMovieDetail(movie, { trends, speed });
     }
-    const detail = await fetchMovieExtraDetail(apiBase, movie, todayStr, speed);
+    const detail = await fetchMovieExtraDetail(apiBase, movie, todayStr, speed, parentSignal);
     return mergeMovieDetail(movie, detail);
-  });
+  }, parentSignal);
 
   for (let i = 0; i < enriched.length; i++) {
     const idx = movies.indexOf(targets[i]);
@@ -1072,10 +1099,13 @@ export async function enrichMovies(apiBase, movies, options = {}) {
   const results = enrichMoviesQuick(movies, options.speed || {});
   const targets = movies.slice(0, trendLimit);
 
+  const parentSignal = options.signal;
+
   if (enableExtraApis && targets.length) {
     try {
-      await warmMovieApiSignatures(apiBase, targets[0].movieId);
+      await warmMovieApiSignatures(apiBase, targets[0].movieId, parentSignal);
     } catch (error) {
+      if (parentSignal?.aborted) throw error;
       const warmErr = getWarmLastError() || summarizeEnrichError(error);
       lastEnrichErrors.push({ movieId: targets[0].movieId, label: "签名预热", ...warmErr });
     }
@@ -1087,12 +1117,12 @@ export async function enrichMovies(apiBase, movies, options = {}) {
 
     const speed = options.speed?.[String(movie.movieId)] || {};
     if (!enableExtraApis) {
-      const trends = await fetchMovieTrends(apiBase, movie, todayStr);
+      const trends = await fetchMovieTrends(apiBase, movie, todayStr, parentSignal);
       results[idx] = mergeMovieDetail(movie, { trends, speed });
       return;
     }
 
-    const detail = await fetchMovieExtraDetail(apiBase, movie, todayStr, speed);
+    const detail = await fetchMovieExtraDetail(apiBase, movie, todayStr, speed, parentSignal);
     for (const item of detail.extraErrors || []) {
       lastEnrichErrors.push({
         movieId: movie.movieId,
@@ -1101,7 +1131,7 @@ export async function enrichMovies(apiBase, movies, options = {}) {
       });
     }
     results[idx] = mergeMovieDetail(movie, detail);
-  });
+  }, parentSignal);
 
   return results;
 }

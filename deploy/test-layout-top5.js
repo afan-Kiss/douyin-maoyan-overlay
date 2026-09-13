@@ -288,6 +288,38 @@ async function main() {
     assert.strictEqual(reportRich.issues.length, 0, reportRich.issues.join("; "));
     assert.strictEqual(reportSparse.issues.length, 0, `sparse: ${reportSparse.issues.join("; ")}`);
 
+    const wanDisplay = await page.evaluate(() => {
+      const { renderList, updateNation } = window.__racePreview;
+      renderList([
+        {
+          movieId: 9001,
+          rank: 1,
+          name: "万亿测试",
+          todayBox: 12300,
+          todayUnit: "亿",
+        },
+      ]);
+      updateNation(
+        {
+          todayBox: 12300,
+          todayUnit: "亿",
+          showCountDesc: "1",
+          viewCountDesc: "1",
+        },
+        { updateTimeText: "2026-09-13 12:00:00" },
+      );
+      const topBox = document.querySelector('.race-card[data-rank="1"] .js-day-box')?.textContent || "";
+      const nationText =
+        `${document.getElementById("nation-box")?.textContent || ""}${document.querySelector(".js-nation-unit")?.textContent || ""}`;
+      const champText =
+        `${document.getElementById("champ-box")?.textContent || ""}${document.getElementById("champ-box-unit")?.textContent || ""}`;
+      return { topBox, nationText, champText };
+    });
+    assert.strictEqual(wanDisplay.topBox, "1.23亿");
+    assert.strictEqual(wanDisplay.nationText, "1.23亿");
+    assert.strictEqual(wanDisplay.champText, "1.23亿");
+    assert.ok(!wanDisplay.topBox.includes("12300"));
+
     console.log("TOP5 layout OK");
     console.log("Screenshot:", OUT_PNG);
     console.log("Layout:", {

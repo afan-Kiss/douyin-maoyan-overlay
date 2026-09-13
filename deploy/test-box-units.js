@@ -27,6 +27,14 @@ async function main() {
   assert.ok(delta > 0, "9999万 -> 1亿 应为上涨");
   assert.ok(Math.abs(delta - 1) < 0.01, `delta 应约 1 万，实际 ${delta}`);
 
+  const boxDisplayPath = pathToFileURL(path.join(__dirname, "..", "ui", "box-display.js")).href;
+  const { formatWanForDisplay, formatWanDisplayText } = await import(boxDisplayPath);
+  assert.deepStrictEqual(formatWanForDisplay(9999), { valueText: "9999", unit: "万" });
+  assert.deepStrictEqual(formatWanForDisplay(10000), { valueText: "1.00", unit: "亿" });
+  assert.deepStrictEqual(formatWanForDisplay(12300), { valueText: "1.23", unit: "亿" });
+  assert.strictEqual(formatWanDisplayText(12300), "1.23亿");
+  assert.notStrictEqual(formatWanDisplayText(12300), "12300亿");
+
   console.log("PASS box unit parsing & TOP5 settings migration");
   console.log(`  topCount=${migrated.topCount}, trendLimit=${migrated.enrich.trendLimit}`);
   console.log(`  1.23亿 internal=${parseBoxNum("1.23亿")} (万)`);

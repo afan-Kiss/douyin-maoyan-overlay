@@ -973,7 +973,7 @@ body {
 
 .nation-pill__delta.is-animating,
 .race-card__delta-bubble.is-animating {
-  animation: inlineDeltaFloat 3s ease forwards;
+  animation: inlineDeltaFloat var(--bubble-duration, 3s) ease forwards;
 }
 
 @keyframes inlineDeltaFloat {

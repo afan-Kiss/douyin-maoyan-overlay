@@ -13,6 +13,16 @@ import {
 } from "./maoyan-api.js";
 import { applyOverlaySettings, getOverlaySettings } from "./settings-applier.js";
 import { bindDesignViewport } from "./viewport-fit.js";
+import { formatWanForDisplay, formatWanDisplayText } from "./box-display.js";
+import {
+  createEnrichScheduleState,
+  shouldScheduleFullEnrich,
+  markFullEnrichAttempt,
+  markFullEnrichSuccess,
+  markFullEnrichFailure,
+  resetEnrichScheduleState,
+  FULL_ENRICH_GLOBAL_TIMEOUT_MS,
+} from "./enrich-scheduler.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -35,9 +45,8 @@ let loginWatchTimer = null;
 let refreshing = false;
 let hasDisplayedData = false;
 let pollCount = 0;
-let lastFullEnrich = 0;
+const enrichSchedule = createEnrichScheduleState();
 let enrichGeneration = 0;
-let enrichingBackground = false;
 
 const cardPool = new Map();
 const prevValues = new Map();
@@ -52,7 +61,6 @@ let latestNation = null;
 let latestParsedMeta = null;
 let pollGeneration = 0;
 let FULL_ENRICH_INTERVAL_MS = 60000;
-const DELTA_ANIM_MS = 3000;
 const inlineDeltaTimers = new Map();
 let partialDataWarning = "";
 
@@ -246,6 +254,12 @@ function formatDeltaWithArrow(deltaWan) {
   return text ? `${text} ↑` : "";
 }
 
+function getBubbleDurationMs() {
+  const durationMs = getOverlaySettings()?.bubble?.durationMs;
+  if (Number.isFinite(durationMs) && durationMs > 0) return durationMs;
+  return 3000;
+}
+
 function pulseInlineDelta(el, deltaWan, timerKey) {
   const bubble = getOverlaySettings()?.bubble;
   const minDelta = bubble?.minDelta ?? 0.001;
@@ -265,7 +279,7 @@ function pulseInlineDelta(el, deltaWan, timerKey) {
       el.classList.remove("is-visible", "is-animating");
       el.textContent = "";
       inlineDeltaTimers.delete(key);
-    }, DELTA_ANIM_MS),
+    }, getBubbleDurationMs()),
   );
 }
 
@@ -559,7 +573,7 @@ function ensureDailyTable(movie) {
 
   const todayBoxPlain =
     movie.todayBox > 0
-      ? `${Number(movie.todayBox).toFixed(2)}${movie.todayUnit || "万"}`
+      ? formatWanDisplayText(movie.todayBox)
       : !isEmptyField(movie.todayBoxText)
         ? `${movie.todayBoxText}${movie.todayUnit || "万"}`
         : !isEmptyField(movie.dailyIncrease)
@@ -669,7 +683,7 @@ function cardClassName(movie) {
 
 function formatDisplayBox(movie) {
   const amount = getMovieBoxAmount(movie);
-  if (amount > 0) return `${formatBoxAmount(amount)}${movie.todayUnit || "万"}`;
+  if (amount > 0) return formatWanDisplayText(amount);
   if (!isEmptyField(movie.todayBoxText)) return `${movie.todayBoxText}${movie.todayUnit || "万"}`;
   return "--";
 }
@@ -907,29 +921,12 @@ function renderList(movies) {
   updateChampion(list);
 }
 
-function formatBoxAmount(amount) {
-  if (!Number.isFinite(amount) || amount <= 0) return "--";
-  if (amount >= 1000) return amount.toFixed(1);
-  return amount.toFixed(2);
-}
-
-function resolveDisplayBoxAmount(html, unit, numeric, text) {
-  if (Number.isFinite(numeric) && numeric > 0) return numeric;
-  const fromHtml = safeDecodeBox(html, unit);
-  if (fromHtml > 0) return fromHtml;
-  if (!isEmptyField(text)) {
-    const n = parseBoxNum(text, unit || "万");
-    if (n > 0) return n;
-  }
-  return 0;
-}
-
-function setPlainBoxValue(el, amount) {
+function setPlainBoxValue(el, amount, unitEl) {
   if (!el) return;
-  const text = formatBoxAmount(amount);
+  const { valueText, unit } = formatWanForDisplay(amount);
   el.classList.remove("mtsi-font");
-  if (el.textContent === text) return;
-  el.textContent = text;
+  if (el.textContent !== valueText) el.textContent = valueText;
+  if (unitEl && unitEl.textContent !== unit) unitEl.textContent = unit;
 }
 
 function resolveDisplayDate(parsed) {
@@ -975,6 +972,17 @@ function computeNationSeatRate(movies) {
   return `${avg.toFixed(1)}%`;
 }
 
+function resolveDisplayBoxAmount(html, unit, numeric, text) {
+  if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  const fromHtml = safeDecodeBox(html, unit);
+  if (fromHtml > 0) return fromHtml;
+  if (!isEmptyField(text)) {
+    const n = parseBoxNum(text, unit || "万");
+    if (n > 0) return n;
+  }
+  return 0;
+}
+
 function setEncodedBoxValue(el, html, fallbackText = "--") {
   if (!el) return;
   if (html) {
@@ -995,18 +1003,15 @@ function updateChampion(movies) {
     return;
   }
 
-  const unit = top.todayUnit || "万";
-  if (champBoxUnitEl) champBoxUnitEl.textContent = unit;
-
   const amount = resolveDisplayBoxAmount(
     top.todayBoxHtml,
-    unit,
+    top.todayUnit || "万",
     top.todayBox,
     top.todayBoxText || top.dailyIncrease
   );
   if (amount > 0) {
     champBoxPillEl?.classList.remove("is-hidden");
-    setPlainBoxValue(champBoxEl, amount);
+    setPlainBoxValue(champBoxEl, amount, champBoxUnitEl);
   } else if (top.todayBoxHtml) {
     champBoxPillEl?.classList.remove("is-hidden");
     setEncodedBoxValue(champBoxEl, top.todayBoxHtml);
@@ -1036,16 +1041,15 @@ function updateNation(nation, parsed) {
       const delta = nationAmount - prevNation;
       pulseInlineDelta(nationDeltaEl, delta, "__nation__");
     }
-    setPlainBoxValue(nationBoxEl, nationAmount);
+    setPlainBoxValue(nationBoxEl, nationAmount, unitEl);
     prevValues.set("__nation__", nationAmount);
     if (nation.todayBoxHtml) prevBoxHtml.set("__nation__", nation.todayBoxHtml);
   } else if (nation.todayBoxHtml) {
     setEncodedBoxValue(nationBoxEl, nation.todayBoxHtml);
   } else {
-    setPlainBoxValue(nationBoxEl, 0);
+    setPlainBoxValue(nationBoxEl, 0, unitEl);
   }
 
-  if (unitEl) unitEl.textContent = unit;
   setTextIfChanged(nationShowsEl, nation.showCountDesc || "--");
   setTextIfChanged(nationViewsEl, nation.viewCountDesc || "--");
 
@@ -1069,14 +1073,18 @@ function updateNation(nation, parsed) {
 }
 
 function scheduleBackgroundEnrich(requestPollGen, parsed, speed) {
-  if (enrichingBackground) return;
+  if (enrichSchedule.enrichingBackground) return;
 
   const now = Date.now();
-  const needFull = pollCount === 1 || now - lastFullEnrich >= FULL_ENRICH_INTERVAL_MS;
-  if (!needFull) return;
+  enrichSchedule.pollCount = pollCount;
+  if (!shouldScheduleFullEnrich(now, enrichSchedule, FULL_ENRICH_INTERVAL_MS)) return;
 
   const gen = ++enrichGeneration;
-  enrichingBackground = true;
+  enrichSchedule.enrichingBackground = true;
+  markFullEnrichAttempt(enrichSchedule, now);
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), FULL_ENRICH_GLOBAL_TIMEOUT_MS);
 
   (async () => {
     try {
@@ -1088,16 +1096,10 @@ function scheduleBackgroundEnrich(requestPollGen, parsed, speed) {
         speed,
         trendLimit: RACE_TOP_COUNT,
         enableExtraApis: true,
+        signal: controller.signal,
       };
 
-      const task = enrichMovies(config.apiBase, parsed.movies, enrichOpts);
-
-      const enriched = await Promise.race([
-        task,
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("enrich_timeout")), 120000)
-        ),
-      ]);
+      const enriched = await enrichMovies(config.apiBase, parsed.movies, enrichOpts);
 
       if (gen !== enrichGeneration) return;
 
@@ -1107,9 +1109,10 @@ function scheduleBackgroundEnrich(requestPollGen, parsed, speed) {
       renderList(movies);
       updatePartialDataWarning(getLastEnrichErrors());
       setStatus("ok", "");
-      if (needFull) lastFullEnrich = Date.now();
+      markFullEnrichSuccess(enrichSchedule);
     } catch (err) {
       console.warn("后台补充字段失败", err);
+      if (gen === enrichGeneration) markFullEnrichFailure(enrichSchedule);
       if (isLoginRelatedError(err)) {
         await updateLoginButton(true);
         partialDataWarning = `部分详细数据获取失败：${formatUserFacingError(err)}`;
@@ -1119,7 +1122,8 @@ function scheduleBackgroundEnrich(requestPollGen, parsed, speed) {
         setStatus("ok", "");
       }
     } finally {
-      if (gen === enrichGeneration) enrichingBackground = false;
+      clearTimeout(timeoutId);
+      if (gen === enrichGeneration) enrichSchedule.enrichingBackground = false;
     }
   })();
 }
@@ -1252,7 +1256,7 @@ async function syncOverlaySettings() {
   config.enrichConcurrency = settings.enrich?.concurrency;
   config.trendLimit = RACE_TOP_COUNT;
   FULL_ENRICH_INTERVAL_MS = settings.enrich?.fullIntervalMs || 60000;
-  lastFullEnrich = 0;
+  resetEnrichScheduleState(enrichSchedule);
   if (hasDisplayedData && pollTimer) restartPolling();
 }
 
@@ -1341,7 +1345,7 @@ async function finishLoginSuccess() {
   await updateLoginButton(false);
   resetApiSigWarm();
   partialDataWarning = "";
-  lastFullEnrich = 0;
+  resetEnrichScheduleState(enrichSchedule);
   setStatus("loading", "登录成功，正在拉取票房数据…");
   const status = await window.overlay?.ensureApi?.();
   if (status?.apiBase) config.apiBase = status.apiBase;
@@ -1476,7 +1480,7 @@ async function init() {
     config.enrichConcurrency = settings.enrich?.concurrency;
     config.trendLimit = RACE_TOP_COUNT;
     FULL_ENRICH_INTERVAL_MS = settings.enrich?.fullIntervalMs || 60000;
-    lastFullEnrich = 0;
+    resetEnrichScheduleState(enrichSchedule);
     if (hasDisplayedData) {
       restartPolling();
       refreshData();
@@ -1494,6 +1498,8 @@ async function init() {
       pulseInlineDelta,
       computeMovieDelta,
       formatDeltaWithArrow,
+      formatWanForDisplay,
+      formatWanDisplayText,
     };
     setStatus("ok", "");
     return;
