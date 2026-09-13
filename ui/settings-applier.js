@@ -51,6 +51,8 @@ export function applyOverlaySettings(settings) {
   root.style.setProperty("--font-metric-label", `${metricLabel}px`);
   root.style.setProperty("--font-metric-value", `${metricValue}px`);
   root.style.setProperty("--font-metric-value-rank1", `${metricValueRank1}px`);
+  root.style.setProperty("--font-sum-box-rank1", `${f.sumBoxRank1 ?? 34}px`);
+  root.style.setProperty("--font-sum-box-follow", `${f.sumBoxFollow ?? 30}px`);
   root.style.setProperty("--font-table", `${f.table || 12}px`);
   root.style.setProperty("--font-delta", `${f.metricValue || 14}px`);
   root.style.setProperty("--font-champ", `${Math.round((f.heroSubtitle || 28) * 0.95)}px`);

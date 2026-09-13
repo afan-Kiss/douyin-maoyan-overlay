@@ -718,12 +718,9 @@ const CORE_STAT_DEFS = [
   { label: "实时上座", key: "avgSeatView", cls: "js-seat-view" },
 ];
 
-const EXTRA_STAT_DEFS = [
+const HIDDEN_EXTRA_STAT_DEFS = [
   { label: "动态预测", key: "dynamicForecast", cls: "js-forecast", trend: "dynamicTrend" },
-  { label: "累计票房", key: "sumBoxDesc", cls: "js-sum-box" },
   { label: "今日时速", key: "hourSpeedText", cls: "js-hour-speed" },
-  { label: "昨日票房", key: "yesterdayTotal", cls: "js-yest-total" },
-  { label: "昨日同期", key: "yesterdaySamePeriodText", cls: "js-yest-same" },
 ];
 
 function statValue(movie, def) {
@@ -733,49 +730,72 @@ function statValue(movie, def) {
   return `${escapeHtml(String(raw))}${trend}`;
 }
 
-function buildCardStatDefs(movie, isRank1) {
-  const core = CORE_STAT_DEFS.map((def) => ({ ...def, always: true }));
-  let extras;
-  if (isRank1) {
-    extras = EXTRA_STAT_DEFS.slice(0, 2);
-  } else {
-    extras = EXTRA_STAT_DEFS.filter((def) => !isEmptyField(movie[def.key])).slice(0, 2);
-  }
-  return [...core, ...extras];
+function medalClassName(rank) {
+  if (rank === 1) return "race-card__medal--gold";
+  if (rank === 2) return "race-card__medal--silver";
+  if (rank === 3) return "race-card__medal--bronze";
+  return "race-card__medal--plain";
 }
 
-function buildStatsGridHtml(movie) {
-  const isRank1 = Number(movie.rank) === 1;
-  const defs = buildCardStatDefs(movie, isRank1);
-  return defs
-    .map((def) => {
-      const hide = !def.always && isEmptyField(movie[def.key]);
-      if (hide) return "";
-      return `<div class="race-stat" data-stat="${def.cls}">
-        <em>${def.label}</em>
-        <strong class="${def.cls}">${statValue(movie, def)}</strong>
-      </div>`;
-    })
-    .join("");
+function buildStatItemHtml(def, movie, extra = false) {
+  const extraCls = extra ? " race-stat--extra" : "";
+  return `<div class="race-stat${extraCls}" data-stat="${def.cls}">
+    <em>${def.label}</em>
+    <strong class="${def.cls}">${statValue(movie, def)}</strong>
+  </div>`;
 }
+
+function buildCoreStatsHtml(movie) {
+  return CORE_STAT_DEFS.map((def) => buildStatItemHtml(def, movie)).join("");
+}
+
+function buildHiddenExtraStatsHtml(movie) {
+  const rank = Number(movie.rank) || 99;
+  if (rank > 2) return "";
+  return HIDDEN_EXTRA_STAT_DEFS.map((def) => buildStatItemHtml(def, movie, true)).join("");
+}
+
+function buildStatsColumnHtml(movie) {
+  return `${buildCoreStatsHtml(movie)}${buildHiddenExtraStatsHtml(movie)}`;
+}
+
+function formatSumBox(movie) {
+  return isEmptyField(movie.sumBoxDesc) ? "--" : escapeHtml(String(movie.sumBoxDesc));
+}
+
+const SUM_BAR_ICON = `<svg class="race-card__sum-icon" viewBox="0 0 24 24" aria-hidden="true">
+  <rect x="3" y="12" width="4" height="8" rx="1" fill="currentColor" opacity="0.85"/>
+  <rect x="10" y="8" width="4" height="12" rx="1" fill="currentColor"/>
+  <rect x="17" y="5" width="4" height="15" rx="1" fill="currentColor" opacity="0.72"/>
+</svg>`;
 
 function raceCardTemplate(movie) {
   const boxText = formatDisplayBox(movie);
-  const isRank1 = Number(movie.rank) === 1;
+  const rank = Number(movie.rank) || 1;
   return `
+    <span class="race-card__corner">NO.${rank}</span>
     <div class="race-card__head">
+      <span class="race-card__medal ${medalClassName(rank)}" aria-hidden="true">
+        <span class="race-card__medal-num">${rank}</span>
+      </span>
       <h2 class="race-card__title">《${escapeHtml(movie.name)}》</h2>
-      <span class="race-card__rank">NO.${movie.rank}</span>
     </div>
-    <div class="race-card__box-row">
-      <span class="race-card__box-label">实时票房</span>
-      <div class="race-card__box-value">
-        <strong class="js-day-box">${escapeHtml(boxText)}</strong>
-        <span class="race-card__delta-bubble" aria-hidden="true"></span>
+    <div class="race-card__body">
+      <div class="race-card__box-block">
+        <span class="race-card__box-label">实时票房</span>
+        <div class="race-card__box-value">
+          <strong class="js-day-box">${escapeHtml(boxText)}</strong>
+          <span class="race-card__delta-bubble" aria-hidden="true"></span>
+        </div>
+      </div>
+      <div class="race-card__stats">
+        ${buildStatsColumnHtml(movie)}
       </div>
     </div>
-    <div class="race-card__grid${isRank1 ? " race-card__grid--rank1" : ""}">
-      ${buildStatsGridHtml(movie)}
+    <div class="race-card__sum-bar">
+      ${SUM_BAR_ICON}
+      <span class="race-card__sum-label">累计票房</span>
+      <strong class="js-sum-box">${formatSumBox(movie)}</strong>
     </div>
   `;
 }
@@ -856,19 +876,33 @@ function updateRaceCard(card, movie, isNew = false) {
     return;
   }
 
-  setTextIfChanged(card.querySelector(".race-card__rank"), `NO.${movie.rank}`);
+  const rank = Number(movie.rank) || 1;
+  setTextIfChanged(card.querySelector(".race-card__corner"), `NO.${rank}`);
+
+  const medal = card.querySelector(".race-card__medal");
+  if (medal) {
+    medal.className = `race-card__medal ${medalClassName(rank)}`;
+    const medalNum = medal.querySelector(".race-card__medal-num");
+    if (medalNum) setTextIfChanged(medalNum, String(rank));
+  }
+
   if (setTextIfChanged(card.querySelector(".race-card__title"), `《${movie.name}》`)) {
-    const minTitle = Number(movie.rank) === 1 ? 42 : 35;
+    const minTitle = rank === 1 ? 42 : 35;
     fitNowrapEl(card.querySelector(".race-card__title"), { minSize: minTitle, allowWrap: true });
   }
 
   setTextIfChanged(card.querySelector(".js-day-box"), formatDisplayBox(movie));
 
-  const grid = card.querySelector(".race-card__grid");
-  const nextGrid = buildStatsGridHtml(movie);
-  if (grid && grid.innerHTML !== nextGrid) {
-    grid.innerHTML = nextGrid;
-    grid.classList.toggle("race-card__grid--rank1", Number(movie.rank) === 1);
+  const statsCol = card.querySelector(".race-card__stats");
+  const nextStats = buildStatsColumnHtml(movie);
+  if (statsCol && statsCol.innerHTML !== nextStats) {
+    statsCol.innerHTML = nextStats;
+  }
+
+  const sumEl = card.querySelector(".js-sum-box");
+  if (sumEl) {
+    const nextSum = isEmptyField(movie.sumBoxDesc) ? "--" : String(movie.sumBoxDesc);
+    setTextIfChanged(sumEl, nextSum);
   }
 
   updateRaceCardDelta(card, movie, isNew);
@@ -901,14 +935,18 @@ function renderLoadingSkeleton() {
     const rank = i + 1;
     return `
       <article class="race-card race-card--skeleton race-card--rank${rank}" aria-hidden="true">
+        <span class="race-card__corner skeleton-block">NO.${rank}</span>
         <div class="race-card__head">
+          <span class="race-card__medal skeleton-block"></span>
           <h2 class="race-card__title skeleton-block">加载中</h2>
-          <span class="race-card__rank skeleton-block">NO.${rank}</span>
         </div>
-        <div class="race-card__box-row skeleton-block"></div>
-        <div class="race-card__grid">
-          ${Array.from({ length: 6 }, () => '<div class="race-stat skeleton-block"></div>').join("")}
+        <div class="race-card__body">
+          <div class="race-card__box-block skeleton-block"></div>
+          <div class="race-card__stats">
+            ${Array.from({ length: 3 }, () => '<div class="race-stat skeleton-block"></div>').join("")}
+          </div>
         </div>
+        <div class="race-card__sum-bar skeleton-block"></div>
       </article>
     `;
   }).join("");
