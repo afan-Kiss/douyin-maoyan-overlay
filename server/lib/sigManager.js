@@ -7,6 +7,7 @@ import {
   COOKIE_FILE,
   DATA_DIR,
   MAX_CACHE_ENTRIES,
+  CACHE_PRESSURE_THRESHOLD,
   SESSION_CACHE_DIR,
   SIG_TTL_SECONDS,
   STORAGE_STATE,
@@ -93,6 +94,31 @@ async function safeFetch(url, options) {
   } catch (e) {
     if (e?.name === "TimeoutError" || e?.name === "AbortError") throw e;
     throw new UpstreamError(502, "network_failed");
+  }
+}
+
+function mergeAbortSignals(...signals) {
+  const parts = signals.filter(Boolean);
+  if (!parts.length) return undefined;
+  if (parts.length === 1) return parts[0];
+  if (typeof AbortSignal.any === "function") return AbortSignal.any(parts);
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  for (const sig of parts) {
+    if (sig.aborted) {
+      controller.abort();
+      return controller.signal;
+    }
+    sig.addEventListener("abort", onAbort, { once: true });
+  }
+  return controller.signal;
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) {
+    const err = new Error("dashboard_timeout");
+    err.name = "AbortError";
+    throw err;
   }
 }
 const UPSTREAM_ORIGIN = "https://piaofang.maoyan.com";
@@ -425,7 +451,7 @@ export class SigManager {
     });
   }
 
-  pruneCache() {
+  pruneCache(options = {}) {
     const now = Date.now() / 1000;
     for (const [key, entry] of this.cache) {
       if (!entry?.refreshedAt || now - entry.refreshedAt >= this.ttl) {
@@ -439,7 +465,8 @@ export class SigManager {
     }
 
     for (const [key, entry] of this.browserApiCache) {
-      if (!entry?.refreshedAt || now - entry.refreshedAt >= BROWSER_API_CACHE_TTL) {
+      const ttl = key.startsWith(DASHBOARD_API) ? DASHBOARD_CACHE_TTL : BROWSER_API_CACHE_TTL;
+      if (!entry?.refreshedAt || now - entry.refreshedAt >= ttl) {
         this.browserApiCache.delete(key);
       }
     }
@@ -448,6 +475,38 @@ export class SigManager {
       if (first === undefined) break;
       this.browserApiCache.delete(first);
     }
+
+    const totalSize = this.cache.size + this.browserApiCache.size;
+    if (options.force || totalSize >= CACHE_PRESSURE_THRESHOLD) {
+      const targetSig = Math.floor(MAX_CACHE_ENTRIES * 0.6);
+      const targetApi = Math.floor(MAX_CACHE_ENTRIES * 0.6);
+      this.evictOldestEntries(this.cache, Math.max(0, this.cache.size - targetSig));
+      this.evictOldestEntries(
+        this.browserApiCache,
+        Math.max(0, this.browserApiCache.size - targetApi),
+      );
+      if (totalSize >= CACHE_PRESSURE_THRESHOLD) {
+        log.sigStep(
+          `缓存压力 ${totalSize}≥${CACHE_PRESSURE_THRESHOLD}，已提前清理 sig=${this.cache.size} api=${this.browserApiCache.size}`,
+        );
+      }
+    }
+  }
+
+  evictOldestEntries(map, count) {
+    if (count <= 0 || !map.size) return;
+    const entries = [...map.entries()].sort(
+      (a, b) => (a[1]?.refreshedAt || 0) - (b[1]?.refreshedAt || 0),
+    );
+    for (let i = 0; i < count && i < entries.length; i++) {
+      map.delete(entries[i][0]);
+    }
+  }
+
+  apiInflightKey(movieId, apiPath, variant = "") {
+    const pathNorm = String(apiPath || "").split("?")[0];
+    const suffix = variant ? `:${variant}` : "";
+    return `api:${movieId}:${pathNorm}${suffix}`;
   }
 
   isFresh(entry, ttl = this.ttl) {
@@ -1002,7 +1061,7 @@ export class SigManager {
   async fetch(movieId, boxLevel, { forceRefresh = false } = {}) {
     movieId = String(movieId);
     boxLevel = String(boxLevel);
-    const inflightKey = `box:${movieId}:${boxLevel}:${forceRefresh ? "f" : "n"}`;
+    const inflightKey = this.apiInflightKey(movieId, "/i/api/movie/getBoxShow", boxLevel);
     return this.runInflight(inflightKey, async () => {
       const key = this.cacheKey(movieId, boxLevel);
 
@@ -1409,7 +1468,7 @@ export class SigManager {
 
     const params = buildWuKongParams(query, movieId);
     const cacheKey = wukongCacheKey(apiPath, query, movieId);
-    const inflightKey = `wukong-data:${cacheKey}:${forceRefresh ? "f" : "n"}`;
+    const inflightKey = this.apiInflightKey(movieId, apiPath);
 
     return this.runInflight(inflightKey, async () => {
       if (!forceRefresh) {
@@ -1433,12 +1492,14 @@ export class SigManager {
     });
   }
 
-  async fetchDashboardMovie(query = {}, { forceRefresh = false } = {}) {
+  async fetchDashboardMovie(query = {}, { forceRefresh = false, signal } = {}) {
     const params = buildDashboardParams(query);
     const cacheKey = dashboardCacheKey(query);
-    const inflightKey = `dash:${cacheKey}:${forceRefresh ? "f" : "n"}`;
+    const inflightKey = `dash:${cacheKey}`;
 
     return this.runInflight(inflightKey, async () => {
+      throwIfAborted(signal);
+
       if (!forceRefresh) {
         const cached = this.browserApiCache.get(cacheKey);
         if (cached && this.isFresh(cached, DASHBOARD_CACHE_TTL)) {
@@ -1452,6 +1513,7 @@ export class SigManager {
       ).toString();
 
       const requestOnce = async (extraHeaders = {}) => {
+        throwIfAborted(signal);
         log.reqUpstream();
         return safeFetch(`${UPSTREAM_ORIGIN}${DASHBOARD_API}?${qs}`, {
           headers: {
@@ -1461,7 +1523,7 @@ export class SigManager {
             "User-Agent": USER_AGENT,
             ...extraHeaders,
           },
-          signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+          signal: mergeAbortSignals(AbortSignal.timeout(UPSTREAM_TIMEOUT_MS), signal),
         });
       };
 
@@ -1469,6 +1531,7 @@ export class SigManager {
       const baseHeaders = cookie ? { Cookie: cookie } : {};
 
       let resp = await requestOnce(baseHeaders);
+      throwIfAborted(signal);
       if (!resp.ok && (resp.status === 403 || resp.status === 401)) {
         const mygsig = buildMygsig({ ...params, path: DASHBOARD_API });
         resp = await requestOnce({ ...baseHeaders, mygsig, uid: generateUid() });
@@ -1479,8 +1542,10 @@ export class SigManager {
       }
 
       if (!resp.ok) {
+        throwIfAborted(signal);
         log.reqTag("browser-fallback");
         const data = await this.withBrowserPage("", DASHBOARD_PAGE, async (page) => {
+          throwIfAborted(signal);
           return this.fetchInPage(page, `${UPSTREAM_ORIGIN}${DASHBOARD_API}?${qs}`);
         });
         this.browserApiCache.set(cacheKey, {
@@ -1488,8 +1553,8 @@ export class SigManager {
           refreshedAt: Date.now() / 1000,
         });
         this.pruneCache();
-      log.reqData("fresh");
-      log.reqMode("browser");
+        log.reqData("fresh");
+        log.reqMode("browser");
         log.markDashboardSuccess();
         return data;
       }

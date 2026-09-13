@@ -73,6 +73,7 @@ const prevRankMap = new Map();
 const speedSnapshots = new Map();
 const lastGoodMovies = new Map();
 const lastGoodNation = {};
+let lastGoodCacheDay = "";
 let latestMovies = [];
 let latestSpeedMap = {};
 let latestNation = null;
@@ -300,6 +301,19 @@ function resolveMetricRaw(def, movie) {
 function metricValueSignature(def, movie) {
   const raw = resolveMetricRaw(def, movie);
   return isEmptyField(raw) ? "" : String(raw).replace(/\s+/g, "").trim();
+}
+
+function resetLastGoodIfDayChanged(calendarToday) {
+  const day =
+    String(calendarToday || "")
+      .trim()
+      .slice(0, 10) || new Date().toISOString().slice(0, 10);
+  if (lastGoodCacheDay && lastGoodCacheDay !== day) {
+    lastGoodMovies.clear();
+    for (const key of Object.keys(lastGoodNation)) delete lastGoodNation[key];
+    speedSnapshots.clear();
+  }
+  lastGoodCacheDay = day;
 }
 
 function updateMovieCache(key, movie) {
@@ -1859,6 +1873,7 @@ async function refreshData() {
 
     const raw = await fetchDashboard(config.apiBase);
     const parsed = parseDashboard(raw, RACE_TOP_COUNT);
+    resetLastGoodIfDayChanged(parsed.calendar?.today);
     traceDashboardData(parsed, raw, { enabled: isDataTraceEnabled() });
     if (!parsed.movies.length) {
       if (!hasDisplayedData) setStatus("loading", "等待票房数据…");

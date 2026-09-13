@@ -221,21 +221,25 @@ async function handleDashboardMovie(req, res) {
   const forceRefresh =
     req.query.force_refresh === "true" || req.query.forceRefresh === "true";
   const timeoutMs = 55000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const data = await Promise.race([
-      manager.fetchDashboardMovie({ ...req.query }, { forceRefresh }),
-      new Promise((_, reject) => {
-        setTimeout(() => {
-          const err = new Error("dashboard_timeout");
-          err.name = "TimeoutError";
-          reject(err);
-        }, timeoutMs);
-      }),
-    ]);
+    const data = await manager.fetchDashboardMovie(
+      { ...req.query },
+      { forceRefresh, signal: controller.signal },
+    );
     res.json(data);
   } catch (e) {
+    if (controller.signal.aborted && e?.name !== "TimeoutError") {
+      const err = new Error("dashboard_timeout");
+      err.name = "TimeoutError";
+      sendApiError(res, err);
+      return;
+    }
     sendApiError(res, e);
+  } finally {
+    clearTimeout(timer);
   }
 }
 

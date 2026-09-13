@@ -43,22 +43,42 @@ function mergeFetchSignal(parentSignal, timeoutMs) {
   return AbortSignal.any(parts);
 }
 
+const movieApiInflight = new Map();
+const dashboardInflight = new Map();
+
+function runClientInflight(store, key, fn) {
+  if (store.has(key)) return store.get(key);
+  const task = Promise.resolve()
+    .then(fn)
+    .finally(() => {
+      store.delete(key);
+    });
+  store.set(key, task);
+  return task;
+}
+
 export async function fetchDashboard(apiBase, movieId = "", options = {}) {
   const url =
     `${apiBase}/i/api/dashboard-ajax/movie?` +
     new URLSearchParams({ ...DASHBOARD_PARAMS, movieId: String(movieId || "") });
-  const resp = await fetch(url, { signal: mergeFetchSignal(options.signal, 60000) });
-  if (!resp.ok) throw await readApiError(resp);
-  return resp.json();
+  const dedupeKey = url;
+  return runClientInflight(dashboardInflight, dedupeKey, async () => {
+    const resp = await fetch(url, { signal: mergeFetchSignal(options.signal, 60000) });
+    if (!resp.ok) throw await readApiError(resp);
+    return resp.json();
+  });
 }
 
 async function fetchMovieApi(apiBase, apiPath, movieId, extra = {}, timeoutMs = 20000, parentSignal) {
-  const url =
-    `${apiBase}${apiPath}?` +
-    new URLSearchParams({ movieId: String(movieId), WuKongReady: "h5", ...extra });
-  const resp = await fetch(url, { signal: mergeFetchSignal(parentSignal, timeoutMs) });
-  if (!resp.ok) throw await readApiError(resp);
-  return resp.json();
+  const dedupeKey = `${apiPath}:${movieId}:${JSON.stringify(extra)}`;
+  return runClientInflight(movieApiInflight, dedupeKey, async () => {
+    const url =
+      `${apiBase}${apiPath}?` +
+      new URLSearchParams({ movieId: String(movieId), WuKongReady: "h5", ...extra });
+    const resp = await fetch(url, { signal: mergeFetchSignal(parentSignal, timeoutMs) });
+    if (!resp.ok) throw await readApiError(resp);
+    return resp.json();
+  });
 }
 
 let apiSigWarmed = false;
@@ -1093,6 +1113,23 @@ export function parseDashboard(raw, topCount = 5) {
   };
 }
 
+function isEmptyMetricValue(val) {
+  if (val == null) return true;
+  if (Array.isArray(val)) return !val.length;
+  const text = String(val).trim();
+  return !text || text === "--" || text === "-";
+}
+
+/** 强保留：detail 为空时不覆盖 base 已有值 */
+function mergePreserveField(merged, field, newVal) {
+  if (!isEmptyMetricValue(newVal)) merged[field] = newVal;
+}
+
+/** 强覆盖：detail 有实时值时优先采用（禁止 newValue || oldValue 式合并） */
+function mergeOverwriteField(merged, field, newVal) {
+  if (!isEmptyMetricValue(newVal)) merged[field] = newVal;
+}
+
 export function mergeMovieDetail(base, detail = {}) {
   const trends = detail.trends || {};
   const boxShow = detail.boxShow || {};
@@ -1103,7 +1140,7 @@ export function mergeMovieDetail(base, detail = {}) {
   const merged = { ...base };
 
   const dailyIncrease = trends.increaseDesc || trends.dailyIncrease || boxShow.dailyIncrease;
-  if (!isEmptyMetricValue(dailyIncrease)) merged.dailyIncrease = dailyIncrease;
+  mergeOverwriteField(merged, "dailyIncrease", dailyIncrease);
 
   if (!isEmptyMetricValue(trends.yesterdayDesc)) {
     merged.yesterdayTotal = trends.yesterdayDesc;
@@ -1119,40 +1156,39 @@ export function mergeMovieDetail(base, detail = {}) {
       boxShow.yesterdayHourSpeedText !== "--");
 
   if (hourSpeedFromBoxShow) {
-    merged.hourSpeed = boxShow.hourSpeed || 0;
+    merged.hourSpeed = boxShow.hourSpeed > 0 ? boxShow.hourSpeed : 0;
     merged.hourSpeedText = boxShow.hourSpeedText;
     merged.hourSpeedFromApi = true;
   }
   if (yesterdayHourSpeedFromBoxShow) {
-    merged.yesterdayHourSpeed = boxShow.yesterdayHourSpeed || 0;
+    merged.yesterdayHourSpeed =
+      boxShow.yesterdayHourSpeed > 0 ? boxShow.yesterdayHourSpeed : 0;
     merged.yesterdayHourSpeedText = boxShow.yesterdayHourSpeedText;
   }
-  if (!isEmptyMetricValue(boxShow.yesterdaySamePeriodText)) {
-    merged.yesterdaySamePeriodText = boxShow.yesterdaySamePeriodText;
-  }
-  if (!isEmptyMetricValue(boxShow.totalViews)) merged.totalViews = boxShow.totalViews;
+  mergeOverwriteField(merged, "yesterdaySamePeriodText", boxShow.yesterdaySamePeriodText);
+  mergeOverwriteField(merged, "totalViews", boxShow.totalViews);
 
-  if (!isEmptyMetricValue(prediction.dynamicForecast)) {
-    merged.dynamicForecast = prediction.dynamicForecast;
-    if (prediction.dynamicForecastNum > 0) merged.dynamicForecastNum = prediction.dynamicForecastNum;
-    if (!isEmptyMetricValue(prediction.dynamicTrend)) merged.dynamicTrend = prediction.dynamicTrend;
+  mergePreserveField(merged, "dynamicForecast", prediction.dynamicForecast);
+  if (prediction.dynamicForecastNum > 0) {
+    merged.dynamicForecastNum = prediction.dynamicForecastNum;
   }
-  if (!isEmptyMetricValue(prediction.totalForecast)) {
-    merged.totalForecast = prediction.totalForecast;
-    if (prediction.totalForecastNum > 0) merged.totalForecastNum = prediction.totalForecastNum;
-    if (!isEmptyMetricValue(prediction.totalTrend)) merged.totalTrend = prediction.totalTrend;
+  mergePreserveField(merged, "dynamicTrend", prediction.dynamicTrend);
+  mergePreserveField(merged, "totalForecast", prediction.totalForecast);
+  if (prediction.totalForecastNum > 0) {
+    merged.totalForecastNum = prediction.totalForecastNum;
   }
+  mergePreserveField(merged, "totalTrend", prediction.totalTrend);
 
   if (!isEmptyMetricValue(global.mainland)) {
     merged.mainlandBox = global.mainland;
-  } else if (isEmptyMetricValue(base.mainlandBox) && !isEmptyMetricValue(base.sumBoxDesc)) {
+  } else if (isEmptyMetricValue(merged.mainlandBox) && !isEmptyMetricValue(base.sumBoxDesc)) {
     merged.mainlandBox = formatDescMoney(base.sumBoxDesc);
   }
-  if (!isEmptyMetricValue(global.hmt)) merged.hmtBox = global.hmt;
-  if (!isEmptyMetricValue(global.overseas)) merged.overseasBox = global.overseas;
+  mergePreserveField(merged, "hmtBox", global.hmt);
+  mergePreserveField(merged, "overseasBox", global.overseas);
 
-  if (!isEmptyMetricValue(tech.endDate)) merged.endDate = tech.endDate;
-  if (!isEmptyMetricValue(tech.remainingDays)) merged.remainingDays = tech.remainingDays;
+  mergePreserveField(merged, "endDate", tech.endDate);
+  mergePreserveField(merged, "remainingDays", tech.remainingDays);
 
   const hasDetailDaily =
     (Array.isArray(prediction.dailyForecast) && prediction.dailyForecast.length > 0) ||
@@ -1169,13 +1205,6 @@ export function mergeMovieDetail(base, detail = {}) {
   }
 
   return merged;
-}
-
-function isEmptyMetricValue(val) {
-  if (val == null) return true;
-  if (Array.isArray(val)) return !val.length;
-  const text = String(val).trim();
-  return !text || text === "--" || text === "-";
 }
 
 function normalizeMetricCompare(val) {

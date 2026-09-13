@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { createRequire } from "module";
-import { STORAGE_STATE, SIG_TTL_SECONDS } from "./config.js";
+import { STORAGE_STATE, SIG_TTL_SECONDS, DETAIL_API_SUCCESS_TTL_MS } from "./config.js";
 
 const require = createRequire(import.meta.url);
 const { storageFileExists, storageFileLooksLoggedIn } = require("../../lib/storage-auth.js");
@@ -34,6 +34,7 @@ let lastVerifyResult = { ...EMPTY_VERIFY };
 let lastSignatureSuccessAt = null;
 let lastSignatureError = null;
 let lastDashboardSuccessAt = null;
+let lastDetailApiSuccessAt = null;
 let verifyGeneration = 0;
 
 function readFileFlags() {
@@ -108,14 +109,26 @@ export function markSignatureSuccess(detail = "") {
 }
 
 export function markDetailApiSuccess(patch = {}) {
+  lastDetailApiSuccessAt = new Date().toISOString();
   applyCapabilitySuccess({
     signatureReady: true,
     detailApiReady: true,
     browserSessionVerified: true,
     signatureCaptured: true,
     productionDetailReady: true,
+    detailPayloadValid: true,
     ...patch,
   });
+}
+
+export function getLastDetailApiSuccessAt() {
+  return lastDetailApiSuccessAt;
+}
+
+export function isRecentDetailApiSuccess(maxAgeMs = DETAIL_API_SUCCESS_TTL_MS) {
+  if (!lastDetailApiSuccessAt) return false;
+  const age = Date.now() - new Date(lastDetailApiSuccessAt).getTime();
+  return age >= 0 && age < maxAgeMs;
 }
 
 export function markSignatureFailure(detail = "") {

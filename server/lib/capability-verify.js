@@ -7,6 +7,7 @@ import {
   getLastCapabilityVerify,
   setLastCapabilityVerify,
   getSignatureTTLStatus,
+  isRecentDetailApiSuccess,
 } from "./capability-state.js";
 
 const require = createRequire(import.meta.url);
@@ -68,15 +69,22 @@ async function executeCapabilityVerify(options = {}) {
     verifyPick = null;
   }
 
-  // C: 内存/磁盘签名仍新鲜且已有身份 Cookie 时，跳过无头 Chrome 验签
-  if (!force && base.identityCookieExists && manager.hasFreshSignature()) {
+  // 仅当 cookie + 新鲜 mtgsig + 近期 detail API 成功时跳过浏览器验签
+  if (
+    !force &&
+    base.identityCookieExists &&
+    manager.hasFreshSignature() &&
+    isRecentDetailApiSuccess() &&
+    base.detailPayloadValid
+  ) {
     result.signatureReady = true;
     result.detailApiReady = true;
     result.productionDetailReady = true;
-    result.browserSessionVerified = false;
+    result.browserSessionVerified = Boolean(base.browserSessionVerified);
     result.sessionUsable = true;
     result.accountLoggedIn = true;
     result.loginCookieReady = true;
+    result.detailPayloadValid = true;
     result.lastVerifyError = null;
     if (verifyPick?.verifyMovieId) {
       result.verifyMovieId = verifyPick.verifyMovieId;

@@ -24,6 +24,10 @@ export const SIG_TTL_SECONDS = 25 * 60;
 export const BROWSER_API_CACHE_TTL = 90;
 export const DASHBOARD_CACHE_TTL = 5;
 export const MAX_CACHE_ENTRIES = 50;
+/** sig/browserApi 缓存条目超过此值时提前淘汰最旧项 */
+export const CACHE_PRESSURE_THRESHOLD = 40;
+/** detail API 成功标记的有效期（与 session 校验 TTL 对齐） */
+export const DETAIL_API_SUCCESS_TTL_MS = 5 * 60 * 1000;
 export const UPSTREAM_TIMEOUT_MS = 30000;
 
 export const USER_AGENT =
