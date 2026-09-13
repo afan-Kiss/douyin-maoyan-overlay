@@ -1,5 +1,11 @@
 let overlaySettings = null;
 
+function clampFont(n, fallback, min, max) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return fallback;
+  return Math.max(min, Math.min(max, v));
+}
+
 export function getOverlaySettings() {
   return overlaySettings;
 }
@@ -12,17 +18,19 @@ export function applyOverlaySettings(settings) {
   const b = settings.bubble || {};
   const f = settings.fonts || {};
   const c = settings.colors || {};
-  const heroTitle = f.heroTitle ?? 72;
-  const heroSub = f.heroSubtitle ?? 28;
-  const nationBox = f.nationBox ?? 38;
-  const nationLabel = f.nationLabel ?? 24;
-  const movieTitleRank1 = f.movieTitleRank1 ?? f.movieTitle ?? 46;
-  const movieTitleFollow = f.movieTitleFollow ?? Math.round((f.movieTitle ?? 37) * 1);
-  const movieBoxRank1 = f.movieBoxRank1 ?? 52;
-  const movieBoxFollow = f.movieBoxFollow ?? 41;
-  const metricLabel = f.metricLabel ?? 22;
-  const metricValue = f.metricValue ?? 29;
-  const metricValueRank1 = f.metricValueRank1 ?? 32;
+  // 赛马榜布局安全上限：远程后台过大字号会导致顶部大盘与 NO.1 卡片重叠
+  const heroTitle = clampFont(f.heroTitle, 72, 28, 72);
+  const heroSub = clampFont(f.heroSubtitle, 28, 14, 32);
+  const nationBox = clampFont(f.nationBox, 38, 18, 42);
+  const nationLabel = clampFont(f.nationLabel, 22, 12, 24);
+  const movieTitleRank1 = clampFont(f.movieTitleRank1 ?? f.movieTitle, 42, 22, 44);
+  const movieTitleFollow = clampFont(f.movieTitleFollow ?? f.movieTitle, 36, 20, 40);
+  const movieBoxRank1 = clampFont(f.movieBoxRank1, 52, 24, 56);
+  const movieBoxFollow = clampFont(f.movieBoxFollow, 41, 22, 48);
+  const metricLabel = clampFont(f.metricLabel, 18, 12, 22);
+  const metricValue = clampFont(f.metricValue, 26, 14, 30);
+  const metricValueRank1 = clampFont(f.metricValueRank1 ?? f.metricValue, 28, 16, 32);
+  const tableFont = clampFont(f.table, 24, 12, 26);
 
   root.style.setProperty("--bubble-color", b.color || "#ffd27a");
   root.style.setProperty(
@@ -32,9 +40,9 @@ export function applyOverlaySettings(settings) {
   root.style.setProperty("--bubble-border", b.borderColor || "rgba(255,196,110,0.55)");
   root.style.setProperty("--bubble-shadow", b.shadowColor || "rgba(255,170,60,0.35)");
   root.style.setProperty("--bubble-glow", b.glowColor || "rgba(255,200,100,0.25)");
-  root.style.setProperty("--bubble-font-size", `${b.fontSize || 18}px`);
+  root.style.setProperty("--bubble-font-size", `${b.fontSize || 28}px`);
   root.style.setProperty("--bubble-duration", `${b.durationMs || 3000}ms`);
-  root.style.setProperty("--bubble-float", `${b.floatHeight || 44}px`);
+  root.style.setProperty("--bubble-float", `${b.floatHeight || 52}px`);
 
   root.style.setProperty("--font-sans", '"HarmonyOS Sans SC", "HarmonyOS Sans", "PingFang SC", "Microsoft YaHei", sans-serif');
   root.style.setProperty("--font-hero-title", `${heroTitle}px`);
@@ -46,17 +54,17 @@ export function applyOverlaySettings(settings) {
   root.style.setProperty("--font-movie-box-rank1", `${movieBoxRank1}px`);
   root.style.setProperty("--font-movie-title-follow", `${movieTitleFollow}px`);
   root.style.setProperty("--font-movie-box-follow", `${movieBoxFollow}px`);
-  root.style.setProperty("--font-movie-rank", `${f.movieRank ?? 25}px`);
-  root.style.setProperty("--font-region", `${f.region ?? 18}px`);
+  root.style.setProperty("--font-movie-rank", `${clampFont(f.movieRank, 25, 12, 32)}px`);
+  root.style.setProperty("--font-region", `${clampFont(f.region, 18, 12, 22)}px`);
   root.style.setProperty("--font-metric-label", `${metricLabel}px`);
   root.style.setProperty("--font-metric-value", `${metricValue}px`);
   root.style.setProperty("--font-metric-value-rank1", `${metricValueRank1}px`);
-  root.style.setProperty("--font-sum-box-rank1", `${f.sumBoxRank1 ?? 34}px`);
-  root.style.setProperty("--font-sum-box-follow", `${f.sumBoxFollow ?? 30}px`);
-  root.style.setProperty("--font-table", `${f.table || 12}px`);
-  root.style.setProperty("--font-delta", `${f.metricValue || 14}px`);
-  root.style.setProperty("--font-champ", `${Math.round((f.heroSubtitle || 28) * 0.95)}px`);
-  root.style.setProperty("--font-time", `${f.nationLabel || 14}px`);
+  root.style.setProperty("--font-sum-box-rank1", `${clampFont(f.sumBoxRank1, 34, 18, 38)}px`);
+  root.style.setProperty("--font-sum-box-follow", `${clampFont(f.sumBoxFollow, 30, 16, 34)}px`);
+  root.style.setProperty("--font-table", `${tableFont}px`);
+  root.style.setProperty("--font-delta", `${clampFont(f.metricValue, 14, 10, 22)}px`);
+  root.style.setProperty("--font-champ", `${Math.round(heroSub * 0.95)}px`);
+  root.style.setProperty("--font-time", `${nationLabel}px`);
   root.style.setProperty("--color-frame-border", "rgba(214, 169, 72, 0.38)");
 
   root.style.setProperty("--color-accent", c.accent || "#e8b45a");

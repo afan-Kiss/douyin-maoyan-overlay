@@ -44,6 +44,16 @@ function isElectronPackaged() {
   }
 }
 
+function isElectronMain() {
+  if (process.env.ELECTRON_RUN_AS_NODE === "1") return false;
+  try {
+    const { app } = require("electron");
+    return Boolean(app && typeof app.getPath === "function");
+  } catch {
+    return false;
+  }
+}
+
 function getDataDir() {
   if (process.env.MAOYAN_DATA_DIR) {
     return process.env.MAOYAN_DATA_DIR;
@@ -87,26 +97,39 @@ function migrateLegacyDataDir() {
 
 function resolveNodeBin() {
   const candidates = [
-    process.env.npm_node_execpath,
     process.env.NODE_BINARY,
-    "node",
+    process.env.npm_node_execpath,
+    process.platform === "win32"
+      ? path.join(process.env.ProgramFiles || "C:\\Program Files", "nodejs", "node.exe")
+      : "",
+    process.platform === "win32"
+      ? path.join(process.env.LOCALAPPDATA || "", "Programs", "nodejs", "node.exe")
+      : "",
   ].filter(Boolean);
 
   for (const bin of candidates) {
-    if (bin === "node") return bin;
-    if (fs.existsSync(bin)) return bin;
+    if (bin === "node") continue;
+    try {
+      if (fs.existsSync(bin)) return bin;
+    } catch {
+      /* ignore */
+    }
   }
-  return "node";
-}
 
-function isElectronMain() {
-  if (process.env.ELECTRON_RUN_AS_NODE === "1") return false;
-  try {
-    const { app } = require("electron");
-    return Boolean(app && typeof app.getPath === "function");
-  } catch {
-    return false;
+  if (process.platform === "win32") {
+    try {
+      const { execFileSync } = require("child_process");
+      const out = String(execFileSync("where", ["node"], { encoding: "utf-8", timeout: 3000, windowsHide: true }))
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .find(Boolean);
+      if (out && fs.existsSync(out)) return out;
+    } catch {
+      /* ignore */
+    }
   }
+
+  return "node";
 }
 
 function getPackagedResourceRoots() {
@@ -127,10 +150,45 @@ function getPackagedResourceRoots() {
   }
 }
 
+function resolveFsNodeModules(packaged) {
+  const candidates = [
+    packaged ? path.join(packaged.unpackedRoot, "node_modules") : "",
+    path.join(__dirname, "node_modules"),
+    path.join(SERVER_DIR, "node_modules"),
+  ].filter(Boolean);
+  for (const root of candidates) {
+    if (
+      fs.existsSync(path.join(root, "express")) &&
+      fs.existsSync(path.join(root, "playwright")) &&
+      !String(root).includes(".asar" + path.sep) &&
+      !String(root).endsWith(".asar")
+    ) {
+      return root;
+    }
+  }
+  return "";
+}
+
 function resolveRuntime(serverDir) {
   const dir = serverDir || resolveMaoyanDir() || SERVER_DIR;
   const indexJs = path.join(dir, "index.js");
   const packaged = getPackagedResourceRoots();
+  const systemNode = resolveNodeBin();
+  const fsModules = resolveFsNodeModules(packaged);
+
+  // 优先系统 Node + 真实磁盘上的 node_modules（避免再开一份 Electron 当 Node）
+  if (systemNode && systemNode !== "node" && fsModules) {
+    return {
+      bin: systemNode,
+      args: [indexJs],
+      env: {
+        NODE_PATH: fsModules,
+        PORTABLE_EXECUTABLE_FILE:
+          process.env.PORTABLE_EXECUTABLE_FILE || (packaged ? getRealExecutablePath() : ""),
+      },
+    };
+  }
+
   if (isElectronPackaged() && packaged) {
     const bin = getRealExecutablePath();
     return {
@@ -143,11 +201,11 @@ function resolveRuntime(serverDir) {
       },
     };
   }
-  const nodeBin = resolveNodeBin();
+
   return {
-    bin: nodeBin,
+    bin: systemNode || "node",
     args: [indexJs],
-    env: {},
+    env: fsModules ? { NODE_PATH: fsModules } : {},
   };
 }
 
@@ -328,7 +386,10 @@ function handleMaoyanChildExit(child, code) {
     startedByUs = false;
     apiStatus.ready = false;
     if (code !== 0 && code !== null) {
-      apiStatus.error = `票房服务异常退出 (code ${code})`;
+      const detail = summarizeChildCrash(child);
+      apiStatus.error = detail
+        ? `票房服务异常退出 (code ${code}): ${detail}`
+        : `票房服务异常退出 (code ${code})`;
     }
   }
 }
@@ -339,13 +400,29 @@ function getServerLogPath() {
   return path.join(dir, "service-spawn.log");
 }
 
+function summarizeChildCrash(child) {
+  const raw = String(child?.__stderrBuf || child?.__stdoutBuf || "").replace(/\s+/g, " ").trim();
+  if (!raw) return "";
+  const moduleMiss = raw.match(/Cannot find module '[^']+'/i);
+  if (moduleMiss) return moduleMiss[0];
+  return raw.slice(0, 180);
+}
+
 function pipeChildLogs(child) {
   const logPath = getServerLogPath();
   const stream = fs.createWriteStream(logPath, { flags: "a" });
+  child.__stderrBuf = "";
+  child.__stdoutBuf = "";
   const write = (chunk, label) => {
-    const text = String(chunk || "").trim();
-    if (!text) return;
-    stream.write(`[${new Date().toISOString()}] [${label}] ${text}\n`);
+    const text = String(chunk || "");
+    if (label === "stderr") {
+      child.__stderrBuf = (child.__stderrBuf + text).slice(-4000);
+    } else {
+      child.__stdoutBuf = (child.__stdoutBuf + text).slice(-4000);
+    }
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    stream.write(`[${new Date().toISOString()}] [${label}] ${trimmed}\n`);
   };
   child.stdout?.on("data", (chunk) => write(chunk, "stdout"));
   child.stderr?.on("data", (chunk) => write(chunk, "stderr"));
@@ -516,14 +593,17 @@ async function ensureMaoyanServiceInner(config) {
   apiStatus = { ready: false, error: "", apiBase, ...getMaoyanSessionStatus() };
 
   if (!hasServerDeps()) {
-    apiStatus.error = "缺少依赖，请运行 setup.bat 完成安装";
+    apiStatus.error = isElectronPackaged()
+      ? "内置依赖缺失，请重新安装或更新软件"
+      : "缺少依赖，请在项目目录运行 npm run setup 完成安装";
     return apiStatus;
   }
 
   if (await checkHealth(apiBase)) {
     apiStatus.ready = true;
     Object.assign(apiStatus, getMaoyanSessionStatus());
-    scheduleBackgroundVerify(apiBase, getDataDir());
+    // 延后验签，先让首屏大盘出来（避免启动瞬间再起无头 Chrome）
+    setTimeout(() => scheduleBackgroundVerify(apiBase, getDataDir()), 12000);
     return apiStatus;
   }
 
@@ -531,7 +611,7 @@ async function ensureMaoyanServiceInner(config) {
   if (await checkHealth(apiBase)) {
     apiStatus.ready = true;
     Object.assign(apiStatus, getMaoyanSessionStatus());
-    scheduleBackgroundVerify(apiBase, getDataDir());
+    setTimeout(() => scheduleBackgroundVerify(apiBase, getDataDir()), 12000);
     return apiStatus;
   }
 
@@ -549,8 +629,9 @@ async function ensureMaoyanServiceInner(config) {
     return apiStatus;
   }
 
+  let child = null;
   try {
-    await startMaoyanProcess(maoyanDir);
+    child = await startMaoyanProcess(maoyanDir);
   } catch (e) {
     apiStatus.error = `启动票房服务失败: ${e.message}`;
     return apiStatus;
@@ -561,9 +642,19 @@ async function ensureMaoyanServiceInner(config) {
     apiStatus.ready = true;
     apiStatus.error = "";
     Object.assign(apiStatus, getMaoyanSessionStatus());
-    scheduleBackgroundVerify(apiBase, getDataDir());
+    setTimeout(() => scheduleBackgroundVerify(apiBase, getDataDir()), 12000);
   } else {
-    apiStatus.error = "票房服务启动超时，请检查端口占用或 Chrome 是否可用";
+    const crash = summarizeChildCrash(child);
+    if (!maoyanProcess) {
+      apiStatus.error =
+        crash ||
+        apiStatus.error ||
+        "票房服务进程已退出，请重启软件；若刚换电脑请确认已安装 Google Chrome";
+    } else if (crash) {
+      apiStatus.error = `票房服务未能就绪: ${crash}`;
+    } else {
+      apiStatus.error = "票房服务启动超时，请检查端口占用或 Chrome 是否可用";
+    }
     await shutdownMaoyanServiceAndWait();
   }
 

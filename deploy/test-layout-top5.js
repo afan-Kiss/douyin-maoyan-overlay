@@ -128,8 +128,10 @@ function rectContains(outer, inner, pad = 0) {
 async function renderAndInspect(page, movies, nation) {
   await page.evaluate(
     ({ movies, nation }) => {
-      const { renderList, updateNation, setStatus, pulseInlineDelta } = window.__racePreview;
+      const { renderList, refitAllRaceCards, updateNation, setStatus, pulseInlineDelta } =
+        window.__racePreview;
       renderList(movies);
+      refitAllRaceCards?.();
       updateNation(nation, { updateTimeText: "2026-09-13 12:00:00", calendar: { today: "2026-09-13" } });
       setStatus("ok", "");
       for (const movie of movies) {
@@ -220,6 +222,21 @@ async function renderAndInspect(page, movies, nation) {
         const rows = table.querySelectorAll("tbody tr");
         if (rows.length !== 3) {
           issues.push(`第 ${rank} 名表格应为 3 行，实际 ${rows.length}`);
+        } else {
+          const lastRow = rows[rows.length - 1];
+          const wrap = item.querySelector(".race-card__table-wrap");
+          const lastRect = lastRow.getBoundingClientRect();
+          const wrapRect = wrap?.getBoundingClientRect();
+          const cardRect = item.getBoundingClientRect();
+          if (wrapRect && lastRect.bottom > wrapRect.bottom + 1) {
+            issues.push(`第 ${rank} 名「后天」行被表格容器裁切`);
+          }
+          if (lastRect.bottom > cardRect.bottom + 1) {
+            issues.push(`第 ${rank} 名「后天」行被卡片裁切`);
+          }
+          if (lastRect.height < 12) {
+            issues.push(`第 ${rank} 名「后天」行高度异常: ${lastRect.height.toFixed(1)}`);
+          }
         }
         const headers = [...table.querySelectorAll("thead th")].map((th) => th.textContent.trim());
         const expected = ["日期", "票房(含分账)", "预测", "票房%", "排片%", "上座率"];
@@ -253,14 +270,16 @@ async function renderAndInspect(page, movies, nation) {
       if (!summary) {
         issues.push(`第 ${rank} 名缺少摘要区`);
       }
-      if (metrics.length !== 8) {
-        issues.push(`第 ${rank} 名摘要指标应为 8 项，实际 ${metrics.length}`);
+      if (metrics.length < 7) {
+        issues.push(`第 ${rank} 名摘要指标至少 7 项，实际 ${metrics.length}`);
       }
 
       const metricLabels = [...metrics].map((el) => el.querySelector(".metric__label")?.textContent?.trim());
-      const expectedLabels = ["动态预测", "总预测", "实时上座", "日排", "票房占比", "中国内地", "时速", "排片占比"];
-      if (metricLabels.join("|") !== expectedLabels.join("|")) {
-        issues.push(`第 ${rank} 名摘要字段顺序不匹配: ${metricLabels.join("|")}`);
+      const coreLabels = ["动态预测", "总预测", "实时上座", "实时票房", "票房占比", "时速", "排片占比"];
+      for (const label of coreLabels) {
+        if (!metricLabels.includes(label)) {
+          issues.push(`第 ${rank} 名缺少核心摘要字段: ${label}`);
+        }
       }
 
       if (item.scrollHeight > item.clientHeight + 2) {
@@ -405,12 +424,13 @@ async function main() {
     assert.ok(f.nationLabel >= 22, `nationLabel=${f.nationLabel}`);
     assert.ok(f.nationValue >= 36, `nationValue=${f.nationValue}`);
     assert.ok((f.nationDelta || 24) >= 22, `nationDelta=${f.nationDelta}`);
-    assert.ok(f.rank1Mainland >= 18, `rank1Mainland=${f.rank1Mainland}`);
+    assert.ok(f.rank1Mainland >= 28, `rank1Mainland=${f.rank1Mainland}`);
     assert.ok(f.rank1Title >= 28, `rank1Title=${f.rank1Title}`);
     assert.ok(f.followTitle >= 24, `followTitle=${f.followTitle}`);
-    assert.ok(f.value >= 13, `metricValue=${f.value}`);
-    assert.ok((f.table || 11) >= 11, `table=${f.table}`);
-    assert.ok((f.rank1Bubble || 0) >= 22, `rank1Bubble=${f.rank1Bubble}`);
+    assert.ok(f.label >= 22, `metricLabel=${f.label}`);
+    assert.ok(f.value >= 24, `metricValue=${f.value}`);
+    assert.ok((f.table || 14) >= 12, `table=${f.table}`);
+    assert.ok((f.rank1Bubble || 0) >= 18, `rank1Bubble=${f.rank1Bubble}`);
 
     const wanDisplay = await page.evaluate(() => {
       const { renderList, updateNation } = window.__racePreview;

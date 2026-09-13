@@ -13,6 +13,9 @@ import {
   resolveChampionBoxWan,
   resolveNationSeatMetric,
   computeMovieBoxDeltaWan,
+  isUntrustedBoxDecode,
+  boxHtmlUsesAntiScrapeFont,
+  refreshMovieBoxFields,
   traceDashboardData,
   getExtraMetrics,
   getExtraMetricsGridClass,
@@ -54,6 +57,9 @@ let retryTimer = null;
 let loginWatchTimer = null;
 let refreshing = false;
 let hasDisplayedData = false;
+let enrichAllowed = false;
+let firstDashboardPainted = false;
+let pendingEnrichArgs = null;
 let pollCount = 0;
 const enrichSchedule = createEnrichScheduleState();
 let enrichGeneration = 0;
@@ -80,7 +86,10 @@ function isEmptyField(val) {
   if (val == null) return true;
   if (Array.isArray(val)) return !val.length;
   const text = String(val).trim();
-  return !text || text === "--" || text === "-";
+  if (!text || text === "--" || text === "-") return true;
+  // 猫眼未登录/专业版门闸文案，不能当票房数字渲染（会叠到冠军票房等位置）
+  if (/登录猫眼|专业版即可|剩余城市|商排|请先登录|开通专业版/.test(text)) return true;
+  return false;
 }
 
 const PRESERVE_MOVIE_FIELDS = [
@@ -110,6 +119,8 @@ const PRESERVE_MOVIE_FIELDS = [
   "releaseInfo",
 ];
 
+const PRESERVE_MOVIE_FIELDS_SKIP_AUTO = new Set(["hourSpeedText", "yesterdayHourSpeedText"]);
+
 function formatHourSpeedDisplay(text) {
   if (isEmptyField(text)) return "";
   const raw = String(text).trim().replace(/^¥/, "");
@@ -133,10 +144,25 @@ function formatMoneyMetric(val) {
   return `¥${text}`;
 }
 
+function shouldPreferEncodedBox(movie) {
+  if (!movie?.todayBoxHtml) return false;
+  if (boxHtmlUsesAntiScrapeFont(movie.todayBoxHtml)) return true;
+  const raw = String(movie.todayBoxText || "").trim();
+  return raw && raw !== "--" && isUntrustedBoxDecode(raw);
+}
+
 function formatDailyBoxDisplay(movie) {
+  if (shouldPreferEncodedBox(movie)) return "";
+  // 优先用猫眼原始解码文本，避免二次 toFixed(1) 把 1100 显示成怪异的 1100.1
+  if (!isEmptyField(movie.todayBoxText) && movie.todayBoxText !== "--") {
+    const text = String(movie.todayBoxText).trim();
+    if (isUntrustedBoxDecode(text)) return "";
+    const unit = movie.todayUnit || "万";
+    if (text.includes("万") || text.includes("亿")) return formatMoneyMetric(text);
+    return formatMoneyMetric(`${text}${unit}`);
+  }
   const amount = getMovieBoxAmount(movie);
   if (amount > 0) return `¥${formatWanDisplayText(amount)}`;
-  if (!isEmptyField(movie.dailyIncrease)) return formatMoneyMetric(movie.dailyIncrease);
   return "";
 }
 
@@ -147,25 +173,134 @@ const SUMMARY_COLUMN_DEFS = [
       label: "动态预测",
       get: (m) => formatMoneyMetric(m.dynamicForecast),
       trend: (m) => m.dynamicTrend,
+      fallbacks: [
+        (m) => {
+          const fc = m.dailyTable?.[0]?.forecast;
+          return isEmptyField(fc) || fc === "--" ? "" : formatMoneyMetric(fc);
+        },
+      ],
     },
     {
       key: "totalForecast",
       label: "总预测",
       get: (m) => formatMoneyMetric(m.totalForecast),
       trend: (m) => m.totalTrend,
+      // 禁止回落到 sumBoxDesc：累计票房会冒充成「总预测」，和中国内地撞数
+      fallbacks: [],
     },
-    { key: "avgSeatView", label: "实时上座", get: (m) => m.avgSeatView },
+    {
+      key: "avgSeatView",
+      label: "实时上座",
+      get: (m) => m.avgSeatView,
+      fallbacks: [(m) => m.dailyTable?.[0]?.avgSeatView],
+    },
   ],
   [
-    { key: "dailyBox", label: "日排", get: (m) => formatDailyBoxDisplay(m) },
-    { key: "boxRate", label: "票房占比", get: (m) => m.boxRate },
+    {
+      key: "dailyBox",
+      label: "实时票房",
+      get: (m) => formatDailyBoxDisplay(m),
+      fallbacks: [
+        (m) => {
+          if (!isEmptyField(m.todayBoxText) && m.todayBoxText !== "--") {
+            return `¥${m.todayBoxText}${m.todayUnit || "万"}`;
+          }
+          return "";
+        },
+      ],
+    },
+    {
+      key: "boxRate",
+      label: "票房占比",
+      get: (m) => m.boxRate,
+      fallbacks: [(m) => m.dailyTable?.[0]?.boxRate],
+    },
   ],
   [
-    { key: "mainlandBox", label: "中国内地", get: (m) => formatMainlandDisplay(m) },
-    { key: "hourSpeed", label: "时速", get: (m) => formatMoneyMetric(formatHourSpeedDisplay(m.hourSpeedText)) },
-    { key: "showCountRate", label: "排片占比", get: (m) => m.showCountRate },
+    {
+      key: "hourSpeed",
+      label: "时速",
+      get: (m) => formatMoneyMetric(formatHourSpeedDisplay(m.hourSpeedText)),
+      fallbacks: [
+        (m) => (m.hourSpeed > 0 ? formatMoneyMetric(formatHourSpeedDisplay(`${m.hourSpeed}万`)) : ""),
+      ],
+    },
+    {
+      key: "showCountRate",
+      label: "排片占比",
+      get: (m) => m.showCountRate,
+      fallbacks: [(m) => m.dailyTable?.[0]?.showCountRate],
+    },
   ],
 ];
+
+const EXTRA_SUMMARY_DEFS = [
+  { key: "dailyIncrease", label: "日增", get: (m) => formatMoneyMetric(m.dailyIncrease) },
+  { key: "yesterdayTotal", label: "昨日", get: (m) => formatMoneyMetric(m.yesterdayTotal) },
+  {
+    key: "yesterdaySamePeriod",
+    label: "昨日同期",
+    get: (m) => formatMoneyMetric(m.yesterdaySamePeriodText),
+  },
+  {
+    key: "yesterdayHourSpeed",
+    label: "昨日时速",
+    get: (m) => formatMoneyMetric(formatHourSpeedDisplay(m.yesterdayHourSpeedText)),
+  },
+  { key: "totalViews", label: "总人次", get: (m) => m.totalViews },
+  { key: "avgShowView", label: "场均人次", get: (m) => m.avgShowView },
+  {
+    key: "showCountDesc",
+    label: "排片场次",
+    get: (m) => {
+      if (!isEmptyField(m.showCountDesc)) return String(m.showCountDesc).trim();
+      if (m.showCount > 0) {
+        return m.showCount >= 10000
+          ? `${(m.showCount / 10000).toFixed(1)}万场`
+          : `${m.showCount}场`;
+      }
+      return "";
+    },
+  },
+  { key: "sumBoxDesc", label: "累计票房", get: (m) => formatMoneyMetric(m.sumBoxDesc) },
+  { key: "sumSplitBoxDesc", label: "分账票房", get: (m) => formatMoneyMetric(m.sumSplitBoxDesc) },
+  { key: "splitBoxRate", label: "分账占比", get: (m) => m.splitBoxRate },
+  { key: "hmtBox", label: "港澳台", get: (m) => formatMoneyMetric(m.hmtBox) },
+  { key: "overseasBox", label: "海外", get: (m) => formatMoneyMetric(m.overseasBox) },
+  {
+    key: "endDate",
+    label: "下映日期",
+    get: (m) => {
+      if (isEmptyField(m.endDate) && isEmptyField(m.remainingDays)) return "";
+      const dateText = String(m.endDate || "--").replace(/^\d{4}-/, "");
+      const days = isEmptyField(m.remainingDays) ? "" : `剩${m.remainingDays}天`;
+      return days ? `${dateText}${days}` : dateText;
+    },
+  },
+];
+
+const MAX_EXTRA_SUMMARY_METRICS = 0;
+
+function resolveMetricRaw(def, movie) {
+  let raw = def.get(movie);
+  if (!isEmptyField(raw)) return raw;
+  if (typeof def.fallback === "function") {
+    raw = def.fallback(movie);
+    if (!isEmptyField(raw)) return raw;
+  }
+  if (Array.isArray(def.fallbacks)) {
+    for (const fb of def.fallbacks) {
+      raw = fb(movie);
+      if (!isEmptyField(raw)) return raw;
+    }
+  }
+  return "";
+}
+
+function metricValueSignature(def, movie) {
+  const raw = resolveMetricRaw(def, movie);
+  return isEmptyField(raw) ? "" : String(raw).replace(/\s+/g, "").trim();
+}
 
 function updateMovieCache(key, movie) {
   const prev = lastGoodMovies.get(key) || {};
@@ -176,7 +311,20 @@ function updateMovieCache(key, movie) {
       continue;
     }
     if (field === "todayBox") {
+      const raw = String(movie.todayBoxText || val || "");
+      if (val > 0 && !isUntrustedBoxDecode(raw)) next[field] = val;
+      continue;
+    }
+    if (field === "hourSpeed") {
       if (val > 0) next[field] = val;
+      continue;
+    }
+    if (field === "hourSpeedFromApi") {
+      if (val === true) next[field] = true;
+      continue;
+    }
+    if (field === "hourSpeedText" || field === "yesterdayHourSpeedText") {
+      if (!isEmptyField(val)) next[field] = val;
       continue;
     }
     if (field === "dailyTable") {
@@ -194,8 +342,12 @@ function preferNonEmptyFields(...sources) {
     if (!source) continue;
     for (const [key, val] of Object.entries(source)) {
       if (val === undefined) continue;
-      if (key === "todayBox") {
+      if (key === "todayBox" || key === "hourSpeed" || key === "yesterdayHourSpeed") {
         if (val > 0) result[key] = val;
+        continue;
+      }
+      if (key === "hourSpeedFromApi") {
+        if (val === true) result[key] = true;
         continue;
       }
       if (key === "dailyTable") {
@@ -223,9 +375,71 @@ function updatePartialDataWarning(errors = []) {
     partialDataWarning = "";
     return;
   }
-  const loginIssue = errors.find((e) => e.action === "login" || /login|登录/.test(String(e.code)));
-  const detail = loginIssue?.detail || errors[0]?.detail || "部分详细数据获取失败";
+  const loginIssue = errors.find(
+    (e) =>
+      e.action === "login" ||
+      /login|登录/.test(String(e.code)) ||
+      String(e.code) === "login_required" ||
+      String(e.code) === "upstream_401",
+  );
+  if (loginIssue) {
+    partialDataWarning = "明日/后天等明细数据需要猫眼登录，请点击右上角「登录」完成账号登录";
+    return;
+  }
+  const detail = errors[0]?.detail || "部分详细数据获取失败";
   partialDataWarning = `部分详细数据获取失败：${detail}`;
+}
+
+async function finishLoginSuccess(result = {}) {
+  await updateLoginButton(false);
+  resetApiSigWarm();
+  partialDataWarning = "";
+  await abortAndResetEnrichSchedule();
+  enrichAllowed = true;
+
+  const deferred = Boolean(result?.deferredDetail || result?.detailApiReady === false);
+  setStatus(
+    "loading",
+    deferred
+      ? "登录已保存，正在获取签名并验证明细权限…"
+      : "登录成功，正在刷新签名并拉取票房数据…",
+  );
+
+  const status = await window.overlay?.ensureApi?.();
+  if (status?.apiBase) config.apiBase = status.apiBase;
+
+  // 登录后立刻 refresh：避免 deferred 路径只靠轮询，明日/后天长期 --
+  if (status?.apiBase) {
+    try {
+      const movieId = String(latestMovies[0]?.movieId || "1462628");
+      const resp = await fetch(
+        `${status.apiBase}/api/refresh?movieId=${encodeURIComponent(movieId)}&boxLevel=1`,
+        { signal: AbortSignal.timeout(120000) },
+      );
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}));
+        const code = String(body?.code || "");
+        if (code === "login_required" || /login_required|401/.test(String(body?.detail || ""))) {
+          await window.overlay?.reportSessionApiError?.("login_required");
+          await updateLoginButton(true);
+          setStatus("error", "登录态未生效，请重新点击右上角登录");
+          return;
+        }
+        console.warn("登录后刷新签名失败:", body?.detail || resp.status);
+      } else {
+        resetApiSigWarm();
+        await updateLoginButton(false);
+      }
+    } catch (error) {
+      console.warn("登录后刷新签名异常:", error?.message || error);
+    }
+  }
+
+  setStatus(
+    "loading",
+    deferred ? "签名处理中，正在拉取明日/后天等明细数据…" : "正在拉取票房数据…",
+  );
+  startPolling();
 }
 
 function isLoginRelatedError(error) {
@@ -374,21 +588,44 @@ function stabilizeMovie(movie) {
       }
       continue;
     }
+    // 时速只保留「来自 getBoxShow」的缓存，避免把短窗口估算的夸张数字粘住
+    if (PRESERVE_MOVIE_FIELDS_SKIP_AUTO.has(field)) {
+      if (isEmptyField(stable[field]) && !isEmptyField(prev[field])) {
+        stable[field] = prev[field];
+        if (field === "hourSpeedText" && prev.hourSpeed > 0) {
+          stable.hourSpeed = prev.hourSpeed;
+          stable.hourSpeedFromApi = true;
+        }
+      } else if (field === "hourSpeedText" && stable.hourSpeed > 0 && movie.hourSpeedFromApi) {
+        stable.hourSpeedFromApi = true;
+      }
+      continue;
+    }
     if (isEmptyField(stable[field])) {
       const cached = prev[field];
       if (!isEmptyField(cached)) stable[field] = cached;
     }
   }
 
+  if (stable.hourSpeed > 0 && (movie.hourSpeedFromApi || prev.hourSpeedFromApi)) {
+    stable.hourSpeedFromApi = true;
+  }
+
   stable.rank = movie.rank;
   stable.name = movie.name;
   stable.movieId = movie.movieId;
 
+  if (stable.todayBox > 0 && isUntrustedBoxDecode(String(stable.todayBoxText || stable.todayBox))) {
+    stable.todayBox = 0;
+  }
+  const prevBoxTrusted =
+    prev.todayBox > 0 && !isUntrustedBoxDecode(String(prev.todayBoxText || prev.todayBox));
+
   if (stable.todayBox <= 0 && stable.todayBoxHtml) {
     const decoded = safeDecodeBox(stable.todayBoxHtml, stable.todayUnit);
     if (decoded > 0) stable.todayBox = decoded;
-    else if (prev.todayBox > 0) stable.todayBox = prev.todayBox;
-  } else if (stable.todayBox <= 0 && prev.todayBox > 0) {
+    else if (prevBoxTrusted) stable.todayBox = prev.todayBox;
+  } else if (stable.todayBox <= 0 && prevBoxTrusted) {
     stable.todayBox = prev.todayBox;
   }
 
@@ -442,8 +679,15 @@ function stabilizeNation(nation) {
     stable.todayBoxHtml = lastGoodNation.todayBoxHtml;
     stable.todayUnit = stable.todayUnit || lastGoodNation.todayUnit;
   }
-  if (stable.todayBox <= 0 && lastGoodNation.todayBox > 0) {
+  if (
+    stable.todayBox <= 0 &&
+    lastGoodNation.todayBox > 0 &&
+    !isUntrustedBoxDecode(String(lastGoodNation.todayBoxText || lastGoodNation.todayBox))
+  ) {
     stable.todayBox = lastGoodNation.todayBox;
+  }
+  if (stable.todayBox > 0 && isUntrustedBoxDecode(String(stable.todayBoxText || stable.todayBox))) {
+    stable.todayBox = 0;
   }
   for (const field of [
     "todayBoxHtml",
@@ -470,14 +714,17 @@ function purgeMovieState(id) {
 }
 
 function getMovieBoxAmount(movie) {
-  if (movie.todayBox > 0 && movie.todayBox < 100000) return movie.todayBox;
+  if (movie.todayBox > 0 && movie.todayBox < 100000) {
+    const raw = String(movie.todayBoxText || movie.todayBox);
+    if (!isUntrustedBoxDecode(raw)) return movie.todayBox;
+  }
   if (movie.todayBoxHtml) {
     const decoded = decodeBoxFromHtml(movie.todayBoxHtml, movie.todayUnit);
     if (decoded > 0) return decoded;
   }
   if (!isEmptyField(movie.todayBoxText)) {
     const n = parseBoxNum(movie.todayBoxText, movie.todayUnit || "万");
-    if (n > 0) return n;
+    if (n > 0 && !isUntrustedBoxDecode(movie.todayBoxText)) return n;
   }
   if (!isEmptyField(movie.dailyIncrease)) {
     const n = parseBoxNum(movie.dailyIncrease, "万");
@@ -528,9 +775,191 @@ function setHtmlIfChanged(el, next) {
   return true;
 }
 
+function fitMetricEls(card) {
+  if (!card) return;
+  card.querySelectorAll(".metric__value, .metric__label").forEach((el) => {
+    el.style.fontSize = "";
+  });
+  card.querySelectorAll(".metric").forEach((metric) => {
+    const valueEl = metric.querySelector(".metric__value");
+    const labelEl = metric.querySelector(".metric__label");
+    if (!valueEl) return;
+    const limit = metric.clientWidth;
+    if (!limit) return;
+    if (metric.scrollWidth <= limit + 1) return;
+    const valueSize0 = parseFloat(getComputedStyle(valueEl).fontSize) || 20;
+    const labelSize0 = labelEl ? parseFloat(getComputedStyle(labelEl).fontSize) || 18 : 0;
+    let valueSize = valueSize0;
+    let labelSize = labelSize0;
+    let guard = 0;
+    while (guard < 14 && metric.scrollWidth > limit + 1) {
+      if (valueSize > 15) {
+        valueSize -= 1;
+        valueEl.style.fontSize = `${valueSize}px`;
+      } else if (labelEl && labelSize > 14) {
+        labelSize -= 1;
+        labelEl.style.fontSize = `${labelSize}px`;
+      } else {
+        break;
+      }
+      guard += 1;
+    }
+  });
+}
+
+function resetTableFitStyles(table) {
+  if (!table) return;
+  table.style.fontSize = "";
+  table.style.lineHeight = "";
+  table.style.transform = "";
+  table.style.width = "";
+  table.querySelectorAll("th, td").forEach((cell) => {
+    cell.style.paddingTop = "";
+    cell.style.paddingBottom = "";
+  });
+}
+
+function fitTableInCard(card) {
+  const wrap = card.querySelector(".race-card__table-wrap");
+  const scaler = card.querySelector(".race-card__table-scaler");
+  const table = card.querySelector(".race-card__table");
+  if (!wrap || !table) return;
+
+  const limit = Math.max(0, wrap.clientHeight - 2);
+  if (limit < 24) {
+    requestAnimationFrame(() => fitTableInCard(card));
+    return;
+  }
+
+  const pendingKey = `${limit}`;
+  if (card.dataset.tableFitKey === pendingKey && card.dataset.tableFitReady === "1") {
+    return;
+  }
+
+  resetTableFitStyles(table);
+  if (scaler) {
+    scaler.style.transform = "";
+    scaler.style.width = "";
+    scaler.style.height = "100%";
+    scaler.style.marginBottom = "";
+  }
+
+  // 优先保证「今日/明日/后天」三行完整可见，再尽量放大字号填满
+  const minSize = 16;
+  const maxSize = Math.min(34, Math.max(22, Math.floor(limit / 4.8)));
+  let size = maxSize;
+  table.style.fontSize = `${size}px`;
+  table.style.lineHeight = "1.25";
+
+  const tableHeight = () => table.scrollHeight;
+  const setPad = (pad) => {
+    table.querySelectorAll("th, td").forEach((cell) => {
+      cell.style.paddingTop = `${pad}px`;
+      cell.style.paddingBottom = `${pad}px`;
+    });
+  };
+  setPad(5);
+
+  while (size > minSize && tableHeight() > limit) {
+    size -= 0.5;
+    table.style.fontSize = `${size}px`;
+  }
+
+  if (tableHeight() > limit) {
+    setPad(2);
+    table.style.lineHeight = "1.12";
+    while (size > minSize && tableHeight() > limit) {
+      size -= 0.5;
+      table.style.fontSize = `${size}px`;
+    }
+  }
+
+  // 仍装不下：整体等比缩小，绝不能裁切「后天」
+  if (tableHeight() > limit && scaler) {
+    const raw = tableHeight();
+    const scale = Math.max(0.7, Math.min(1, (limit - 1) / raw));
+    scaler.style.transformOrigin = "top left";
+    scaler.style.transform = `scale(${scale})`;
+    scaler.style.width = `${100 / scale}%`;
+    scaler.style.height = `${100 / scale}%`;
+  } else {
+    let pad = parseFloat(table.querySelector("td")?.style.paddingTop) || 5;
+    while (pad < 22 && tableHeight() < limit - 3) {
+      pad += 1;
+      setPad(pad);
+      if (tableHeight() > limit) {
+        pad -= 1;
+        setPad(pad);
+        break;
+      }
+    }
+
+    while (size + 0.5 <= maxSize && tableHeight() < limit - 3) {
+      size += 0.5;
+      table.style.fontSize = `${size}px`;
+      if (tableHeight() > limit) {
+        size -= 0.5;
+        table.style.fontSize = `${size}px`;
+        break;
+      }
+    }
+  }
+
+  card.dataset.tableFitKey = pendingKey;
+  card.dataset.tableFitReady = "1";
+}
+
+function maybeFitTableAfterUpdate(card) {
+  const wrap = card.querySelector(".race-card__table-wrap");
+  const table = card.querySelector(".race-card__table");
+  if (!wrap || !table) return;
+  if (table.scrollHeight <= wrap.clientHeight) return;
+  card.dataset.tableFitReady = "";
+  fitTableInCard(card);
+}
+
+function fitCardChrome(card, movie, { fitMetrics = true, fitTable = true } = {}) {
+  if (!card) return;
+  const rank = Number(movie?.rank ?? card.dataset.rank);
+  // 片名单行省略，避免双行标题挤掉「后天」表格行
+  fitNowrapEl(card.querySelector(".race-card__title"), {
+    minSize: rank === 1 ? 28 : 26,
+    allowWrap: false,
+  });
+  fitNowrapEl(card.querySelector(".js-mainland"), { minSize: 20 });
+  if (fitMetrics) fitMetricEls(card);
+  if (fitTable) fitTableInCard(card);
+}
+
+function refitAllRaceCards() {
+  if (!raceListEl) return;
+  raceListEl.querySelectorAll(".race-card:not(.race-card--skeleton)").forEach((card) => {
+    const movie = latestMovies.find((item) => String(item.movieId) === card.dataset.movieId);
+    if (movie) fitCardChrome(card, movie);
+    else {
+      fitNowrapEl(card.querySelector(".race-card__title"), {
+        minSize: Number(card.dataset.rank) === 1 ? 28 : 26,
+        allowWrap: false,
+      });
+      fitNowrapEl(card.querySelector(".js-mainland"), { minSize: 20 });
+      fitMetricEls(card);
+      fitTableInCard(card);
+    }
+  });
+}
+
+let raceReflowTimer = null;
+
+function scheduleRaceCardReflow() {
+  if (raceReflowTimer) clearTimeout(raceReflowTimer);
+  raceReflowTimer = setTimeout(() => {
+    raceReflowTimer = null;
+    requestAnimationFrame(refitAllRaceCards);
+  }, 150);
+}
+
 function fitNowrapEl(el, { minSize = 20, allowWrap = false } = {}) {
   if (!el) return;
-  el.style.fontSize = "";
   if (allowWrap) {
     el.style.whiteSpace = "normal";
     el.style.display = "-webkit-box";
@@ -551,6 +980,11 @@ function fitNowrapEl(el, { minSize = 20, allowWrap = false } = {}) {
   const parent = el.parentElement;
   const limit = parent?.clientWidth || el.clientWidth;
   if (!limit) return;
+  if (el.scrollWidth <= limit + 1) {
+    const stableSize = parseFloat(getComputedStyle(el).fontSize) || minSize;
+    if (stableSize >= minSize) return;
+  }
+  el.style.fontSize = "";
   const computed = parseFloat(getComputedStyle(el).fontSize) || minSize;
   let size = computed;
   let guard = 0;
@@ -566,17 +1000,85 @@ function mainlandValue(movie) {
 }
 
 function buildSummaryMetricHtml(def, movie) {
-  const raw = def.get(movie);
+  return `<div class="metric" data-metric="${def.key}"><span class="metric__label">${def.label}</span><span class="metric__value">${buildSummaryMetricValueHtml(def, movie)}</span></div>`;
+}
+
+function getSummaryMetricsByColumn(movie) {
+  const usedKeys = new Set();
+  const usedValues = new Set();
+  const colDefs = [[], [], []];
+
+  SUMMARY_COLUMN_DEFS.forEach((defs, colIdx) => {
+    defs.forEach((def) => {
+      usedKeys.add(def.key);
+      const sig = metricValueSignature(def, movie);
+      if (sig) usedValues.add(sig);
+      colDefs[colIdx].push(def);
+    });
+  });
+
+  const extras = [];
+  for (const def of EXTRA_SUMMARY_DEFS) {
+    if (extras.length >= MAX_EXTRA_SUMMARY_METRICS) break;
+    if (usedKeys.has(def.key)) continue;
+    const sig = metricValueSignature(def, movie);
+    if (!sig || usedValues.has(sig)) continue;
+    usedKeys.add(def.key);
+    usedValues.add(sig);
+    extras.push(def);
+  }
+
+  extras.forEach((def, i) => {
+    colDefs[i % 3].push(def);
+  });
+
+  return colDefs;
+}
+
+function buildSummaryMetricValueHtml(def, movie) {
+  if (def.key === "dailyBox" && shouldPreferEncodedBox(movie)) {
+    const unit = escapeHtml(movie.todayUnit || "万");
+    return `<span class="mtsi-font metric__box-encoded">${movie.todayBoxHtml}</span><span class="unit">${unit}</span>`;
+  }
+  const raw = resolveMetricRaw(def, movie);
   const trend = def.trend && !isEmptyField(raw) ? trendArrow(def.trend(movie)) : "";
   const value = isEmptyField(raw) ? "--" : String(raw);
-  return `<div class="metric" data-metric="${def.key}"><span class="metric__label">${def.label}</span><span class="metric__value">${escapeHtml(value)}${trend}</span></div>`;
+  return `${escapeHtml(value)}${trend}`;
+}
+
+function updateSummaryInPlace(summaryWrap, movie) {
+  const root = summaryWrap?.firstElementChild;
+  if (!root?.classList.contains("race-card__summary")) return null;
+
+  const colDefs = getSummaryMetricsByColumn(movie);
+  const cols = [...root.querySelectorAll(".race-card__summary-col")];
+  if (cols.length !== colDefs.length) return null;
+
+  let changed = false;
+  for (let colIdx = 0; colIdx < cols.length; colIdx += 1) {
+    const metrics = [...cols[colIdx].querySelectorAll(".metric")];
+    const defs = colDefs[colIdx];
+    if (metrics.length !== defs.length) return null;
+    for (let i = 0; i < defs.length; i += 1) {
+      if (metrics[i].dataset.metric !== defs[i].key) return null;
+      const valueEl = metrics[i].querySelector(".metric__value");
+      const nextHtml = buildSummaryMetricValueHtml(defs[i], movie);
+      if (valueEl && valueEl.innerHTML !== nextHtml) {
+        valueEl.innerHTML = nextHtml;
+        changed = true;
+      }
+    }
+  }
+  return changed;
 }
 
 function buildSummaryHtml(movie) {
-  const columns = SUMMARY_COLUMN_DEFS.map((defs) => {
-    const items = defs.map((def) => buildSummaryMetricHtml(def, movie)).join("");
-    return `<div class="race-card__summary-col">${items}</div>`;
-  }).join("");
+  const columns = getSummaryMetricsByColumn(movie)
+    .map(
+      (defs) =>
+        `<div class="race-card__summary-col">${defs.map((def) => buildSummaryMetricHtml(def, movie)).join("")}</div>`,
+    )
+    .join("");
   return `<div class="race-card__summary">${columns}</div>`;
 }
 
@@ -628,6 +1130,13 @@ function dailyTableSignature(rows) {
 }
 
 function resolveTodayTableBox(movie) {
+  if (shouldPreferEncodedBox(movie)) {
+    return {
+      box: "--",
+      boxHtml: movie.todayBoxHtml,
+      boxUnit: movie.todayUnit || "万",
+    };
+  }
   const amount = getMovieBoxAmount(movie);
   if (amount > 0) {
     return {
@@ -693,53 +1202,91 @@ function ensureDailyTable(movie) {
   });
 }
 
-function dailyTableHtml(rows) {
-  const labels = ["今日", "明日", "后天"];
+const DAILY_TABLE_LABELS = ["今日", "明日", "后天"];
+
+const DAILY_TABLE_COLUMNS = [
+  {
+    key: "box",
+    label: "票房(含分账)",
+    render: (row) => {
+      if (!isEmptyField(row.box) && row.box !== "--") {
+        return `<span class="num--hot">${escapeHtml(row.box)}</span>`;
+      }
+      if (row.boxHtml) {
+        return `<span class="mtsi-font js-day-box num--hot">${row.boxHtml}</span><span class="unit">${escapeHtml(row.boxUnit || "万")}</span>`;
+      }
+      return `<span class="num--hot">--</span>`;
+    },
+  },
+  {
+    key: "forecast",
+    label: "预测",
+    render: (row) => escapeHtml(row.forecast || "--"),
+  },
+  {
+    key: "boxRate",
+    label: "票房%",
+    render: (row) => escapeHtml(row.boxRate || "--"),
+  },
+  {
+    key: "showCountRate",
+    label: "排片%",
+    render: (row) => escapeHtml(row.showCountRate || "--"),
+  },
+  {
+    key: "avgSeatView",
+    label: "上座率",
+    render: (row) => escapeHtml(row.avgSeatView || "--"),
+  },
+];
+
+function normalizeDailyTableRows(rows) {
   const src = Array.isArray(rows) ? rows : [];
   const byLabel = new Map(src.map((row) => [String(row.label || "").trim(), row]));
-  const list = labels.map((label, i) => byLabel.get(label) || src[i] || { label });
+  return DAILY_TABLE_LABELS.map((label, i) => byLabel.get(label) || src[i] || { label });
+}
 
-  const columns = [
-    {
-      key: "box",
-      label: "票房(含分账)",
-      render: (row) => {
-        if (!isEmptyField(row.box) && row.box !== "--") {
-          return `<span class="num--hot">${escapeHtml(row.box)}</span>`;
-        }
-        if (row.boxHtml) {
-          return `<span class="mtsi-font js-day-box num--hot">${row.boxHtml}</span><span class="unit">${escapeHtml(row.boxUnit || "万")}</span>`;
-        }
-        return `<span class="num--hot">--</span>`;
-      },
-    },
-    {
-      key: "forecast",
-      label: "预测",
-      render: (row) => escapeHtml(row.forecast || "--"),
-    },
-    {
-      key: "boxRate",
-      label: "票房%",
-      render: (row) => escapeHtml(row.boxRate || "--"),
-    },
-    {
-      key: "showCountRate",
-      label: "排片%",
-      render: (row) => escapeHtml(row.showCountRate || "--"),
-    },
-    {
-      key: "avgSeatView",
-      label: "上座率",
-      render: (row) => escapeHtml(row.avgSeatView || "--"),
-    },
-  ];
+function updateDailyTableInPlace(table, rows) {
+  const list = normalizeDailyTableRows(rows);
+  const tbody = table?.querySelector("tbody");
+  if (!tbody) return null;
 
-  const head = `<tr><th>日期</th>${columns.map((col) => `<th>${col.label}</th>`).join("")}</tr>`;
+  const trs = [...tbody.querySelectorAll("tr")];
+  if (trs.length !== list.length) return null;
+
+  let changed = false;
+  for (let rowIdx = 0; rowIdx < list.length; rowIdx += 1) {
+    const row = list[rowIdx];
+    const tr = trs[rowIdx];
+    const tds = tr.querySelectorAll("td");
+    if (tds.length !== DAILY_TABLE_COLUMNS.length + 1) return null;
+
+    const labelText = row.label || DAILY_TABLE_LABELS[rowIdx];
+    if (tds[0].textContent !== labelText) {
+      tds[0].textContent = labelText;
+      changed = true;
+    }
+
+    DAILY_TABLE_COLUMNS.forEach((col, colIdx) => {
+      const nextHtml = col.render(row);
+      const td = tds[colIdx + 1];
+      if (td.innerHTML !== nextHtml) {
+        td.innerHTML = nextHtml;
+        changed = true;
+      }
+    });
+  }
+
+  return changed;
+}
+
+function dailyTableHtml(rows) {
+  const list = normalizeDailyTableRows(rows);
+  const head = `<tr><th>日期</th>${DAILY_TABLE_COLUMNS.map((col) => `<th>${col.label}</th>`).join("")}</tr>`;
   const body = list
     .map((row, idx) => {
-      const cells = columns.map((col) => `<td class="num">${col.render(row)}</td>`).join("");
-      return `<tr><td>${escapeHtml(row.label || labels[idx])}</td>${cells}</tr>`;
+      const cells = DAILY_TABLE_COLUMNS.map((col) => `<td class="num">${col.render(row)}</td>`).join("");
+      return `<tr><td>${escapeHtml(row.label || DAILY_TABLE_LABELS[idx])}</td>${cells}</tr>`;
     })
     .join("");
 
@@ -767,19 +1314,21 @@ function raceCardTemplate(movie) {
   const table = dailyTableHtml(tableRows);
 
   return `
-    <span class="race-card__delta-bubble race-card__delta-float" aria-hidden="true"></span>
     <div class="race-card__head">
       <span class="race-card__rank">NO.${movie.rank}</span>
       <div class="race-card__title-wrap">
         <h2 class="race-card__title">《${escapeHtml(movie.name)}》</h2>
       </div>
-      <div class="race-card__mainland${isEmptyField(mainland) || mainland === "--" ? " is-empty" : ""}">
-        <em>中国内地：</em>
-        <strong class="js-mainland">${escapeHtml(mainland)}</strong>
+      <div class="race-card__mainland-wrap">
+        <span class="race-card__delta-bubble race-card__delta-float" aria-hidden="true"></span>
+        <div class="race-card__mainland${isEmptyField(mainland) || mainland === "--" ? " is-empty" : ""}">
+          <em>中国内地：</em>
+          <strong class="js-mainland">${escapeHtml(mainland)}</strong>
+        </div>
       </div>
     </div>
     <div class="race-card__summary-wrap">${summary}</div>
-    <div class="race-card__table-wrap" data-table-sig="">${table}</div>
+    <div class="race-card__table-wrap" data-table-sig=""><div class="race-card__table-scaler">${table}</div></div>
   `;
 }
 
@@ -794,8 +1343,7 @@ function buildRaceCard(movie) {
     tableWrap.dataset.tableSig = dailyTableSignature(ensureDailyTable(movie));
   }
   requestAnimationFrame(() => {
-    fitNowrapEl(card.querySelector(".race-card__title"), { minSize: 24, allowWrap: Number(movie.rank) === 1 });
-    fitNowrapEl(card.querySelector(".js-mainland"), { minSize: 18 });
+    fitCardChrome(card, movie);
   });
   return card;
 }
@@ -826,21 +1374,22 @@ function updateRaceCardDelta(card, movie, isNew) {
   }
 }
 
-function trackBoxDelta(card, movie, isNew) {
+function trackBoxDelta(_card, movie) {
   const key = String(movie.movieId);
-  const unit = movie.todayUnit || "万";
-  const stored = prevValues.get(key);
   const decoded = getMovieBoxAmount(movie);
+  const stored = prevValues.get(key);
 
-  // Always track numeric amounts so bubbles work even when MTSI html decode fails
+  // 只抬升/写入有效票房基线；同一次轮询里字体重绘若数值不变则不反复重置
   if (decoded > 0) {
-    if (!isNew && stored != null && decoded > stored) {
-      // bubble is shown in updateRaceCardDelta to avoid double pop
+    if (stored == null || decoded >= stored) {
+      prevValues.set(key, decoded);
     }
-    prevValues.set(key, decoded);
   }
   if (movie.todayBoxHtml) {
-    prevBoxHtml.set(key, movie.todayBoxHtml);
+    const prevHtml = prevBoxHtml.get(key);
+    if (!prevHtml || prevHtml !== movie.todayBoxHtml || decoded > 0) {
+      prevBoxHtml.set(key, movie.todayBoxHtml);
+    }
   }
 }
 
@@ -868,12 +1417,7 @@ function updateRaceCard(card, movie, isNew = false) {
   }
 
   setTextIfChanged(card.querySelector(".race-card__rank"), `NO.${movie.rank}`);
-  if (setTextIfChanged(card.querySelector(".race-card__title"), `《${movie.name}》`)) {
-    fitNowrapEl(card.querySelector(".race-card__title"), {
-      minSize: 24,
-      allowWrap: Number(movie.rank) === 1,
-    });
-  }
+  const titleChanged = setTextIfChanged(card.querySelector(".race-card__title"), `《${movie.name}》`);
 
   const mainland = formatMainlandDisplay(movie);
   const mainlandWrap = card.querySelector(".race-card__mainland");
@@ -882,32 +1426,57 @@ function updateRaceCard(card, movie, isNew = false) {
     mainlandWrap.classList.toggle("is-empty", isEmptyField(mainland) || mainland === "--");
     if (!isEmptyField(mainland) && mainland !== "--") {
       setTextIfChanged(mainlandEl, mainland);
-      fitNowrapEl(mainlandEl, { minSize: 18 });
     }
   }
 
-  const summaryHtml = buildSummaryHtml(movie);
   const summaryWrap = card.querySelector(".race-card__summary-wrap");
+  let summaryStructural = false;
+  let summaryValuesChanged = false;
   if (summaryWrap) {
-    const current = summaryWrap.firstElementChild;
-    if (!current || current.outerHTML !== summaryHtml) {
-      summaryWrap.innerHTML = summaryHtml;
+    const inPlace = updateSummaryInPlace(summaryWrap, movie);
+    if (inPlace === null) {
+      summaryWrap.innerHTML = buildSummaryHtml(movie);
+      summaryStructural = true;
+    } else if (inPlace) {
+      summaryValuesChanged = true;
     }
   }
 
   const tableRows = ensureDailyTable(movie);
-  const tableHtml = dailyTableHtml(tableRows);
   const tableWrap = card.querySelector(".race-card__table-wrap");
+  let tableStructural = false;
+  let tableValuesChanged = false;
   if (tableWrap) {
     const sig = dailyTableSignature(tableRows);
     if (tableWrap.dataset.tableSig !== sig) {
-      tableWrap.innerHTML = tableHtml;
+      const table = tableWrap.querySelector(".race-card__table");
+      const inPlace = table ? updateDailyTableInPlace(table, tableRows) : null;
+      if (inPlace === null) {
+        tableWrap.innerHTML = `<div class="race-card__table-scaler">${dailyTableHtml(tableRows)}</div>`;
+        tableWrap.dataset.tableFitReady = "";
+        card.dataset.tableFitKey = "";
+        card.dataset.tableFitReady = "";
+        tableStructural = true;
+      } else if (inPlace) {
+        tableValuesChanged = true;
+      }
       tableWrap.dataset.tableSig = sig;
     }
   }
 
   updateRaceCardDelta(card, movie, isNew);
   trackBoxDelta(card, movie, isNew);
+
+  if (titleChanged || summaryStructural || tableStructural) {
+    requestAnimationFrame(() => {
+      fitCardChrome(card, movie, {
+        fitMetrics: titleChanged || summaryStructural,
+        fitTable: tableStructural,
+      });
+    });
+  } else if (tableValuesChanged) {
+    requestAnimationFrame(() => maybeFitTableAfterUpdate(card));
+  }
 }
 
 function isFirstSeen(movieId) {
@@ -978,10 +1547,22 @@ function renderList(movies) {
   });
 
   if (cards.length) {
-    raceListEl.replaceChildren(...cards);
+    syncRaceListChildren(cards);
+    requestAnimationFrame(() => {
+      refitAllRaceCards();
+    });
   }
 
   updateChampion(list);
+}
+
+function syncRaceListChildren(cards) {
+  if (!raceListEl) return;
+  const existing = [...raceListEl.children];
+  if (existing.length === cards.length && existing.every((node, idx) => node === cards[idx])) {
+    return;
+  }
+  raceListEl.replaceChildren(...cards);
 }
 
 function setPlainBoxValue(el, amount, unitEl) {
@@ -1039,10 +1620,17 @@ function resolveDisplayBoxAmount(html, unit, numeric, text) {
 
 function setEncodedBoxValue(el, html, fallbackText = "--") {
   if (!el) return;
-  if (html) {
-    if (el.innerHTML === html) return;
+  const raw = html == null ? "" : String(html);
+  if (raw && /登录猫眼|专业版即可|剩余城市|商排|请先登录|开通专业版/.test(raw.replace(/<[^>]+>/g, ""))) {
+    if (el.textContent === fallbackText) return;
+    el.classList.remove("mtsi-font");
+    el.textContent = fallbackText;
+    return;
+  }
+  if (raw) {
+    if (el.innerHTML === raw) return;
     el.classList.add("mtsi-font");
-    el.innerHTML = html;
+    el.innerHTML = raw;
     return;
   }
   if (el.textContent === fallbackText) return;
@@ -1051,17 +1639,14 @@ function setEncodedBoxValue(el, html, fallbackText = "--") {
 }
 
 function updateNationSeatMetric(nation) {
-  const metric =
-    nation?.seatLabel && nation?.seatValue
-      ? { label: nation.seatLabel, value: nation.seatValue }
-      : resolveNationSeatMetric(nation || {});
+  const metric = resolveNationSeatMetric(nation || {});
   if (nationSeatLabelEl) {
     setTextIfChanged(nationSeatLabelEl, metric.label);
   }
   if (nationSeatEl) {
     setTextIfChanged(nationSeatEl, metric.value || "--");
   }
-  const hideSeat = isEmptyField(metric.value);
+  const hideSeat = isEmptyField(metric.value) || metric.value === "--";
   $("nation-seat-pill")?.classList.toggle("is-hidden", hideSeat);
 }
 
@@ -1072,13 +1657,14 @@ function updateChampion(movies) {
     return;
   }
 
-  const amount = resolveChampionBoxWan(top);
-  if (amount > 0) {
-    champBoxPillEl?.classList.remove("is-hidden");
-    setPlainBoxValue(champBoxEl, amount, champBoxUnitEl);
-  } else if (top.todayBoxHtml) {
+  const preferEncoded = shouldPreferEncodedBox(top);
+  const amount = preferEncoded ? 0 : resolveChampionBoxWan(top);
+  if (top.todayBoxHtml && (preferEncoded || amount <= 0)) {
     champBoxPillEl?.classList.remove("is-hidden");
     setEncodedBoxValue(champBoxEl, top.todayBoxHtml);
+  } else if (amount > 0) {
+    champBoxPillEl?.classList.remove("is-hidden");
+    setPlainBoxValue(champBoxEl, amount, champBoxUnitEl);
   } else {
     champBoxPillEl?.classList.add("is-hidden");
   }
@@ -1089,14 +1675,26 @@ function updateNation(nation, parsed) {
   const unitEl = document.querySelector(".js-nation-unit");
   const unit = nation.todayUnit || "万";
   const prevNation = prevValues.get("__nation__");
-  const nationAmount = resolveDisplayBoxAmount(
-    nation.todayBoxHtml,
-    unit,
-    nation.todayBox,
-    nation.todayBoxText
-  );
+  const preferEncoded =
+    nation.todayBoxHtml &&
+    (boxHtmlUsesAntiScrapeFont(nation.todayBoxHtml) ||
+      isUntrustedBoxDecode(String(nation.todayBoxText || "")));
+  const nationAmount = preferEncoded
+    ? 0
+    : resolveDisplayBoxAmount(
+        nation.todayBoxHtml,
+        unit,
+        nation.todayBox,
+        nation.todayBoxText
+      );
 
-  if (nationAmount > 0) {
+  if (nation.todayBoxHtml && (preferEncoded || nationAmount <= 0)) {
+    setEncodedBoxValue(nationBoxEl, nation.todayBoxHtml);
+    if (nationAmount > 0) {
+      prevValues.set("__nation__", nationAmount);
+    }
+    if (nation.todayBoxHtml) prevBoxHtml.set("__nation__", nation.todayBoxHtml);
+  } else if (nationAmount > 0) {
     if (prevNation != null && nationAmount > prevNation) {
       const delta = nationAmount - prevNation;
       pulseInlineDelta(nationDeltaEl, delta, "__nation__");
@@ -1104,8 +1702,6 @@ function updateNation(nation, parsed) {
     setPlainBoxValue(nationBoxEl, nationAmount, unitEl);
     prevValues.set("__nation__", nationAmount);
     if (nation.todayBoxHtml) prevBoxHtml.set("__nation__", nation.todayBoxHtml);
-  } else if (nation.todayBoxHtml) {
-    setEncodedBoxValue(nationBoxEl, nation.todayBoxHtml);
   } else {
     setPlainBoxValue(nationBoxEl, 0, unitEl);
   }
@@ -1145,6 +1741,10 @@ async function abortAndResetEnrichSchedule() {
 }
 
 function scheduleBackgroundEnrich(requestPollGen, parsed, speed) {
+  if (!enrichAllowed) {
+    pendingEnrichArgs = { requestPollGen, parsed, speed };
+    return;
+  }
   if (enrichSchedule.enrichingBackground) return;
 
   const now = Date.now();
@@ -1277,11 +1877,29 @@ async function refreshData() {
     updateNation(parsed.nation, parsed);
 
     hasDisplayedData = true;
+    document.body.classList.add("is-ready");
     setStatus("ok", "");
-    scheduleBackgroundEnrich(pollGeneration, parsed, speed);
+
+    // D+F: 首屏只出大盘；enrich 延后到验签窗口之后，避免与无头 Chrome 叠峰
+    if (!firstDashboardPainted) {
+      firstDashboardPainted = true;
+      pendingEnrichArgs = { requestPollGen: pollGeneration, parsed, speed };
+      setTimeout(() => {
+        enrichAllowed = true;
+        const args = pendingEnrichArgs;
+        pendingEnrichArgs = null;
+        if (args) scheduleBackgroundEnrich(args.requestPollGen, args.parsed, args.speed);
+      }, 4000);
+    } else {
+      scheduleBackgroundEnrich(pollGeneration, parsed, speed);
+    }
     void injectFontStyle(raw.fontStyle)
       .then(() => {
         if (!latestMovies.length) return;
+        latestMovies = latestMovies.map(refreshMovieBoxFields);
+        if (latestNation) {
+          latestNation = refreshMovieBoxFields({ ...latestNation, todayBoxHtml: latestNation.todayBoxHtml || "" });
+        }
         const decoded = enrichMoviesQuick(latestMovies, latestSpeedMap).map(stabilizeMovie);
         renderList(decoded);
         if (latestNation) updateNation(latestNation, latestParsedMeta || {});
@@ -1366,33 +1984,74 @@ async function waitForApiReady() {
   }
 
   setStatus("loading", "正在自动启动票房数据服务…");
-  let status = await window.overlay.getApiStatus();
-  if (status?.ready) return status;
-  status = await window.overlay.ensureApi();
-  if (status?.ready) return status;
 
-  return new Promise((resolve) => {
-    let off = null;
-    const timeout = setTimeout(() => {
-      off?.();
-      resolve({
-        ready: false,
-        error: "票房服务启动超时（45 秒），请确认已运行 setup.bat 或重启软件",
-      });
-    }, 45_000);
-    off = window.overlay.onApiReady((next) => {
-      clearTimeout(timeout);
-      off?.();
-      resolve(next);
-    });
+  // 先订阅，避免 ensureApi 完成时事件已发出却漏接
+  let latestFromEvent = null;
+  const off = window.overlay.onApiReady?.((next) => {
+    latestFromEvent = next;
   });
+
+  try {
+    let status = await window.overlay.getApiStatus();
+    if (status?.ready) return status;
+
+    const ensurePromise = window.overlay.ensureApi();
+    const timeoutPromise = new Promise((resolve) => {
+      setTimeout(() => resolve({ __timeout: true }), 45_000);
+    });
+    status = await Promise.race([ensurePromise, timeoutPromise]);
+
+    if (status?.__timeout) {
+      if (latestFromEvent) return latestFromEvent;
+      const current = await window.overlay.getApiStatus().catch(() => null);
+      if (current?.ready) return current;
+      return {
+        ready: false,
+        error:
+          current?.error ||
+          "票房服务启动超时（45 秒），请重启软件；换电脑后需安装 Google Chrome",
+      };
+    }
+
+    if (status?.ready) return status;
+    if (latestFromEvent?.ready) return latestFromEvent;
+    return {
+      ready: false,
+      error:
+        status?.error ||
+        latestFromEvent?.error ||
+        "票房服务启动失败，请重启软件",
+    };
+  } finally {
+    off?.();
+  }
+}
+
+function isLoginRequiredStatus(status) {
+  if (status?.loginRequired) return true;
+  const err = String(status?.lastVerifyError || "");
+  if (/^(login_required|detail_http_401|upstream_401|session_expired)$/.test(err)) return true;
+  if (
+    err === "sig_capture_failed" &&
+    status?.identityCookieExists &&
+    !status?.detailApiReady &&
+    !status?.signatureReady
+  ) {
+    return true;
+  }
+  if (err === "box_page_not_loaded" && status?.identityCookieExists && !status?.detailApiReady) {
+    return true;
+  }
+  return false;
 }
 
 function isSignatureIssueStatus(status) {
+  if (isLoginRequiredStatus(status)) return false;
   const err = String(status?.lastVerifyError || "");
   return (
-    /403|signature|sig_|mtgsig/i.test(err) ||
-    (status?.identityCookieExists && !status?.detailApiReady && !status?.loginRequired)
+    /^(detail_http_403|upstream_403|403|mtgsig_not_captured|getboxshow_request_not_seen|sig_capture_failed)$/.test(
+      err,
+    ) || /mtgsig/i.test(err)
   );
 }
 
@@ -1402,7 +2061,7 @@ async function updateLoginButton(forceShow = false) {
   const status = (await window.overlay?.getSessionStatus?.()) || {};
   btn.classList.remove("is-hidden");
 
-  if (forceShow || status.loginRequired) {
+  if (forceShow || isLoginRequiredStatus(status)) {
     btn.textContent = "登录";
     btn.title = "登录猫眼账号";
     return;
@@ -1426,17 +2085,6 @@ async function updateLoginButton(forceShow = false) {
   btn.title = "登录猫眼账号";
 }
 
-async function finishLoginSuccess() {
-  await updateLoginButton(false);
-  resetApiSigWarm();
-  partialDataWarning = "";
-  await abortAndResetEnrichSchedule();
-  setStatus("loading", "登录成功，正在拉取票房数据…");
-  const status = await window.overlay?.ensureApi?.();
-  if (status?.apiBase) config.apiBase = status.apiBase;
-  startPolling();
-}
-
 function handleLoginFailure(result) {
   const detail =
     result?.detail ||
@@ -1445,6 +2093,8 @@ function handleLoginFailure(result) {
       ? "未完成登录"
       : result?.code === "login_timeout"
         ? "登录超时，请重新点击登录"
+        : result?.code === "login_incomplete"
+          ? "未检测到猫眼账号登录态，请在浏览器里完成登录后再试"
         : "登录失败，请重试");
   setStatus("error", detail);
   if (result?.code === "chrome_not_found" || result?.code === "browser_launch_failed") {
@@ -1475,13 +2125,20 @@ async function handleSignatureRefresh() {
     setStatus("loading", "签名已刷新，正在重新拉取数据…");
     refreshData();
   } catch (error) {
+    const code = error instanceof MaoyanApiError ? error.code : "";
+    if (code === "login_required" || isLoginRequiredStatus({ lastVerifyError: code, loginRequired: code === "login_required" })) {
+      await window.overlay?.reportSessionApiError?.("login_required");
+      await updateLoginButton(true);
+      setStatus("error", "猫眼登录已过期，请点击右上角登录");
+      return;
+    }
     setStatus("error", formatUserFacingError(error));
   }
 }
 
 async function handleLoginClick() {
   const sessionStatus = (await window.overlay?.getSessionStatus?.()) || {};
-  if (isSignatureIssueStatus(sessionStatus) && !sessionStatus.loginRequired) {
+  if (isSignatureIssueStatus(sessionStatus) && !isLoginRequiredStatus(sessionStatus)) {
     await handleSignatureRefresh();
     return;
   }
@@ -1492,7 +2149,12 @@ async function handleLoginClick() {
   }
   $("btn-login")?.classList.remove("is-highlight");
   const relogin = sessionStatus.identityCookieExists;
-  setStatus("loading", relogin ? "正在打开登录窗口，请重新完成登录…" : "正在打开登录窗口，请在浏览器中完成登录…");
+  setStatus(
+    "loading",
+    relogin
+      ? "正在打开登录窗口，请在浏览器登录页完成猫眼账号登录…"
+      : "正在打开登录窗口，若出现登录页请完成猫眼账号登录…",
+  );
 
   let offResult = null;
   const waitForResult = new Promise((resolve) => {
@@ -1537,8 +2199,8 @@ async function handleLoginClick() {
     loginWatchTimer = null;
   }
 
-  if (result?.ok && (result?.detailApiReady || result?.loggedIn)) {
-    await finishLoginSuccess();
+  if (result?.ok && (result?.detailApiReady || result?.loggedIn || result?.loginCookieReady)) {
+    await finishLoginSuccess(result);
     return;
   }
   handleLoginFailure(result);
@@ -1546,6 +2208,13 @@ async function handleLoginClick() {
 
 async function init() {
   bindDesignViewport();
+  window.addEventListener(
+    "resize",
+    () => {
+      scheduleRaceCardReflow();
+    },
+    { passive: true },
+  );
   renderLoadingSkeleton();
   $("btn-login")?.addEventListener("click", handleLoginClick);
   if (heroDateEl) setTextIfChanged(heroDateEl, resolveDisplayDate(null));
@@ -1577,6 +2246,7 @@ async function init() {
   if (new URLSearchParams(location.search).has("preview")) {
     window.__racePreview = {
       renderList,
+      refitAllRaceCards,
       updateNation,
       setStatus,
       stabilizeMovie,
@@ -1614,7 +2284,7 @@ setTimeout(() => {
   if (statusEl?.classList.contains("status--loading")) {
     setStatus(
       "error",
-      "加载超时：请先运行 setup.bat 安装依赖，或点击右上角「登录」完成猫眼登录"
+      "加载超时：请重启软件，或点击右上角「登录」完成猫眼登录；换电脑请先安装 Google Chrome"
     );
   }
 }, 60_000);

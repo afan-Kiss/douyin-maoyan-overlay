@@ -2,6 +2,8 @@
 
 function formatAmountDigits(n) {
   if (n >= 1000) {
+    // 接近整数时不显示 .1 噪声（例如 1100.04 → 1100）
+    if (Math.abs(n - Math.round(n)) < 0.05) return String(Math.round(n));
     const text = n.toFixed(1);
     return text.endsWith(".0") ? text.slice(0, -2) : text;
   }

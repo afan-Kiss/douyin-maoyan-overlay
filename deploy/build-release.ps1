@@ -33,14 +33,33 @@ try {
   npx electron-builder --win portable --x64
   if ($LASTEXITCODE -ne 0) { throw "electron-builder failed ($LASTEXITCODE)" }
 
-  $built = Join-Path $RepoRoot 'dist\MaoyanOverlay.exe'
-  if (-not (Test-Path $built)) {
-    throw "Build output missing: $built"
-  }
-
   $pkg = Get-Content (Join-Path $RepoRoot 'package.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-  $ver = [string]$pkg.version
+  $verFull = [string]$pkg.version
+  $ver = $verFull
   if ($ver -match '^(\d+\.\d+)\.0+$') { $ver = $Matches[1] }
+
+  # electron-builder artifactName 产出 MaoyanOverlay-${version}.exe；
+  # 禁止优先取 dist\MaoyanOverlay.exe（常是旧文件，会导致上传错包）
+  $builtCandidates = @(
+    (Join-Path $RepoRoot ("dist\MaoyanOverlay-" + $verFull + ".exe")),
+    (Join-Path $RepoRoot ("dist\MaoyanOverlay-" + $ver + ".exe"))
+  )
+  $built = $builtCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+  if (-not $built) {
+    $built = Get-ChildItem (Join-Path $RepoRoot 'dist') -Filter 'MaoyanOverlay*.exe' |
+      Where-Object { $_.Name -match "MaoyanOverlay-$([regex]::Escape($verFull))\.exe|MaoyanOverlay-$([regex]::Escape($ver))\.exe" } |
+      Sort-Object LastWriteTime -Descending |
+      Select-Object -First 1 -ExpandProperty FullName
+  }
+  if (-not $built) {
+    $built = Get-ChildItem (Join-Path $RepoRoot 'dist') -Filter 'MaoyanOverlay*.exe' |
+      Where-Object { $_.Name -ne 'MaoyanOverlay.exe' } |
+      Sort-Object LastWriteTime -Descending |
+      Select-Object -First 1 -ExpandProperty FullName
+  }
+  if (-not $built -or -not (Test-Path $built)) {
+    throw "Build output missing: MaoyanOverlay*.exe under dist/"
+  }
 
   if ((Resolve-FullPath $built) -ne $OutExe) {
     Copy-Item -Force $built $OutExe

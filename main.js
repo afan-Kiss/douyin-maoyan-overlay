@@ -15,6 +15,7 @@ const {
   initClientLogger,
   startLogUpload,
   stopLogUpload,
+  report,
 } = require("./lib/client-logger");
 
 const CONFIG_PATH = path.join(__dirname, "config.json");
@@ -47,15 +48,32 @@ let updateManager = null;
 
 function getMods() {
   if (!mods) {
+    const cache = {};
     mods = {
-      maoyan: require("./maoyan-service"),
-      settings: require("./lib/settings"),
-      windowSize: require("./lib/window-size"),
-      remoteSync: require("./lib/remote-sync"),
-      adminServer: require("./admin-server"),
-      update: require("./lib/update"),
-      autoStart: require("./lib/auto-start"),
-      updatePush: require("./lib/update-push"),
+      get maoyan() {
+        return (cache.maoyan ||= require("./maoyan-service"));
+      },
+      get settings() {
+        return (cache.settings ||= require("./lib/settings"));
+      },
+      get windowSize() {
+        return (cache.windowSize ||= require("./lib/window-size"));
+      },
+      get remoteSync() {
+        return (cache.remoteSync ||= require("./lib/remote-sync"));
+      },
+      get adminServer() {
+        return (cache.adminServer ||= require("./admin-server"));
+      },
+      get update() {
+        return (cache.update ||= require("./lib/update"));
+      },
+      get autoStart() {
+        return (cache.autoStart ||= require("./lib/auto-start"));
+      },
+      get updatePush() {
+        return (cache.updatePush ||= require("./lib/update-push"));
+      },
     };
   }
   return mods;
@@ -256,23 +274,28 @@ function startBackgroundServices(config) {
     startRemoteSync(config.remoteAdminUrl, notifySettingsChanged);
     stopPushUpdate = startUpdatePush(config.remoteAdminUrl, updateManager, {
       log: (msg) => console.log(msg),
+      intervalMs: 15000,
     });
     startClientLogUpload(config.remoteAdminUrl);
     console.log(`远程后台同步: ${config.remoteAdminUrl}`);
     return;
   }
 
-  startAdminServer({ onChange: notifySettingsChanged })
-    .then((admin) => {
-      stopPushUpdate = startUpdatePush(admin.url, updateManager, {
-        log: (msg) => console.log(msg),
+  // 延后拉起本地后台，避免与首屏抢 CPU
+  setTimeout(() => {
+    startAdminServer({ onChange: notifySettingsChanged })
+      .then((admin) => {
+        stopPushUpdate = startUpdatePush(admin.url, updateManager, {
+          log: (msg) => console.log(msg),
+          intervalMs: 15000,
+        });
+        startClientLogUpload(admin.url);
+        console.log(`本地后台控制: ${admin.url}`);
+      })
+      .catch((e) => {
+        console.error("后台服务启动失败", e.message);
       });
-      startClientLogUpload(admin.url);
-      console.log(`本地后台控制: ${admin.url}`);
-    })
-    .catch((e) => {
-      console.error("后台服务启动失败", e.message);
-    });
+  }, 3000);
 }
 
 function scheduleAutoStartRegistration() {
@@ -332,7 +355,25 @@ function registerIpcHandlers() {
   });
   const { onLoginResult } = require("./lib/maoyan-login");
   onLoginResult((result) => {
-    if (result?.ok && result?.detailApiReady) {
+    if (result?.ok && (result?.detailApiReady || result?.loginCookieReady)) {
+      try {
+        const { mergeSessionStatus } = require("./lib/session-status");
+        mergeSessionStatus({
+          storageStateExists: true,
+          identityCookieExists: true,
+          loginCookieReady: true,
+          detailApiReady: Boolean(result.detailApiReady),
+          browserSessionVerified: Boolean(result.detailApiReady),
+          signatureReady: Boolean(result.detailApiReady),
+          accountLoggedIn: result.accountLoggedIn !== false,
+          sessionUsable: Boolean(result.detailApiReady),
+          loginRequired: false,
+          lastVerifyError: result.detailApiReady ? null : "mtgsig_deferred",
+          lastVerifyAt: new Date().toISOString(),
+        });
+      } catch {
+        /* ignore */
+      }
       const { getApiStatus } = getMods().maoyan;
       const { forceBackgroundVerify } = require("./lib/session-status");
       void getApiStatus().then((status) => {
@@ -368,9 +409,8 @@ if (!ensureSingleInstance({ onSecondInstance: focusMainWindow })) {
     const lightConfig = loadLightConfig();
     const { UpdateManager } = require("./lib/update/manager");
     updateManager = new UpdateManager(lightConfig);
-    splashController.send({ phase: "checking", message: "正在检查更新…", percent: 8, showBar: true });
 
-    const SPLASH_MAX_MS = 45_000;
+    const SPLASH_MAX_MS = 20_000;
     setTimeout(() => {
       if (!splashController) return;
       console.warn("启动页超时，强制进入主界面");
@@ -378,42 +418,28 @@ if (!ensureSingleInstance({ onSecondInstance: focusMainWindow })) {
       splashController = null;
     }, SPLASH_MAX_MS);
 
-    const UPDATE_CHECK_TIMEOUT_MS = 15_000;
-    let updated = false;
-    try {
-      updated = await Promise.race([
-        checkAndDownloadUpdate(updateManager, splashController),
-        new Promise((resolve) => {
-          setTimeout(() => {
-            console.warn("更新检查超时，跳过并进入主程序");
-            updateManager?.endJob?.();
-            splashController.send({
-              phase: "loading",
-              message: "正在加载主界面…",
-              percent: 92,
-              showBar: true,
-            });
-            resolve(false);
-          }, UPDATE_CHECK_TIMEOUT_MS);
-        }),
-      ]);
-    } catch (error) {
-      console.warn("更新检查失败:", error.message);
-      updateManager?.endJob?.();
-      updated = false;
-    }
-    if (updated) return;
-
-    splashController.send({ phase: "loading", message: "正在加载主界面…", percent: 92, showBar: true });
+    splashController.send({ phase: "loading", message: "正在加载主界面…", percent: 40, showBar: true });
 
     const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "package.json"), "utf-8"));
     initClientLogger({ appVersion: displayVersion(pkg.version).replace(/^v/, "") });
     if (lightConfig.remoteAdminUrl) {
       startClientLogUpload(lightConfig.remoteAdminUrl);
     }
+    const { getRealExecutablePath, installDir } = require("./lib/update/paths");
+    const exePath = getRealExecutablePath();
+    const installPath = installDir();
+    const userDataPath = app.getPath("userData");
+    const appPath = app.getAppPath();
     console.log(`电影实时票房榜 ${displayVersion(pkg.version)} 启动`);
+    console.log(`软件路径: ${exePath}`);
+    console.log(`安装目录: ${installPath}`);
+    console.log(`数据目录: ${userDataPath}`);
+    console.log(`程序目录: ${appPath}`);
+    report("info", "startup", `软件路径=${exePath}`);
+    report("info", "startup", `安装目录=${installPath}`);
+    report("info", "startup", `数据目录=${userDataPath}`);
+    report("info", "startup", `程序目录=${appPath}`);
 
-    getMods();
     registerIpcHandlers();
 
     const config = loadConfig();
@@ -421,12 +447,19 @@ if (!ensureSingleInstance({ onSecondInstance: focusMainWindow })) {
     createWindow({ onReadyToShow: () => startBackgroundServices(config) });
     scheduleAutoStartRegistration();
 
+    // A: 更新检查放到后台，不阻塞主窗口首屏
     setImmediate(() => {
-      try {
-        getMods().update.prepareUpdateEnvironmentEarly();
-      } catch (error) {
-        console.warn("更新环境初始化失败:", error.message);
-      }
+      void (async () => {
+        try {
+          const updated = await checkAndDownloadUpdate(updateManager, {
+            send: (payload) => splashController?.send?.(payload),
+          });
+          if (updated) return;
+        } catch (error) {
+          console.warn("后台更新检查失败:", error.message);
+          updateManager?.endJob?.();
+        }
+      })();
     });
   });
 

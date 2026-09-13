@@ -46,7 +46,7 @@ function applyScaledViewport(viewport, scale) {
     return;
   }
 
-  viewport.style.transform = `scale(${scale})`;
+  viewport.style.transform = `scale(${scale}) translateZ(0)`;
   viewport.style.marginRight = `${DESIGN_W * scale - DESIGN_W}px`;
   viewport.style.marginBottom = `${DESIGN_H * scale - DESIGN_H}px`;
 }

@@ -53,6 +53,7 @@ async function main() {
     resolveChampionBoxWan,
     resolveNationSeatMetric,
     computeMovieBoxDeltaWan,
+    isUntrustedBoxDecode,
   } = await import(apiPath);
   const { formatWanDisplayText } = await import(boxPath);
 
@@ -109,6 +110,11 @@ async function main() {
 
   assert.strictEqual(formatWanDisplayText(12300), "1.23亿");
   assert.strictEqual(formatWanDisplayText(3525.5), "3525.5万");
+
+  assert.strictEqual(isUntrustedBoxDecode("1111.1"), true);
+  assert.strictEqual(isUntrustedBoxDecode("111.11"), true);
+  assert.strictEqual(isUntrustedBoxDecode("1028.9"), false);
+  assert.strictEqual(isUntrustedBoxDecode("1100.1"), false);
 
   const computedSeat = resolveNationSeatMetric({
     viewCountDesc: "104.2万",

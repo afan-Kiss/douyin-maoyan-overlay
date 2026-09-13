@@ -24,7 +24,8 @@ export function getLastCapabilityVerifyResult() {
   return getLastCapabilityVerify();
 }
 
-async function executeCapabilityVerify() {
+async function executeCapabilityVerify(options = {}) {
+  const force = Boolean(options.force);
   const base = getLastCapabilityVerify();
   const sigStatus = getSignatureTTLStatus(manager.hasFreshSignature());
   const result = {
@@ -67,6 +68,26 @@ async function executeCapabilityVerify() {
     verifyPick = null;
   }
 
+  // C: 内存/磁盘签名仍新鲜且已有身份 Cookie 时，跳过无头 Chrome 验签
+  if (!force && base.identityCookieExists && manager.hasFreshSignature()) {
+    result.signatureReady = true;
+    result.detailApiReady = true;
+    result.productionDetailReady = true;
+    result.browserSessionVerified = false;
+    result.sessionUsable = true;
+    result.accountLoggedIn = true;
+    result.loginCookieReady = true;
+    result.lastVerifyError = null;
+    if (verifyPick?.verifyMovieId) {
+      result.verifyMovieId = verifyPick.verifyMovieId;
+      result.verifyMovieName = verifyPick.verifyMovieName;
+      result.verifySource = verifyPick.verifySource || "fresh_signature_skip";
+    } else {
+      result.verifySource = "fresh_signature_skip";
+    }
+    return setLastCapabilityVerify(result);
+  }
+
   let browser;
   let context;
   try {
@@ -98,7 +119,16 @@ async function executeCapabilityVerify() {
   result.loginCookieReady = Boolean(result.identityCookieExists);
   result.productionDetailReady = Boolean(result.detailApiReady);
   result.accountLoggedIn = Boolean(result.identityCookieExists);
-  result.sessionUsable = Boolean(result.identityCookieExists && result.detailApiReady && !result.loginRequired);
+  if (result.loginRequired) {
+    result.signatureReady = false;
+    result.detailApiReady = false;
+    result.productionDetailReady = false;
+    result.sessionUsable = false;
+  } else {
+    result.sessionUsable = Boolean(
+      result.identityCookieExists && result.detailApiReady && !result.loginRequired,
+    );
+  }
   if (!result.detailApiReady && !result.lastVerifyError) {
     result.lastVerifyError = "detail_api_unavailable";
   }
@@ -106,12 +136,13 @@ async function executeCapabilityVerify() {
   return setLastCapabilityVerify(result);
 }
 
-function startVerifyChain() {
+function startVerifyChain(options = {}) {
   chainPromise = (async () => {
     let result;
     do {
+      const force = Boolean(options.force) || forceRerunRequested;
       forceRerunRequested = false;
-      activeRun = executeCapabilityVerify();
+      activeRun = executeCapabilityVerify({ force });
       result = await activeRun;
     } while (forceRerunRequested);
     return result;
@@ -134,7 +165,7 @@ export function runCapabilityVerify(options = {}) {
     return activeRun || chainPromise;
   }
 
-  return startVerifyChain();
+  return startVerifyChain(options);
 }
 
 export function isLoginInProgress() {

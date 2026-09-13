@@ -140,8 +140,12 @@ async function testStableHitsOnlyCountsRealExecutions() {
     if (result?.detailApiReady && !reused) stableHits += 1;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  assert.strictEqual(verifyCalls, 3, "two sequential verifies should run after first coalesced batch");
-  assert.strictEqual(stableHits, STABLE_LOGIN_HITS, "two independent successful verifies must reach stable threshold");
+  assert.strictEqual(
+    verifyCalls,
+    1 + STABLE_LOGIN_HITS,
+    "sequential verifies should run after first coalesced batch",
+  );
+  assert.strictEqual(stableHits, STABLE_LOGIN_HITS, "independent successful verifies must reach stable threshold");
 
   delete require.cache[sessionCapPath];
   delete require.cache[loginBrowserPath];

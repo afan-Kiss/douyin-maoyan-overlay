@@ -177,6 +177,29 @@ function hasPrivateUseChars(text) {
   return /[\uE000-\uF8FF]/.test(text);
 }
 
+/** 反爬字体 canvas 解码失败时常整串变成 1（如 1111.1 / 111.11） */
+export function isUntrustedBoxDecode(text) {
+  if (text == null) return true;
+  const s = String(text).replace(/[^\d.]/g, "");
+  if (!s) return true;
+  const digits = s.replace(/\./g, "");
+  if (!digits) return true;
+  if (new Set(digits.split("")).size === 1) return true;
+  const ones = (digits.match(/1/g) || []).length;
+  if (ones / digits.length >= 0.75) return true;
+  return false;
+}
+
+export function boxHtmlUsesAntiScrapeFont(numHtml) {
+  if (!numHtml) return false;
+  if (typeof document === "undefined") {
+    return /[\uE000-\uF8FF]/.test(String(numHtml));
+  }
+  const el = ensureDecoder();
+  el.innerHTML = String(numHtml);
+  return hasPrivateUseChars(el.textContent || "");
+}
+
 function ensureDecodeCanvas() {
   if (!decodeCanvas) {
     decodeCanvas = document.createElement("canvas");
@@ -211,19 +234,40 @@ function bitmapSimilarity(a, b) {
   return same;
 }
 
+function glyphInk(bitmap) {
+  let ink = 0;
+  for (let i = 0; i < bitmap.length; i++) {
+    if (bitmap[i]) ink += 1;
+  }
+  return ink;
+}
+
 function guessDigitFromPua(charCode) {
   if (puaDigitMap.has(charCode)) return puaDigitMap.get(charCode);
   const ch = String.fromCharCode(charCode);
   const target = getGlyphBitmap('80px "mtsi-font"', ch);
+  const ink = glyphInk(target);
+  if (ink < 80) {
+    puaDigitMap.set(charCode, -1);
+    return -1;
+  }
   let max = 0;
+  let second = 0;
   let digit = 0;
   for (let d = 0; d < 10; d++) {
     const guess = getGlyphBitmap('72px Arial, Helvetica, sans-serif', String(d), "#ff0000");
     const score = bitmapSimilarity(target, guess);
     if (score > max) {
+      second = max;
       max = score;
       digit = d;
+    } else if (score > second) {
+      second = score;
     }
+  }
+  if (max < 120 || max - second < 12) {
+    puaDigitMap.set(charCode, -1);
+    return -1;
   }
   puaDigitMap.set(charCode, digit);
   return digit;
@@ -234,7 +278,9 @@ function decodePuaString(text) {
   for (const ch of text) {
     const code = ch.charCodeAt(0);
     if (code >= 0xe000 && code <= 0xf8ff) {
-      out += guessDigitFromPua(code);
+      const digit = guessDigitFromPua(code);
+      if (digit < 0) return "";
+      out += digit;
     } else {
       out += ch;
     }
@@ -285,16 +331,19 @@ export async function injectFontStyle(fontStyle) {
 export function decodeFontNum(numHtml) {
   if (!numHtml) return "";
   if (typeof document === "undefined") {
-    return String(numHtml).replace(/<[^>]+>/g, "").trim();
+    const plain = String(numHtml).replace(/<[^>]+>/g, "").trim();
+    return isUntrustedBoxDecode(plain) ? "" : plain;
   }
   const el = ensureDecoder();
   el.innerHTML = numHtml;
   const text = (el.textContent || "").trim();
   if (!text) return "";
   if (hasPrivateUseChars(text)) {
-    return fontReady ? decodePuaString(text) : "";
+    if (!fontReady) return "";
+    const decoded = decodePuaString(text);
+    return decoded && !isUntrustedBoxDecode(decoded) ? decoded : "";
   }
-  return text;
+  return isUntrustedBoxDecode(text) ? "" : text;
 }
 
 export function parseRate(rateStr) {
@@ -356,6 +405,20 @@ function formatAvgAttendance(avg) {
 }
 
 export function resolveNationSeatMetric(nation = {}) {
+  // 已解析好的 seatValue（含测试/缓存）优先
+  if (!isEmptyMetricValue(nation.seatValue)) {
+    const raw = String(nation.seatValue).trim();
+    const label = String(nation.seatLabel || "上座率").trim() || "上座率";
+    if (/上座/.test(label)) {
+      return {
+        label,
+        value: raw.includes("%") ? raw : `${raw.replace(/%$/g, "")}%`,
+        seatRaw: raw,
+      };
+    }
+    return { label, value: raw, seatRaw: raw };
+  }
+
   const seatRaw = pickNonemptyNationField(nation, [
     "viewSeatRate",
     "avgSeatView",
@@ -386,14 +449,31 @@ export function resolveNationSeatMetric(nation = {}) {
 
 export function resolveChampionBoxWan(movie) {
   if (!movie) return 0;
-  if (Number.isFinite(movie.todayBox) && movie.todayBox > 0) return movie.todayBox;
+  if (Number.isFinite(movie.todayBox) && movie.todayBox > 0) {
+    const raw = String(movie.todayBoxText || movie.todayBox);
+    if (!isUntrustedBoxDecode(raw)) return movie.todayBox;
+  }
   const fromHtml = resolveTodayBox(decodeFontNum(movie.todayBoxHtml || ""), normalizeUnit(movie.todayUnit));
   if (fromHtml > 0) return fromHtml;
   if (movie.todayBoxText && movie.todayBoxText !== "--") {
     const n = parseBoxNum(movie.todayBoxText, movie.todayUnit || "万");
-    if (n > 0) return n;
+    if (n > 0 && !isUntrustedBoxDecode(movie.todayBoxText)) return n;
   }
   return 0;
+}
+
+export function refreshMovieBoxFields(movie) {
+  if (!movie) return movie;
+  const todayBoxHtml = movie.todayBoxHtml || "";
+  const todayUnit = normalizeUnit(movie.todayUnit);
+  const todayRaw = decodeFontNum(todayBoxHtml);
+  const todayBox = resolveTodayBox(todayRaw, todayUnit);
+  return {
+    ...movie,
+    todayBoxText: todayRaw || "--",
+    todayBox,
+    todayUnit,
+  };
 }
 
 export function computeMovieBoxDeltaWan(prevAmount, nextAmount) {
@@ -472,8 +552,11 @@ function formatMoneyWan(n, prefix = "¥") {
 function formatDescMoney(desc) {
   if (!desc || desc === "--") return "--";
   const s = String(desc).trim();
+  if (!s || /登录猫眼|专业版即可|剩余城市|商排|请先登录|开通专业版/.test(s)) return "--";
   if (s.startsWith("¥")) return s;
   if (s.includes("亿") || s.includes("万")) return `¥${s}`;
+  // 纯中文提示不是金额
+  if (/[\u4e00-\u9fff]/.test(s) && !/\d/.test(s)) return "--";
   return `¥${s}万`;
 }
 
@@ -487,7 +570,7 @@ function isFailedApiPayload(raw) {
   if (typeof inner.detail === "string" && inner.detail.trim()) {
     const msg = inner.detail.trim();
     if (
-      /签名|不存在|失败|错误|超时|请刷新|请稍后再试|没找到浏览器/.test(msg)
+      /签名|不存在|失败|错误|超时|请刷新|请稍后再试|没找到浏览器|登录|专业版|商排/.test(msg)
     ) {
       return true;
     }
@@ -499,23 +582,55 @@ function pickDescValue(...values) {
   for (const val of values) {
     if (val == null) continue;
     const text = String(val).trim();
-    if (text && text !== "--" && text !== "-") return text;
+    if (!text || text === "--" || text === "-") continue;
+    if (/登录猫眼|专业版即可|剩余城市|商排|请先登录|开通专业版/.test(text)) continue;
+    return text;
   }
   return "";
 }
 
-function mapBoxShowRowsToDaily(rows, todayStr) {
+function normalizeShowDateKey(showDate) {
+  if (showDate == null || showDate === "") return 0;
+  const digits = String(showDate).replace(/\D/g, "").slice(0, 8);
+  const n = Number(digits);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function collectBoxDatasRows(inner) {
+  const boxDatas = inner?.boxDatas;
+  if (!Array.isArray(boxDatas)) return [];
+  const rows = [];
+  for (const chunk of boxDatas) {
+    if (Array.isArray(chunk)) rows.push(...chunk);
+    else if (chunk && typeof chunk === "object") rows.push(chunk);
+  }
+  const byDate = new Map();
+  for (const row of rows) {
+    const key = normalizeShowDateKey(row?.showDate);
+    if (!key) continue;
+    byDate.set(String(key), row);
+  }
+  return [...byDate.values()].sort(
+    (a, b) => normalizeShowDateKey(a.showDate) - normalizeShowDateKey(b.showDate),
+  );
+}
+
+function mapShowDateRowsToDaily(rows, todayStr, { forecastFields = [] } = {}) {
   if (!Array.isArray(rows) || !rows.length) return [];
   const sorted = [...rows]
-    .filter((row) => row?.showDate)
-    .sort((a, b) => Number(a.showDate) - Number(b.showDate));
+    .filter((row) => normalizeShowDateKey(row?.showDate) > 0)
+    .sort((a, b) => normalizeShowDateKey(a.showDate) - normalizeShowDateKey(b.showDate));
   if (!sorted.length) return [];
 
-  const todayKey = todayStr ? Number(String(todayStr).replace(/-/g, "")) : 0;
+  const todayKey = normalizeShowDateKey(todayStr);
   let todayIdx = todayKey
-    ? sorted.findIndex((row) => Number(row.showDate) === todayKey)
+    ? sorted.findIndex((row) => normalizeShowDateKey(row.showDate) === todayKey)
     : -1;
-  if (todayIdx < 0) todayIdx = Math.max(0, sorted.length - 1);
+  if (todayIdx < 0 && todayKey) {
+    // 今日行缺失时，取第一天 >= 今日，避免误把最后一天当「今日」导致明日/后天全空
+    todayIdx = sorted.findIndex((row) => normalizeShowDateKey(row.showDate) >= todayKey);
+  }
+  if (todayIdx < 0) todayIdx = 0;
 
   const labels = ["今日", "明日", "后天"];
   const result = [];
@@ -524,17 +639,20 @@ function mapBoxShowRowsToDaily(rows, todayStr) {
     if (!row) break;
     const box = pickDescValue(
       row.boxDesc,
+      row.boxInfo,
+      row.boxInfoDesc,
       row.boxOfficeDesc,
       row.sumBoxDesc,
       row.splitBoxDesc,
-      row.valueDesc
+      row.valueDesc,
     );
     const forecast = pickDescValue(
+      ...forecastFields.map((field) => row[field]),
       row.predictionDesc,
       row.predBoxDesc,
       row.forecastDesc,
       row.predictionBoxDesc,
-      row.boxPredictionDesc
+      row.boxPredictionDesc,
     );
     result.push({
       label: labels[i],
@@ -546,6 +664,16 @@ function mapBoxShowRowsToDaily(rows, todayStr) {
     });
   }
   return result;
+}
+
+function mapBoxShowRowsToDaily(rows, todayStr) {
+  return mapShowDateRowsToDaily(rows, todayStr);
+}
+
+function mapPredictionPageListToDaily(rows, todayStr) {
+  return mapShowDateRowsToDaily(rows, todayStr, {
+    forecastFields: ["boxInfo", "boxInfoDesc", "predictionDesc", "predBoxDesc"],
+  });
 }
 
 function deepFind(obj, keys, depth = 0) {
@@ -600,31 +728,58 @@ function pickPrevSeriesPoint(series, name) {
   return s.data[s.data.length - 2];
 }
 
+/** 图表点票房（万）：优先 tooltip.val1（万），其次 yValue/val0（元→万） */
+function seriesPointWan(point) {
+  if (!point || typeof point !== "object") return 0;
+  const tip = point.tooltip?.val1;
+  if (tip != null && String(tip).trim() !== "") {
+    const fromTip = parseBoxNum(tip, "万");
+    if (fromTip > 0) return fromTip;
+  }
+  const y = Number(point.yValue ?? point.tooltip?.val0);
+  if (!Number.isFinite(y) || y <= 0) return 0;
+  // 猫眼分时/累计图坐标一律是「元」
+  return y / 10000;
+}
+
+function formatHourSpeedText(wan) {
+  if (!(wan > 0)) return "--";
+  return `${formatMoneyWan(wan).replace(/^¥/, "")}/h`;
+}
+
+/**
+ * 时速：优先分时增量图 timeFilterChartData 末点（已是当小时票房），
+ * 否则用累计图 timeChartData 末两点差值。
+ * 禁止用短轮询瞬时速率冒充时速。
+ */
+function resolveHourSpeedWan(inner, seriesName) {
+  const filterSeries = inner?.timeFilterChartData?.series || [];
+  const filterPoint = pickSeriesPoint(filterSeries, seriesName);
+  const fromFilter = seriesPointWan(filterPoint);
+  if (fromFilter > 0) return fromFilter;
+
+  const chartSeries = inner?.timeChartData?.series || [];
+  const solid = pickSeriesPoint(chartSeries, seriesName);
+  const prevSolid = pickPrevSeriesPoint(chartSeries, seriesName);
+  if (solid && prevSolid) {
+    return Math.max(0, seriesPointWan(solid) - seriesPointWan(prevSolid));
+  }
+  return 0;
+}
+
 function parseBoxShowMetrics(raw, todayStr = "") {
   if (isFailedApiPayload(raw)) return null;
   const inner = unwrapPayload(raw);
   if (!inner) return null;
 
   const series = inner.timeChartData?.series || [];
-  const solid = pickSeriesPoint(series, "time_solid");
-  const prevSolid = pickPrevSeriesPoint(series, "time_solid");
   const yesterdaySolid = pickSeriesPoint(series, "time_yesterday");
-  const prevYesterday = pickPrevSeriesPoint(series, "time_yesterday");
 
-  const hourSpeed = solid && prevSolid
-    ? Math.max(0, parseBoxNum(solid.tooltip?.val1, "万") - parseBoxNum(prevSolid.tooltip?.val1, "万"))
-    : 0;
+  const hourSpeed = resolveHourSpeedWan(inner, "time_solid");
+  const yesterdayHourSpeed = resolveHourSpeedWan(inner, "time_yesterday");
+  const yesterdaySamePeriod = seriesPointWan(yesterdaySolid);
 
-  const yesterdayHourSpeed = yesterdaySolid && prevYesterday
-    ? Math.max(
-        0,
-        parseBoxNum(yesterdaySolid.tooltip?.val1, "万") - parseBoxNum(prevYesterday.tooltip?.val1, "万"),
-      )
-    : 0;
-
-  const yesterdaySamePeriod = yesterdaySolid ? parseBoxNum(yesterdaySolid.tooltip?.val1, "万") : 0;
-
-  const rows = Array.isArray(inner.boxDatas?.[0]) ? inner.boxDatas[0] : [];
+  const rows = collectBoxDatasRows(inner);
   let latest = null;
   for (const row of rows) {
     if (!row?.showDate) continue;
@@ -645,10 +800,9 @@ function parseBoxShowMetrics(raw, todayStr = "") {
 
   return {
     hourSpeed,
-    hourSpeedText: hourSpeed > 0 ? `${formatMoneyWan(hourSpeed).replace(/^¥/, "")}/h` : "--",
+    hourSpeedText: formatHourSpeedText(hourSpeed),
     yesterdayHourSpeed,
-    yesterdayHourSpeedText:
-      yesterdayHourSpeed > 0 ? `${formatMoneyWan(yesterdayHourSpeed).replace(/^¥/, "")}/h` : "--",
+    yesterdayHourSpeedText: formatHourSpeedText(yesterdayHourSpeed),
     yesterdaySamePeriod,
     yesterdaySamePeriodText: yesterdaySamePeriod > 0 ? formatMoneyWan(yesterdaySamePeriod) : "--",
     totalViews,
@@ -657,7 +811,7 @@ function parseBoxShowMetrics(raw, todayStr = "") {
   };
 }
 
-function parsePredictionMetrics(raw) {
+function parsePredictionMetrics(raw, todayStr = "") {
   if (isFailedApiPayload(raw)) return null;
   const inner = unwrapPayload(raw);
   if (!inner) return null;
@@ -666,6 +820,40 @@ function parsePredictionMetrics(raw) {
     inner.detail && typeof inner.detail === "object" && !Array.isArray(inner.detail)
       ? inner.detail
       : null;
+
+  const result = {
+    dynamicForecast: "--",
+    dynamicForecastNum: 0,
+    dynamicTrend: "",
+    totalForecast: "--",
+    totalForecastNum: 0,
+    totalTrend: "",
+    dailyForecast: [],
+  };
+
+  const pageDaily = mapPredictionPageListToDaily(inner.pageData?.list, todayStr);
+  if (pageDaily.length) {
+    result.dailyForecast = pageDaily;
+    const todayRow = pageDaily[0];
+    const todayVal = String(todayRow?.forecast || "").replace(/^¥/, "");
+    if (todayVal && todayVal !== "--") {
+      result.dynamicForecast = todayVal;
+      result.dynamicForecastNum = parseBoxNum(todayVal);
+    }
+    const summaryVal = inner.pageData?.boxSummary?.valueDesc || inner.pageData?.sumBox;
+    const summaryUnit = inner.pageData?.boxSummary?.unitDesc || "万";
+    if (summaryVal != null && String(summaryVal).trim()) {
+      const rawTotal = String(summaryVal).trim();
+      const totalText =
+        rawTotal.includes("亿") || rawTotal.includes("万")
+          ? rawTotal
+          : summaryUnit === "亿"
+            ? `${rawTotal}亿`
+            : `${rawTotal}万`;
+      result.totalForecast = formatDescMoney(totalText);
+      result.totalForecastNum = parseBoxNum(totalText);
+    }
+  }
 
   const list =
     inner.predictionBoxList ||
@@ -678,17 +866,7 @@ function parsePredictionMetrics(raw) {
     detailObj?.dayList ||
     [];
 
-  const result = {
-    dynamicForecast: "--",
-    dynamicForecastNum: 0,
-    dynamicTrend: "",
-    totalForecast: "--",
-    totalForecastNum: 0,
-    totalTrend: "",
-    dailyForecast: [],
-  };
-
-  if (Array.isArray(list)) {
+  if (!result.dailyForecast.length && Array.isArray(list)) {
     const dayLabels = ["今日", "明日", "后天"];
     for (let i = 0; i < Math.min(list.length, 3); i++) {
       const item = list[i];
@@ -704,8 +882,10 @@ function parsePredictionMetrics(raw) {
         item.predBoxDesc,
         item.forecastDesc,
         item.predictionBoxDesc,
+        item.boxInfo,
+        item.boxInfoDesc,
         item.valueDesc,
-        item.boxDesc
+        item.boxDesc,
       );
       result.dailyForecast.push({
         label: item.dateDesc || item.title || item.dayDesc || dayLabels[i] || `D+${i}`,
@@ -919,52 +1099,76 @@ export function mergeMovieDetail(base, detail = {}) {
   const prediction = detail.prediction || {};
   const global = detail.global || {};
   const tech = detail.tech || {};
-  const speed = detail.speed || {};
 
-  const dailyIncrease = trends.increaseDesc || trends.dailyIncrease || boxShow.dailyIncrease || "--";
-  const yesterdayDesc = trends.yesterdayDesc || "--";
-  const yesterdayBox = trends.yesterdayBox || 0;
+  const merged = { ...base };
 
-  const hourSpeedText = boxShow.hourSpeedText || "--";
-  const hourSpeed = boxShow.hourSpeed || 0;
+  const dailyIncrease = trends.increaseDesc || trends.dailyIncrease || boxShow.dailyIncrease;
+  if (!isEmptyMetricValue(dailyIncrease)) merged.dailyIncrease = dailyIncrease;
 
-  const dynamicForecast = prediction.dynamicForecast || "--";
-  const dynamicForecastNum = prediction.dynamicForecastNum || 0;
-  const dynamicTrend = prediction.dynamicTrend || "";
+  if (!isEmptyMetricValue(trends.yesterdayDesc)) {
+    merged.yesterdayTotal = trends.yesterdayDesc;
+    if (trends.yesterdayBox > 0) merged.yesterdayBox = trends.yesterdayBox;
+  }
 
-  const yesterdaySamePeriodText = boxShow.yesterdaySamePeriodText || "--";
+  const hourSpeedFromBoxShow =
+    boxShow.hourSpeed > 0 ||
+    (!isEmptyMetricValue(boxShow.hourSpeedText) && boxShow.hourSpeedText !== "--");
+  const yesterdayHourSpeedFromBoxShow =
+    boxShow.yesterdayHourSpeed > 0 ||
+    (!isEmptyMetricValue(boxShow.yesterdayHourSpeedText) &&
+      boxShow.yesterdayHourSpeedText !== "--");
 
-  const dailyTable = buildDailyTable(base, prediction, detail);
+  if (hourSpeedFromBoxShow) {
+    merged.hourSpeed = boxShow.hourSpeed || 0;
+    merged.hourSpeedText = boxShow.hourSpeedText;
+    merged.hourSpeedFromApi = true;
+  }
+  if (yesterdayHourSpeedFromBoxShow) {
+    merged.yesterdayHourSpeed = boxShow.yesterdayHourSpeed || 0;
+    merged.yesterdayHourSpeedText = boxShow.yesterdayHourSpeedText;
+  }
+  if (!isEmptyMetricValue(boxShow.yesterdaySamePeriodText)) {
+    merged.yesterdaySamePeriodText = boxShow.yesterdaySamePeriodText;
+  }
+  if (!isEmptyMetricValue(boxShow.totalViews)) merged.totalViews = boxShow.totalViews;
 
-  return {
-    ...base,
-    mainlandBox: global.mainland || formatDescMoney(base.sumBoxDesc),
-    hmtBox: global.hmt || "--",
-    overseasBox: global.overseas || "--",
-    endDate: tech.endDate || "--",
-    remainingDays: tech.remainingDays || "--",
-    dailyIncrease,
-    hourSpeed,
-    hourSpeedText,
-    dynamicForecast,
-    dynamicForecastNum,
-    dynamicTrend,
-    yesterdayTotal: yesterdayDesc,
-    yesterdayBox,
-    yesterdayHourSpeedText: boxShow.yesterdayHourSpeedText || "--",
-    yesterdaySamePeriodText,
-    totalViews: boxShow.totalViews || "--",
-    totalForecast: prediction.totalForecast || "--",
-    totalForecastNum: prediction.totalForecastNum || 0,
-    totalTrend: prediction.totalTrend || "",
-    dailyTable,
-    showCountDesc:
-      base.showCount > 0
-        ? base.showCount >= 10000
-          ? `${(base.showCount / 10000).toFixed(1)}万场`
-          : `${base.showCount}场`
-        : "--",
-  };
+  if (!isEmptyMetricValue(prediction.dynamicForecast)) {
+    merged.dynamicForecast = prediction.dynamicForecast;
+    if (prediction.dynamicForecastNum > 0) merged.dynamicForecastNum = prediction.dynamicForecastNum;
+    if (!isEmptyMetricValue(prediction.dynamicTrend)) merged.dynamicTrend = prediction.dynamicTrend;
+  }
+  if (!isEmptyMetricValue(prediction.totalForecast)) {
+    merged.totalForecast = prediction.totalForecast;
+    if (prediction.totalForecastNum > 0) merged.totalForecastNum = prediction.totalForecastNum;
+    if (!isEmptyMetricValue(prediction.totalTrend)) merged.totalTrend = prediction.totalTrend;
+  }
+
+  if (!isEmptyMetricValue(global.mainland)) {
+    merged.mainlandBox = global.mainland;
+  } else if (isEmptyMetricValue(base.mainlandBox) && !isEmptyMetricValue(base.sumBoxDesc)) {
+    merged.mainlandBox = formatDescMoney(base.sumBoxDesc);
+  }
+  if (!isEmptyMetricValue(global.hmt)) merged.hmtBox = global.hmt;
+  if (!isEmptyMetricValue(global.overseas)) merged.overseasBox = global.overseas;
+
+  if (!isEmptyMetricValue(tech.endDate)) merged.endDate = tech.endDate;
+  if (!isEmptyMetricValue(tech.remainingDays)) merged.remainingDays = tech.remainingDays;
+
+  const hasDetailDaily =
+    (Array.isArray(prediction.dailyForecast) && prediction.dailyForecast.length > 0) ||
+    (Array.isArray(boxShow.dailyRows) && boxShow.dailyRows.length > 0);
+  if (hasDetailDaily) {
+    merged.dailyTable = buildDailyTable(base, prediction, detail);
+  }
+
+  if (base.showCount > 0) {
+    merged.showCountDesc =
+      base.showCount >= 10000
+        ? `${(base.showCount / 10000).toFixed(1)}万场`
+        : `${base.showCount}场`;
+  }
+
+  return merged;
 }
 
 function isEmptyMetricValue(val) {
@@ -1089,7 +1293,7 @@ export const EXTRA_METRIC_FIELD_MAP = [
   { label: "实时上座", key: "avgSeatView", source: "dashboard", raw: "avgSeatView" },
   { label: "累计票房", key: "sumBoxDesc", source: "dashboard", raw: "sumBoxDesc" },
   { label: "动态预测", key: "dynamicForecast", source: "getPredictionBox", raw: "predictionBoxList/boxDesc" },
-  { label: "今日时速", key: "hourSpeedText", source: "getBoxShow", raw: "timeChartData.time_solid" },
+  { label: "今日时速", key: "hourSpeedText", source: "getBoxShow", raw: "timeFilterChartData/timeChartData.time_solid" },
   { label: "排片场次", key: "showCountDesc", source: "dashboard", raw: "showCount" },
   { label: "场均人次", key: "avgShowView", source: "dashboard", raw: "avgShowView" },
   { label: "昨日票房", key: "yesterdayTotal", source: "dashboard(movieInfo.boxTrends)", raw: "boxTrends.boxDesc" },
@@ -1363,12 +1567,19 @@ function buildDailyTable(base, prediction, detail) {
     const pf = forecasts[i] || {};
     const bs = boxShowRows[i] || {};
     const isToday = i === 0;
-    const todayBoxPlain =
-      base.todayBox > 0
-        ? `${base.todayBox.toFixed(2)}万`
-        : base.todayBoxText !== "--"
-          ? `${base.todayBoxText}万`
-          : "";
+    const trustedText =
+      base.todayBoxText !== "--" && !isUntrustedBoxDecode(base.todayBoxText)
+        ? String(base.todayBoxText)
+        : "";
+    const trustedBox =
+      base.todayBox > 0 && !isUntrustedBoxDecode(String(base.todayBoxText || base.todayBox))
+        ? base.todayBox
+        : 0;
+    const todayBoxPlain = trustedBox > 0
+      ? `${trustedBox.toFixed(2)}万`
+      : trustedText
+        ? `${trustedText}万`
+        : "";
     rows.push({
       label: pf.label || bs.label || labels[i],
       box: isToday
@@ -1409,9 +1620,8 @@ export function estimateSpeedMetrics(movieId, todayBox, prevSnapshot, elapsedMs)
   if (!prevSnapshot || !Number.isFinite(todayBox) || todayBox <= 0) {
     return { estimatedHourSpeed: 0, estimatedDayForecast: 0, estimatedDayForecastText: "--", forecastTrend: "" };
   }
-  const delta = todayBox - (prevSnapshot.box || 0);
-  const elapsedHours = Math.max(elapsedMs / 3600000, 1 / 3600);
-  const estimatedHourSpeed = delta > 0 ? delta / elapsedHours : 0;
+  // 不再把短窗口 delta/elapsed 外推成「时速」；该值易夸张且与猫眼「本小时票房」定义不符
+  const estimatedHourSpeed = 0;
 
   const now = new Date();
   const hoursElapsed = now.getHours() + now.getMinutes() / 60 + now.getSeconds() / 3600;
@@ -1490,7 +1700,7 @@ async function fetchMovieExtraDetail(apiBase, movie, todayStr, speed = {}, paren
     if (parentSignal?.aborted) throw error;
     captureExtraError("预测票房", error);
   }
-  let parsedPrediction = predictionRaw ? parsePredictionMetrics(predictionRaw) : null;
+  let parsedPrediction = predictionRaw ? parsePredictionMetrics(predictionRaw, todayStr) : null;
   if (!parsedPrediction?.dailyForecast?.length) {
     await sleep(800);
     if (parentSignal?.aborted) {
@@ -1498,7 +1708,7 @@ async function fetchMovieExtraDetail(apiBase, movie, todayStr, speed = {}, paren
     }
     try {
       predictionRaw = await fetchPredictionBox(apiBase, movie.movieId, parentSignal);
-      parsedPrediction = predictionRaw ? parsePredictionMetrics(predictionRaw) : null;
+      parsedPrediction = predictionRaw ? parsePredictionMetrics(predictionRaw, todayStr) : null;
     } catch (error) {
       if (parentSignal?.aborted) throw error;
       captureExtraError("预测票房", error);
@@ -1565,6 +1775,8 @@ export async function enrichMoviesLight(apiBase, movies, options = {}) {
   }
   return results;
 }
+
+export { parsePredictionMetrics, parseBoxShowMetrics };
 
 export async function enrichMovies(apiBase, movies, options = {}) {
   const concurrency = options.concurrency || 2;

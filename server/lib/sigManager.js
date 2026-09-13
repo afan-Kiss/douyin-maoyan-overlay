@@ -1,6 +1,5 @@
 import fs from "fs";
 import path from "path";
-import { chromium } from "playwright";
 import {
   BOX_PAGE,
   BROWSER_API_CACHE_TTL,
@@ -8,6 +7,7 @@ import {
   COOKIE_FILE,
   DATA_DIR,
   MAX_CACHE_ENTRIES,
+  SESSION_CACHE_DIR,
   SIG_TTL_SECONDS,
   STORAGE_STATE,
   UPSTREAM_TIMEOUT_MS,
@@ -30,13 +30,25 @@ import {
 } from "./capability-state.js";
 
 const require = createRequire(import.meta.url);
-const { matchesGetBoxShowRequest, validateDetailApiPayload } = require("../../lib/session-capability.js");
+const {
+  matchesGetBoxShowRequest,
+  validateDetailApiPayload,
+  isMaoyanLoginRedirect,
+} = require("../../lib/session-capability.js");
 import {
   buildMygsig,
   generateSignKey,
   generateUid,
   randomUuid,
 } from "./maoyanSign.js";
+
+let chromiumLoader = null;
+function loadChromium() {
+  if (!chromiumLoader) {
+    chromiumLoader = import("playwright").then((mod) => mod.chromium);
+  }
+  return chromiumLoader;
+}
 
 function isLoginInProgress() {
   try {
@@ -377,12 +389,21 @@ export class SigManager {
     this.movieAuthCache = new Map();
     this.inflight = new Map();
     this.wukongRefreshLocks = new Map();
+    this._sharedBrowser = null;
+    this._sharedBrowserIdleTimer = null;
+    this._sharedBrowserUsers = 0;
     this._pruneTimer = setInterval(() => this.pruneCache(), 30 * 60 * 1000);
     if (this._pruneTimer.unref) this._pruneTimer.unref();
   }
 
   destroy() {
     if (this._pruneTimer) clearInterval(this._pruneTimer);
+    if (this._sharedBrowserIdleTimer) clearTimeout(this._sharedBrowserIdleTimer);
+    this._sharedBrowserIdleTimer = null;
+    if (this._sharedBrowser) {
+      this._sharedBrowser.close().catch(() => {});
+      this._sharedBrowser = null;
+    }
     this.cache.clear();
     this.browserApiCache.clear();
     this.movieCapturePromises.clear();
@@ -437,6 +458,23 @@ export class SigManager {
   hasFreshSignature() {
     for (const entry of this.cache.values()) {
       if (this.isFresh(entry)) return true;
+    }
+    try {
+      if (!fs.existsSync(SESSION_CACHE_DIR)) return false;
+      const names = fs.readdirSync(SESSION_CACHE_DIR);
+      for (const name of names) {
+        if (!name.endsWith(".json")) continue;
+        try {
+          const raw = JSON.parse(fs.readFileSync(path.join(SESSION_CACHE_DIR, name), "utf-8"));
+          if (!raw?.headers?.mtgsig) continue;
+          const refreshedAt = parseCapturedAt(raw.captured_at);
+          if (this.isFresh({ refreshedAt })) return true;
+        } catch {
+          /* ignore bad cache file */
+        }
+      }
+    } catch {
+      /* ignore */
     }
     return false;
   }
@@ -576,9 +614,13 @@ export class SigManager {
     return got;
   }
 
-  async launchBrowserContext() {
-    if (isLoginInProgress()) {
-      throw new Error("login_in_progress");
+  async getSharedBrowser() {
+    if (this._sharedBrowser?.isConnected?.()) {
+      return this._sharedBrowser;
+    }
+    if (this._sharedBrowser) {
+      await this._sharedBrowser.close().catch(() => {});
+      this._sharedBrowser = null;
     }
 
     const chromePath = getChromeExecutable();
@@ -587,11 +629,38 @@ export class SigManager {
       throw new Error("chrome_not_found");
     }
 
-    const browser = await chromium.launch({
+    const chromium = await loadChromium();
+    this._sharedBrowser = await chromium.launch({
       headless: true,
       executablePath: chromePath,
       args: ["--disable-dev-shm-usage", "--disable-gpu", "--no-sandbox"],
     });
+    return this._sharedBrowser;
+  }
+
+  touchSharedBrowserIdle() {
+    if (this._sharedBrowserIdleTimer) clearTimeout(this._sharedBrowserIdleTimer);
+    this._sharedBrowserIdleTimer = setTimeout(() => {
+      if (this._sharedBrowserUsers > 0) return;
+      const browser = this._sharedBrowser;
+      this._sharedBrowser = null;
+      this._sharedBrowserIdleTimer = null;
+      if (browser) browser.close().catch(() => {});
+    }, 5 * 60 * 1000);
+    if (this._sharedBrowserIdleTimer.unref) this._sharedBrowserIdleTimer.unref();
+  }
+
+  async launchBrowserContext() {
+    if (isLoginInProgress()) {
+      throw new Error("login_in_progress");
+    }
+
+    const browser = await this.getSharedBrowser();
+    this._sharedBrowserUsers += 1;
+    if (this._sharedBrowserIdleTimer) {
+      clearTimeout(this._sharedBrowserIdleTimer);
+      this._sharedBrowserIdleTimer = null;
+    }
 
     const ctxOpts = { userAgent: USER_AGENT, locale: "zh-CN" };
     if (fs.existsSync(STORAGE_STATE)) {
@@ -611,9 +680,10 @@ export class SigManager {
     return { browser, context };
   }
 
-  async closeBrowserSession(browser, context) {
+  async closeBrowserSession(_browser, context) {
     if (context) await context.close().catch(() => {});
-    if (browser) await browser.close().catch(() => {});
+    this._sharedBrowserUsers = Math.max(0, this._sharedBrowserUsers - 1);
+    if (this._sharedBrowserUsers === 0) this.touchSharedBrowserIdle();
   }
 
   async fetchInPage(page, absoluteUrl) {
@@ -689,10 +759,23 @@ export class SigManager {
           await page.goto(BOX_PAGE(movieId), { waitUntil: "domcontentloaded", timeout: 90000 });
 
           let onBox = false;
+          let loginRedirect = false;
           try {
-            onBox = await page.evaluate(() => location.hostname.includes("piaofang"));
+            const loc = await page.evaluate(() => ({
+              host: location.hostname,
+              path: location.pathname,
+              onBox: location.hostname.includes("piaofang"),
+            }));
+            onBox = loc.onBox;
+            loginRedirect = isMaoyanLoginRedirect(loc.host, loc.path);
           } catch {
             onBox = false;
+          }
+
+          if (!onBox && loginRedirect) {
+            log.sigStep("会话已过期，请先完成猫眼登录");
+            applyApiErrorToCapability("login_required");
+            throw new Error("login_required");
           }
 
           if (!onBox) {
@@ -777,6 +860,9 @@ export class SigManager {
 
     if (!captured?.headers?.mtgsig) {
       if (lastError && isNonRetryableSigError(lastError)) {
+        if (String(lastError.message || lastError) === "login_required") {
+          applyApiErrorToCapability("login_required");
+        }
         throw lastError;
       }
       log.sigFail("页面没返回有效签名，请检查网络或先登录");
@@ -1059,10 +1145,23 @@ export class SigManager {
           await page.goto(BOX_PAGE(movieId), { waitUntil: "domcontentloaded", timeout: 90000 });
 
           let onBox = false;
+          let loginRedirect = false;
           try {
-            onBox = await page.evaluate(() => location.hostname.includes("piaofang"));
+            const loc = await page.evaluate(() => ({
+              host: location.hostname,
+              path: location.pathname,
+              onBox: location.hostname.includes("piaofang"),
+            }));
+            onBox = loc.onBox;
+            loginRedirect = isMaoyanLoginRedirect(loc.host, loc.path);
           } catch {
             onBox = false;
+          }
+
+          if (!onBox && loginRedirect) {
+            log.sigStep("会话已过期，请先完成猫眼登录");
+            applyApiErrorToCapability("login_required");
+            throw new Error("login_required");
           }
 
           if (!onBox) {
