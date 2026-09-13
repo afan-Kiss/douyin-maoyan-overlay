@@ -22,7 +22,11 @@ import {
   wukongSessionCachePath,
 } from "./config.js";
 import { log, explainError, isNonRetryableSigError } from "./logger.js";
+import { createRequire } from "module";
 import { applyApiErrorToCapability } from "./capability-state.js";
+
+const require = createRequire(import.meta.url);
+const { matchesGetBoxShowRequest } = require("../../lib/session-capability.js");
 import {
   buildMygsig,
   generateSignKey,
@@ -658,13 +662,12 @@ export class SigManager {
   }
 
   async captureMtgsig(movieId, boxLevel) {
-    const targetSub = `movieId=${movieId}&boxLevel=${boxLevel}`;
     const captured = {};
 
     const remember = (req) => {
       const got = this.rememberMovieRequest(movieId, req);
       if (!got) return;
-      if (!req.url().includes("getBoxShow") || !req.url().includes(targetSub)) return;
+      if (!matchesGetBoxShowRequest(req.url(), movieId, boxLevel)) return;
       captured.headers = got.headers;
       captured.url = got.url;
     };

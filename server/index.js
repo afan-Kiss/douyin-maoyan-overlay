@@ -11,7 +11,7 @@ import {
 } from "./lib/config.js";
 import { log, requestLogMiddleware, explainError, buildDiagnostics } from "./lib/logger.js";
 import { runCapabilityVerify } from "./lib/capability-verify.js";
-import { applyApiErrorToCapability } from "./lib/capability-state.js";
+import { applyApiErrorToCapability, getLastCapabilityVerify } from "./lib/capability-state.js";
 import { isPortListening } from "./lib/port.js";
 import { UpstreamError, manager } from "./lib/sigManager.js";
 
@@ -359,6 +359,10 @@ async function main() {
 
   app.get("/api/diagnostics", (_req, res) => {
     res.json(buildDiagnostics());
+  });
+
+  app.get("/api/capability-status", (_req, res) => {
+    res.json(getLastCapabilityVerify());
   });
 
   app.get("/api/verify-capabilities", async (req, res) => {

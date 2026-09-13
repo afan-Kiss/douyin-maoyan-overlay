@@ -308,7 +308,19 @@ function registerIpcHandlers() {
   ipcMain.handle("get-api-status", () => getApiStatus());
   ipcMain.handle("ensure-api", () => startMaoyanService());
   ipcMain.handle("is-logged-in", () => isMaoyanLoggedIn());
-  ipcMain.handle("get-session-status", () => getMaoyanSessionStatus());
+  ipcMain.handle("get-session-status", async () => {
+    const status = getMaoyanSessionStatus();
+    const apiStatus = await getApiStatus().catch(() => null);
+    if (apiStatus?.apiBase) {
+      const { syncSessionStatusFromServer } = require("./lib/session-status");
+      return syncSessionStatusFromServer(apiStatus.apiBase);
+    }
+    return status;
+  });
+  ipcMain.handle("report-session-api-error", (_event, code) => {
+    const { reportSessionApiError } = require("./lib/session-status");
+    return reportSessionApiError(code);
+  });
   ipcMain.handle("is-login-running", () => {
     const { isLoginRunning } = require("./lib/maoyan-login");
     return isLoginRunning();

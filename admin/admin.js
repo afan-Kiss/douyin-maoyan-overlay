@@ -11,7 +11,7 @@ const EDIT_TARGETS = {
   },
   heroSubtitle: {
     label: "副标题",
-    desc: "「今日大盘 · 猫眼排行」副标题",
+    desc: "「今日大盘 · 实时排行」副标题",
     fields: [
       { path: "fonts.heroSubtitle", type: "number", label: "字号（px）", min: 12, max: 48 },
       { path: "colors.accentSoft", type: "color", label: "装饰线 / 柔和强调色" },
@@ -68,14 +68,6 @@ const EDIT_TARGETS = {
       { path: "fonts.region", type: "number", label: "区域字号（px）", min: 10, max: 40 },
       { path: "colors.cardBg", type: "rgba", label: "行背景" },
       { path: "colors.cardBorder", type: "rgba", label: "行边框" },
-    ],
-  },
-  trailerTitle: {
-    label: "预告区标题",
-    desc: "底部「热映预告」标题",
-    fields: [
-      { path: "colors.accent", type: "color", label: "强调色" },
-      { path: "fonts.movieTitle", type: "number", label: "标题字号（px）", min: 16, max: 72 },
     ],
   },
   footer: {
@@ -190,6 +182,17 @@ function highlightPreview(target) {
   frame.contentWindow.postMessage({ type: "preview-highlight", target }, "*");
 }
 
+function updateOutputStatus(settings) {
+  const el = $("window-output-status");
+  if (!el) return;
+  const live = settings?.window?.liveOutput === true;
+  const w = live ? 1080 : Number(settings?.window?.width) || 540;
+  const h = live ? 1920 : Number(settings?.window?.height) || 960;
+  const mode = live ? "直播输出 1080×1920" : `桌面预览 ${w}×${h}`;
+  const scale = live ? "1.0（原生）" : "0.5（CSS 缩放）";
+  el.textContent = `输出模式：${mode} · contentSize ${w}×${h} · viewport scale ${scale}`;
+}
+
 function fillAdvancedFields(settings) {
   $("pollIntervalMs").value = settings.pollIntervalMs;
   $("topCount").value = settings.topCount;
@@ -197,8 +200,10 @@ function fillAdvancedFields(settings) {
   $("enrich-trendLimit").value = settings.enrich.trendLimit;
   $("window-width").value = settings.window.width;
   $("window-height").value = settings.window.height;
+  $("window-liveOutput").checked = settings.window.liveOutput === true;
   $("window-alwaysOnTop").checked = settings.window.alwaysOnTop;
   $("admin-port").value = settings.admin.port;
+  updateOutputStatus(settings);
 }
 
 function fillForm(settings) {
@@ -220,6 +225,7 @@ function readAdvancedFields() {
     window: {
       width: Number($("window-width").value),
       height: Number($("window-height").value),
+      liveOutput: $("window-liveOutput").checked,
       alwaysOnTop: $("window-alwaysOnTop").checked,
     },
     admin: {
@@ -424,6 +430,113 @@ async function pushUpdate() {
   toast(data.message || "已推送更新指令");
 }
 
+function formatLogEntry(entry) {
+  const time = new Date(Number(entry.ts) || Date.now()).toLocaleString("zh-CN");
+  const level = String(entry.level || "info").toUpperCase().padEnd(5, " ");
+  const tag = String(entry.tag || "app");
+  const message = String(entry.message || "");
+  return `[${time}] ${level} ${tag} · ${message}`;
+}
+
+function escapeHtml(text) {
+  return String(text || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+async function loadLogDevices() {
+  const token = $("admin-token").value;
+  const resp = await fetch("api/logs/devices", {
+    headers: { "X-Admin-Token": token },
+  });
+  const data = await resp.json().catch(() => ({}));
+  const select = $("log-device-select");
+  if (!select) return;
+  if (!resp.ok) {
+    select.innerHTML = `<option value="">${data.detail || "加载失败，请先填写管理密码"}</option>`;
+    return;
+  }
+
+  const devices = data.devices || [];
+  if (devices.length === 0) {
+    select.innerHTML = `<option value="">暂无客户端上报</option>`;
+    return;
+  }
+
+  const current = select.value;
+  select.innerHTML = devices
+    .map((device) => {
+      const label = `${device.hostname || "未知电脑"} · v${device.appVersion || "?"} · ${device.deviceId}`;
+      return `<option value="${escapeHtml(device.deviceId)}">${escapeHtml(label)}</option>`;
+    })
+    .join("");
+
+  if (current && devices.some((d) => d.deviceId === current)) {
+    select.value = current;
+  }
+}
+
+async function loadClientLogs() {
+  const token = $("admin-token").value;
+  const deviceId = $("log-device-select")?.value || "";
+  const viewer = $("log-viewer");
+  if (!viewer) return;
+  if (!deviceId) {
+    viewer.textContent = "暂无客户端上报";
+    return;
+  }
+
+  const level = $("log-level-filter")?.value || "";
+  const limit = Number($("log-limit")?.value) || 200;
+  const params = new URLSearchParams({
+    deviceId,
+    limit: String(limit),
+  });
+  if (level) params.set("level", level);
+
+  const resp = await fetch(`api/logs?${params.toString()}`, {
+    headers: { "X-Admin-Token": token },
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    viewer.textContent = data.detail || "读取日志失败，请确认管理密码";
+    return;
+  }
+
+  const entries = data.entries || [];
+  if (entries.length === 0) {
+    viewer.textContent = "该设备暂无日志";
+    return;
+  }
+  viewer.textContent = entries.map(formatLogEntry).join("\n");
+  viewer.scrollTop = viewer.scrollHeight;
+}
+
+async function clearClientLogs() {
+  const token = $("admin-token").value;
+  const deviceId = $("log-device-select")?.value || "";
+  if (!deviceId) {
+    toast("请先选择设备", true);
+    return;
+  }
+  if (!window.confirm("确定清空该设备的远程日志吗？")) return;
+
+  const resp = await fetch(`api/logs?deviceId=${encodeURIComponent(deviceId)}`, {
+    method: "DELETE",
+    headers: { "X-Admin-Token": token },
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    toast(data.detail || "清空失败", true);
+    return;
+  }
+  await loadLogDevices();
+  await loadClientLogs();
+  toast("已清空该设备日志");
+}
+
 window.addEventListener("message", (e) => {
   const msg = e.data || {};
   if (msg.type === "preview-ready") {
@@ -443,6 +556,7 @@ window.addEventListener("message", (e) => {
   "enrich-trendLimit",
   "window-width",
   "window-height",
+  "window-liveOutput",
   "window-alwaysOnTop",
   "admin-port",
 ].forEach((id) => {
@@ -454,16 +568,38 @@ window.addEventListener("message", (e) => {
     current.enrich = { ...current.enrich, ...patch.enrich };
     current.window = { ...current.window, ...patch.window };
     current.admin = { ...current.admin, ...patch.admin };
+    updateOutputStatus(current);
   });
 });
 
 $("btn-save")?.addEventListener("click", saveSettings);
 $("btn-reset")?.addEventListener("click", resetSettings);
 $("btn-push-update")?.addEventListener("click", pushUpdate);
+$("btn-refresh-logs")?.addEventListener("click", async () => {
+  await loadLogDevices();
+  await loadClientLogs();
+});
+$("btn-clear-logs")?.addEventListener("click", clearClientLogs);
+$("log-device-select")?.addEventListener("change", loadClientLogs);
+$("log-level-filter")?.addEventListener("change", loadClientLogs);
+$("log-limit")?.addEventListener("change", loadClientLogs);
+$("admin-token")?.addEventListener("input", () => {
+  loadLogDevices().then(loadClientLogs).catch(() => {});
+});
+$("admin-token")?.addEventListener("change", () => {
+  loadLogDevices().then(loadClientLogs).catch(() => {});
+});
 
 buildQuickChips();
 
 loadFontRanges()
   .then(() => loadSettings())
   .then(() => loadUpdateStatus())
+  .then(() => loadLogDevices())
+  .then(() => loadClientLogs())
   .catch(() => toast("加载设置失败", true));
+
+setInterval(() => {
+  if (!$("admin-token")?.value) return;
+  loadLogDevices().then(loadClientLogs).catch(() => {});
+}, 15000);

@@ -1,10 +1,10 @@
 /**
- * Electron 实际窗口 capturePage 像素验证：
+ * Electron renderer capturePage 像素验证（不代表抖音直播伴侣最终采集结果）：
  * node deploy/test-electron-capture.js
  */
 const path = require("path");
 const fs = require("fs");
-const { app, BrowserWindow } = require("electron");
+const { app, BrowserWindow, desktopCapturer } = require("electron");
 
 const ROOT = path.join(__dirname, "..");
 const OUT_DIR = path.join(ROOT, "ui");
@@ -52,11 +52,34 @@ async function captureMode({ width, height, liveOutput, outName }) {
   const size = image.getSize();
   const pngPath = path.join(OUT_DIR, outName);
   fs.writeFileSync(pngPath, image.toPNG());
+
+  const bounds = win.getBounds();
+  const contentSize = win.getContentSize();
+  let desktopCapturerSource = null;
+  try {
+    const sources = await desktopCapturer.getSources({
+      types: ["window"],
+      thumbnailSize: { width: contentSize[0], height: contentSize[1] },
+    });
+    const match = sources.find((s) => String(s.name).includes("票房") || s.id.includes(String(win.id)));
+    if (match) {
+      desktopCapturerSource = {
+        id: match.id,
+        name: match.name,
+        thumbnailSize: match.thumbnail?.getSize?.() || null,
+      };
+    }
+  } catch (error) {
+    desktopCapturerSource = { error: String(error?.message || error) };
+  }
+
   await win.close();
 
   return {
     mode: liveOutput ? "live-output" : "desktop-preview",
-    electronContentSize: { width, height },
+    note: "Electron native surface only; Douyin live companion still needs manual window-source verification",
+    electronContentSize: { width: contentSize[0], height: contentSize[1] },
+    windowBounds: { width: bounds.width, height: bounds.height },
     capturePagePng: { width: size.width, height: size.height },
     deviceScaleFactor: metrics.devicePixelRatio,
     viewportCss: {
@@ -66,6 +89,7 @@ async function captureMode({ width, height, liveOutput, outName }) {
       className: metrics.viewportClass,
     },
     windowInner: { width: metrics.innerWidth, height: metrics.innerHeight },
+    desktopCapturerSource,
     pngPath,
   };
 }
@@ -95,12 +119,12 @@ app.whenReady().then(async () => {
       live.viewportCss.height >= 1910;
 
     if (!liveNative) {
-      console.error("Live output capture is not native 1080x1920");
+      console.error("Electron native surface is not 1080x1920 (capturePage/viewport)");
       app.exit(1);
       return;
     }
 
-    console.log("Electron capture test OK");
+    console.log("Electron capture test OK (renderer native surface 1080x1920)");
     app.exit(0);
   } catch (error) {
     console.error(error);

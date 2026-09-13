@@ -1301,7 +1301,12 @@ async function refreshData() {
       if (status?.apiBase) config.apiBase = status.apiBase;
     } else if (e instanceof MaoyanApiError || isLoginRelatedError(e) || isSignatureRelatedError(e)) {
       if (isLoginRelatedError(e)) {
+        const code = e instanceof MaoyanApiError ? e.code : "login_required";
+        await window.overlay?.reportSessionApiError?.(code);
         await updateLoginButton(true);
+      } else if (isSignatureRelatedError(e)) {
+        const code = e instanceof MaoyanApiError ? e.code : "upstream_403";
+        await window.overlay?.reportSessionApiError?.(code);
       }
       setStatus("error", formatUserFacingError(e) || "请求失败，请稍后重试");
     } else if (!hasDisplayedData) {

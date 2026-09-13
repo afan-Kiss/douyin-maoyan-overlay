@@ -112,12 +112,14 @@ const LOGIN_ERROR_CODES = new Set([
   "login_required",
   "upstream_401",
   "401",
+  "detail_http_401",
 ]);
 
 const SIGNATURE_ERROR_CODES = new Set([
   "upstream_403",
   "sig_capture_failed",
   "403",
+  "detail_http_403",
 ]);
 
 export function applyApiErrorToCapability(code) {

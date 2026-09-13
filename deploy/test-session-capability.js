@@ -55,6 +55,24 @@ function fetchJson(url, timeoutMs = 5000) {
   });
 }
 
+function printStrictDiagnostics(result) {
+  const fields = [
+    "verifyMovieId",
+    "verifySource",
+    "boxPageLoaded",
+    "getBoxShowRequestSeen",
+    "signatureCaptured",
+    "signatureSource",
+    "detailHttpStatus",
+    "detailPayloadValid",
+    "lastVerifyError",
+  ];
+  console.error("CAPABILITY NOT READY (strict mode)");
+  for (const key of fields) {
+    console.error(`  ${key}: ${JSON.stringify(result?.[key] ?? null)}`);
+  }
+}
+
 async function main() {
   const {
     validateDetailApiPayload,
@@ -113,17 +131,22 @@ async function main() {
     }
   }
 
+  const primary = serverResult?.detailApiReady ? serverResult : browserResult;
   const summary = {
     dashboardAvailable: serverResult?.dashboardAvailable ?? browserResult?.dashboardAvailable ?? false,
     browserSessionVerified: serverResult?.browserSessionVerified ?? browserResult?.browserSessionVerified ?? false,
     signatureReady: serverResult?.signatureReady ?? browserResult?.signatureReady ?? false,
     detailApiReady: serverResult?.detailApiReady ?? browserResult?.detailApiReady ?? false,
     identityCookieExists: browserResult?.identityCookieExists ?? serverResult?.identityCookieExists ?? false,
-    verifyMovieId: serverResult?.verifyMovieId ?? browserResult?.verifyMovieId ?? null,
-    verifySource: serverResult?.verifySource ?? browserResult?.verifySource ?? null,
-    signatureCaptured: serverResult?.signatureCaptured ?? browserResult?.signatureCaptured ?? false,
-    detailHttpStatus: serverResult?.detailHttpStatus ?? browserResult?.detailHttpStatus ?? null,
-    detailPayloadValid: serverResult?.detailPayloadValid ?? browserResult?.detailPayloadValid ?? false,
+    verifyMovieId: primary?.verifyMovieId ?? null,
+    verifySource: primary?.verifySource ?? null,
+    boxPageLoaded: primary?.boxPageLoaded ?? null,
+    getBoxShowRequestSeen: primary?.getBoxShowRequestSeen ?? null,
+    signatureCaptured: primary?.signatureCaptured ?? false,
+    signatureSource: primary?.signatureSource ?? null,
+    detailHttpStatus: primary?.detailHttpStatus ?? null,
+    detailPayloadValid: primary?.detailPayloadValid ?? false,
+    lastVerifyError: primary?.lastVerifyError ?? null,
     serverUp,
   };
 
@@ -136,11 +159,13 @@ async function main() {
     summary.dashboardAvailable === true &&
     summary.browserSessionVerified === true &&
     summary.signatureReady === true &&
-    summary.detailApiReady === true;
+    summary.detailApiReady === true &&
+    summary.signatureCaptured === true &&
+    summary.detailPayloadValid === true;
 
   if (STRICT) {
     if (!allReady) {
-      console.error("CAPABILITY NOT READY (strict mode)");
+      printStrictDiagnostics(summary);
       process.exit(1);
     }
     console.log("LIVE CAPABILITY PASSED");

@@ -81,6 +81,7 @@
           <details class="inspector__section">
             <summary>窗口与账号</summary>
             <div class="inspector__section-body">
+              <p class="field-hint">默认 <strong>540 × 960</strong>（竖屏 9:16 一半，屏幕放得下）。抖音伴侣采集若要最清晰可改为 1080 × 1920</p>
               <div class="field-grid">
                 <div class="field">
                   <label>宽度（px）</label>
@@ -88,8 +89,17 @@
                 </div>
                 <div class="field">
                   <label>高度（px）</label>
-                  <input type="number" id="window-height" min="400" max="1600" />
+                  <input type="number" id="window-height" min="400" max="1920" />
                 </div>
+              </div>
+              <div class="field field--row">
+                <label for="window-liveOutput">直播输出模式（1080×1920）</label>
+                <input type="checkbox" id="window-liveOutput" />
+              </div>
+              <p class="field-hint">开启：Electron 输出 1080×1920，供抖音直播伴侣窗口采集。关闭：桌面预览 540×960。保存后立即生效，无需重启。</p>
+              <div class="field">
+                <label>当前输出状态</label>
+                <output id="window-output-status" class="mono">—</output>
               </div>
               <div class="field field--row">
                 <label>始终置顶</label>
@@ -103,6 +113,39 @@
                 <label>管理密码</label>
                 <input type="password" id="admin-password" placeholder="保存时更新密码" />
               </div>
+            </div>
+          </details>
+
+          <details class="inspector__section">
+            <summary>客户端日志</summary>
+            <div class="inspector__section-body">
+              <p class="panel-desc">各电脑客户端会自动上传运行日志，便于换机后远程排查问题。</p>
+              <div class="field">
+                <label>选择设备</label>
+                <select id="log-device-select">
+                  <option value="">加载中…</option>
+                </select>
+              </div>
+              <div class="field field-grid">
+                <div class="field">
+                  <label>级别</label>
+                  <select id="log-level-filter">
+                    <option value="">全部</option>
+                    <option value="error">错误</option>
+                    <option value="warn">警告</option>
+                    <option value="info">信息</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label>条数</label>
+                  <input type="number" id="log-limit" min="50" max="1000" step="50" value="200" />
+                </div>
+              </div>
+              <div class="log-actions">
+                <button id="btn-refresh-logs" class="btn" type="button">刷新日志</button>
+                <button id="btn-clear-logs" class="btn" type="button">清空当前设备</button>
+              </div>
+              <pre id="log-viewer" class="log-viewer">暂无日志</pre>
             </div>
           </details>
 

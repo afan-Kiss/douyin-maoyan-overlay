@@ -8,6 +8,7 @@ const {
   getSessionStatus,
   scheduleBackgroundVerify,
   forceBackgroundVerify,
+  syncSessionStatusFromServer,
   isVerifiedSession,
 } = require("./lib/session-status");
 
@@ -623,6 +624,7 @@ async function runThrottledHealthCheck(apiBase) {
       lastHealthCheckOk = alive;
       if (alive) {
         consecutiveHealthFails = 0;
+        void syncSessionStatusFromServer(apiBase);
       } else {
         consecutiveHealthFails += 1;
       }
