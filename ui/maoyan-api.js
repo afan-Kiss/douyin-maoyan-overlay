@@ -292,15 +292,17 @@ export function parseBoxNum(text, unit = "万") {
   const s = String(text).replace(/,/g, "").trim();
   if (!s || s === "--") return 0;
   if (s.includes("亿")) {
-    const n = parseFloat(s.replace("亿", ""));
+    const n = parseFloat(s.replace(/亿/g, ""));
     return Number.isFinite(n) ? n * 10000 : 0;
   }
-  if (unit === "万" || s.endsWith("万")) {
-    const n = parseFloat(s.replace("万", ""));
+  if (s.endsWith("万")) {
+    const n = parseFloat(s.replace(/万/g, ""));
     return Number.isFinite(n) ? n : 0;
   }
   const n = parseFloat(s);
-  return Number.isFinite(n) ? n : 0;
+  if (!Number.isFinite(n)) return 0;
+  if (unit === "亿") return n * 10000;
+  return n;
 }
 
 function resolveTodayBox(todayRaw, todayUnit) {
@@ -485,14 +487,17 @@ function parseBoxShowMetrics(raw, todayStr = "") {
   const prevYesterday = pickPrevSeriesPoint(series, "time_yesterday");
 
   const hourSpeed = solid && prevSolid
-    ? Math.max(0, parseFloat(solid.tooltip?.val1 || 0) - parseFloat(prevSolid.tooltip?.val1 || 0))
+    ? Math.max(0, parseBoxNum(solid.tooltip?.val1, "万") - parseBoxNum(prevSolid.tooltip?.val1, "万"))
     : 0;
 
   const yesterdayHourSpeed = yesterdaySolid && prevYesterday
-    ? Math.max(0, parseFloat(yesterdaySolid.tooltip?.val1 || 0) - parseFloat(prevYesterday.tooltip?.val1 || 0))
+    ? Math.max(
+        0,
+        parseBoxNum(yesterdaySolid.tooltip?.val1, "万") - parseBoxNum(prevYesterday.tooltip?.val1, "万"),
+      )
     : 0;
 
-  const yesterdaySamePeriod = yesterdaySolid ? parseFloat(yesterdaySolid.tooltip?.val1 || 0) : 0;
+  const yesterdaySamePeriod = yesterdaySolid ? parseBoxNum(yesterdaySolid.tooltip?.val1, "万") : 0;
 
   const rows = Array.isArray(inner.boxDatas?.[0]) ? inner.boxDatas[0] : [];
   let latest = null;

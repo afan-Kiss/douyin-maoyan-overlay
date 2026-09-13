@@ -22,10 +22,17 @@
     "test:storage-auth": "node deploy/test-storage-auth.js",
     "test:sig-errors": "node deploy/test-sig-errors.js",
     "test:api-errors": "node deploy/test-api-errors.js",
-    "test:layout-top10": "node deploy/test-layout-top10.js",
+    "test:repo-integrity": "node deploy/test-repo-integrity.js",
+    "test:layout-top5": "node deploy/test-layout-top5.js",
+    "test:stability": "node deploy/test-stability-round4.js",
+    "test:browser-state": "node deploy/test-browser-state-immutable.js",
+    "test:module-load": "node deploy/test-module-load.js",
     "test:session-capability": "node deploy/test-session-capability.js",
     "test:electron-capture": "node scripts/start-electron.js deploy/test-electron-capture.js",
     "test:admin-ranges": "node deploy/test-admin-font-ranges.js",
+    "test:enrich-interval": "node deploy/test-enrich-interval.js",
+    "test:box-units": "node deploy/test-box-units.js",
+    "test:core": "node deploy/test-core.js",
     "push:github": "node deploy/push-github.js"
   },
   "dependencies": {

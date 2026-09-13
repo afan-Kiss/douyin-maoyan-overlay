@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "revision": 0,
   "pollIntervalMs": 5000,
-  "topCount": 10,
+  "topCount": 5,
   "bubble": {
     "enabled": true,
     "color": "#ff4d4d",

@@ -1,5 +1,26 @@
 node_modules/
 dist/
+dist2/
+maoyan-overlay-review.zip
+build/icon-*.png
+build/icon.png
+
+# 本地实验文件（未纳入 release）
+deploy/ensure-trailers.js
+deploy/make-icon.js
+deploy/test-client-logs.js
+deploy/test-electron-playwright.js
+deploy/test-login-browser-relogin.js
+deploy/test-login-tab-stability.js
+deploy/test-maoyan-login-launch.js
+deploy/test-packaged-asar-playwright.js
+deploy/test-packaged-server-spawn.js
+deploy/test-startup-smoke.js
+deploy/test-update-loop-guard.js
+ui/request-guard.js
+ui/splash.css
+ui/splash.html
+ui/splash.js
 *.log
 .DS_Store
 

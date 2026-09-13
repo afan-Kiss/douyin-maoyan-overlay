@@ -4,8 +4,8 @@ import {
   injectFontStyle,
   decodeBoxFromHtml,
   enrichMovies,
-  enrichMoviesLight,
   enrichMoviesQuick,
+  parseBoxNum,
   estimateSpeedMetrics,
   resetApiSigWarm,
   getLastEnrichErrors,
@@ -233,14 +233,12 @@ function escapeHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
-function formatDelta(delta, unit = "万") {
-  if (!Number.isFinite(delta) || delta <= 0) return "";
-  if (unit === "亿" || delta >= 10000) {
-    return `+${(delta / 10000).toFixed(2)}亿`;
-  }
-  if (delta >= 100) return `+${delta.toFixed(1)}${unit}`;
-  if (delta >= 1) return `+${delta.toFixed(1)}${unit}`;
-  return `+${delta.toFixed(2)}${unit}`;
+function formatDelta(deltaWan) {
+  if (!Number.isFinite(deltaWan) || deltaWan <= 0) return "";
+  if (deltaWan >= 10000) return `+${(deltaWan / 10000).toFixed(2)}亿`;
+  if (deltaWan >= 100) return `+${deltaWan.toFixed(1)}万`;
+  if (deltaWan >= 1) return `+${deltaWan.toFixed(1)}万`;
+  return `+${deltaWan.toFixed(2)}万`;
 }
 
 function safeDecodeBox(html, unit = "万") {
@@ -249,7 +247,7 @@ function safeDecodeBox(html, unit = "万") {
   return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
-function showBoxDelta(anchorEl, delta, unit = "万") {
+function showBoxDelta(anchorEl, delta) {
   const bubble = getOverlaySettings()?.bubble;
   const minDelta = bubble?.minDelta ?? 0.001;
   if (bubble?.enabled === false) return;
@@ -260,7 +258,7 @@ function showBoxDelta(anchorEl, delta, unit = "万") {
 
   const el = document.createElement("span");
   el.className = "delta-bubble";
-  el.textContent = formatDelta(delta, unit);
+  el.textContent = formatDelta(delta);
   el.style.left = `${rect.left + rect.width * 0.5}px`;
   el.style.top = `${Math.max(8, rect.top - 6)}px`;
   deltaOverlayEl.appendChild(el);
@@ -269,15 +267,15 @@ function showBoxDelta(anchorEl, delta, unit = "万") {
   el.addEventListener("animationend", () => el.remove(), { once: true });
 }
 
-function showBoxDeltaWhenReady(anchorEl, delta, unit = "万", attempt = 0) {
+function showBoxDeltaWhenReady(anchorEl, delta, attempt = 0) {
   if (!anchorEl) return;
   const rect = anchorEl.getBoundingClientRect();
   if (rect.width || rect.height) {
-    showBoxDelta(anchorEl, delta, unit);
+    showBoxDelta(anchorEl, delta);
     return;
   }
   if (attempt < 8) {
-    requestAnimationFrame(() => showBoxDeltaWhenReady(anchorEl, delta, unit, attempt + 1));
+    requestAnimationFrame(() => showBoxDeltaWhenReady(anchorEl, delta, attempt + 1));
   }
 }
 
@@ -299,7 +297,7 @@ function computeBoxIncrease(prevAmount, prevHtml, nextHtml, unit) {
 function maybeShowBoxIncrease(anchorEl, prevAmount, prevHtml, nextHtml, unit, isNew) {
   if (isNew || !anchorEl) return;
   const delta = computeBoxIncrease(prevAmount, prevHtml, nextHtml, unit);
-  if (delta > 0) showBoxDeltaWhenReady(anchorEl, delta, unit);
+  if (delta > 0) showBoxDeltaWhenReady(anchorEl, delta);
 }
 
 function mergeDailyTableRows(prevRows, nextRows) {
@@ -431,12 +429,12 @@ function getMovieBoxAmount(movie) {
     if (decoded > 0) return decoded;
   }
   if (!isEmptyField(movie.todayBoxText)) {
-    const n = parseFloat(String(movie.todayBoxText).replace(/,/g, "").replace(/万|亿/g, ""));
-    if (Number.isFinite(n) && n > 0) return n;
+    const n = parseBoxNum(movie.todayBoxText, movie.todayUnit || "万");
+    if (n > 0) return n;
   }
   if (!isEmptyField(movie.dailyIncrease)) {
-    const n = parseFloat(String(movie.dailyIncrease).replace(/,/g, "").replace(/万|亿/g, ""));
-    if (Number.isFinite(n) && n > 0) return n;
+    const n = parseBoxNum(movie.dailyIncrease, "万");
+    if (n > 0) return n;
   }
   return 0;
 }
@@ -758,11 +756,11 @@ function updateRaceCardDelta(card, movie, isNew) {
   }
 
   if (delta > 0) {
-    const text = formatDelta(delta, unit);
+    const text = formatDelta(delta);
     deltaEl.textContent = text;
     deltaEl.classList.add("has-rise");
     lastDeltaDisplay.set(key, { text, until: Date.now() + DELTA_PERSIST_MS });
-    showBoxDeltaWhenReady(getDeltaBubbleAnchor(card), delta, unit);
+    showBoxDeltaWhenReady(getDeltaBubbleAnchor(card), delta);
     return;
   }
 
@@ -935,8 +933,8 @@ function resolveDisplayBoxAmount(html, unit, numeric, text) {
   const fromHtml = safeDecodeBox(html, unit);
   if (fromHtml > 0) return fromHtml;
   if (!isEmptyField(text)) {
-    const n = parseFloat(String(text).replace(/,/g, "").replace(/万|亿/g, ""));
-    if (Number.isFinite(n) && n > 0) return n;
+    const n = parseBoxNum(text, unit || "万");
+    if (n > 0) return n;
   }
   return 0;
 }
@@ -1052,7 +1050,7 @@ function updateNation(nation, parsed) {
     if (prevNation != null && nationAmount > prevNation) {
       const delta = nationAmount - prevNation;
       const minDelta = getOverlaySettings()?.bubble?.minDelta ?? 0.001;
-      if (delta >= minDelta) showBoxDeltaWhenReady(nationBoxEl, delta, unit);
+      if (delta >= minDelta) showBoxDeltaWhenReady(nationBoxEl, delta);
     }
     setPlainBoxValue(nationBoxEl, nationAmount);
     prevValues.set("__nation__", nationAmount);
@@ -1091,6 +1089,8 @@ function scheduleBackgroundEnrich(requestPollGen, parsed, speed) {
 
   const now = Date.now();
   const needFull = pollCount === 1 || now - lastFullEnrich >= FULL_ENRICH_INTERVAL_MS;
+  if (!needFull) return;
+
   const gen = ++enrichGeneration;
   enrichingBackground = true;
 
@@ -1102,7 +1102,7 @@ function scheduleBackgroundEnrich(requestPollGen, parsed, speed) {
         concurrency: config.enrichConcurrency || 2,
         todayStr: parsed.calendar?.today || "",
         speed,
-        trendLimit: config.trendLimit || RACE_TOP_COUNT,
+        trendLimit: RACE_TOP_COUNT,
         enableExtraApis: true,
       };
 
@@ -1186,7 +1186,7 @@ async function refreshData() {
     }
 
     const raw = await fetchDashboard(config.apiBase);
-    const parsed = parseDashboard(raw, config.topCount || RACE_TOP_COUNT);
+    const parsed = parseDashboard(raw, RACE_TOP_COUNT);
     if (!parsed.movies.length) {
       if (!hasDisplayedData) setStatus("loading", "等待票房数据…");
       return;
@@ -1264,9 +1264,9 @@ async function syncOverlaySettings() {
 
   applyOverlaySettings(settings);
   config.pollIntervalMs = settings.pollIntervalMs;
-  config.topCount = Number(settings.topCount) || RACE_TOP_COUNT;
+  config.topCount = RACE_TOP_COUNT;
   config.enrichConcurrency = settings.enrich?.concurrency;
-  config.trendLimit = settings.enrich?.trendLimit;
+  config.trendLimit = RACE_TOP_COUNT;
   FULL_ENRICH_INTERVAL_MS = settings.enrich?.fullIntervalMs || 60000;
   lastFullEnrich = 0;
   if (hasDisplayedData && pollTimer) restartPolling();
@@ -1482,7 +1482,7 @@ async function init() {
     pollIntervalMs: 5000,
     topCount: RACE_TOP_COUNT,
   };
-  config.topCount = Number(config.topCount) || RACE_TOP_COUNT;
+  config.topCount = RACE_TOP_COUNT;
 
   await syncOverlaySettings();
   window.overlay?.onSettingsChanged?.((settings) => {

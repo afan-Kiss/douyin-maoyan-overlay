@@ -3,7 +3,7 @@
   "remoteAdminUrl": "https://xiangyuzhubao.xyz/maoyan-admin",
   "updateServerUrl": "https://xiangyuzhubao.xyz",
   "pollIntervalMs": 5000,
-  "topCount": 10,
+  "topCount": 5,
   "window": {
     "width": 525,
     "height": 1080,

@@ -5,13 +5,19 @@ const {
   saveSettings,
   DEFAULT_SETTINGS,
   stripSensitiveSettings,
-  FONT_RANGES,
 } = require("./lib/settings");
+const { FONT_RANGES } = require("./lib/font-ranges");
 const {
   issueUpdateCommand,
   getPendingCommand,
   readCommandFile,
 } = require("./lib/update-command");
+const {
+  appendClientLogs,
+  listDevices,
+  readClientLogs,
+  clearClientLogs,
+} = require("./lib/client-logs-store");
 
 let server = null;
 let onChange = null;
@@ -28,10 +34,10 @@ function startAdminServer(options = {}) {
 
   onChange = options.onChange || null;
   const app = express();
-  app.use(express.json({ limit: "256kb" }));
+  app.use(express.json({ limit: "1mb" }));
   app.use((_req, res, next) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Admin-Token");
     if (_req.method === "OPTIONS") {
       res.status(204).end();
@@ -114,6 +120,50 @@ function startAdminServer(options = {}) {
 
   app.get("/api/update/status", (_req, res) => {
     res.json({ command: readCommandFile() });
+  });
+
+  app.post("/api/logs", (req, res) => {
+    try {
+      const result = appendClientLogs(req.body || {});
+      res.json(result);
+    } catch (error) {
+      res.status(400).json({ detail: error.message || "日志上传失败" });
+    }
+  });
+
+  app.get("/api/logs/devices", (req, res) => {
+    const current = loadSettings();
+    if (!checkAuth(req, current)) {
+      res.status(401).json({ detail: "管理密码错误" });
+      return;
+    }
+    res.json({ devices: listDevices() });
+  });
+
+  app.get("/api/logs", (req, res) => {
+    const current = loadSettings();
+    if (!checkAuth(req, current)) {
+      res.status(401).json({ detail: "管理密码错误" });
+      return;
+    }
+    const deviceId = String(req.query.deviceId || "");
+    const limit = Number(req.query.limit) || 200;
+    const level = String(req.query.level || "");
+    const since = Number(req.query.since) || 0;
+    res.json({
+      deviceId,
+      entries: readClientLogs(deviceId, { limit, level, since }),
+    });
+  });
+
+  app.delete("/api/logs", (req, res) => {
+    const current = loadSettings();
+    if (!checkAuth(req, current)) {
+      res.status(401).json({ detail: "管理密码错误" });
+      return;
+    }
+    const deviceId = String(req.query.deviceId || req.body?.deviceId || "");
+    res.json(clearClientLogs(deviceId));
   });
 
   const settings = loadSettings();

@@ -82,19 +82,23 @@ function parsePx(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
-async function main() {
+async function launchBrowser() {
   const chromePath = resolveChrome();
-  if (!chromePath) {
-    console.log("SKIP: Chrome not found for layout test");
-    process.exit(0);
+  const launchOpts = { headless: true, args: ["--no-sandbox", "--disable-gpu"] };
+  if (chromePath) {
+    return chromium.launch({ ...launchOpts, executablePath: chromePath });
   }
+  try {
+    return await chromium.launch(launchOpts);
+  } catch (error) {
+    console.log(`SKIP: Chrome not found for layout test (${error.message || error})`);
+    process.exit(2);
+  }
+}
 
+async function main() {
   const { server, baseUrl } = await startStaticServer(UI_DIR);
-  const browser = await chromium.launch({
-    executablePath: chromePath,
-    headless: true,
-    args: ["--no-sandbox", "--disable-gpu"],
-  });
+  const browser = await launchBrowser();
 
   try {
     const page = await browser.newPage({ viewport: { width: 1080, height: 1920 } });

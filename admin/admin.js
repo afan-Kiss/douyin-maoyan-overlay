@@ -197,7 +197,8 @@ function updateOutputStatus(settings) {
 
 function fillAdvancedFields(settings) {
   $("pollIntervalMs").value = settings.pollIntervalMs;
-  $("topCount").value = settings.topCount;
+  const topCountEl = $("topCount-display");
+  if (topCountEl) topCountEl.textContent = "固定 5 部";
   $("enrich-fullIntervalMs").value = settings.enrich.fullIntervalMs;
   $("enrich-trendLimit").value = settings.enrich.trendLimit;
   $("window-width").value = settings.window.width;
@@ -219,7 +220,7 @@ function fillForm(settings) {
 function readAdvancedFields() {
   const patch = {
     pollIntervalMs: Number($("pollIntervalMs").value),
-    topCount: Number($("topCount").value),
+    topCount: 5,
     enrich: {
       fullIntervalMs: Number($("enrich-fullIntervalMs").value),
       trendLimit: Number($("enrich-trendLimit").value),
@@ -553,7 +554,6 @@ window.addEventListener("message", (e) => {
 
 [
   "pollIntervalMs",
-  "topCount",
   "enrich-fullIntervalMs",
   "enrich-trendLimit",
   "window-width",
