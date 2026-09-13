@@ -193,22 +193,56 @@ async function main() {
         issues.push("stage 产生纵向滚动/裁切风险");
       }
 
+      const rowRectOf = (el, container) => {
+        const r = el.getBoundingClientRect();
+        const c = container.getBoundingClientRect();
+        return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, cLeft: c.left, cRight: c.right, cTop: c.top, cBottom: c.bottom };
+      };
+
       for (const row of items.slice(3)) {
+        const rowRect = row.getBoundingClientRect();
         for (const em of row.querySelectorAll(".race-row__metric em")) {
           const size = parseFloat(getComputedStyle(em).fontSize);
           fontSamples.push({ rank: row.dataset.rank, role: "label", px: size });
           if (size < 18) issues.push(`TOP${row.dataset.rank} label=${size}px < 18px`);
+          const box = rowRectOf(em, row);
+          if (box.right > box.cRight + 1 || box.left < box.cLeft - 1) {
+            issues.push(`TOP${row.dataset.rank} label 横向溢出 row`);
+          }
         }
         for (const strong of row.querySelectorAll(".race-row__metric strong")) {
           const size = parseFloat(getComputedStyle(strong).fontSize);
           fontSamples.push({ rank: row.dataset.rank, role: "value", px: size });
           if (size < 24) issues.push(`TOP${row.dataset.rank} value=${size}px < 24px`);
+          const strongOverflow = strong.scrollWidth > strong.clientWidth + 1;
+          const strongStyle = getComputedStyle(strong);
+          if (strongOverflow && strongStyle.textOverflow !== "ellipsis") {
+            issues.push(`TOP${row.dataset.rank} value 文本被裁切 scroll>${strong.clientWidth}`);
+          }
+          const box = rowRectOf(strong, row);
+          if (box.right > box.cRight + 1) issues.push(`TOP${row.dataset.rank} value 横向溢出 row`);
         }
         const title = row.querySelector(".race-row__title");
         if (title) {
           const size = parseFloat(getComputedStyle(title).fontSize);
           fontSamples.push({ rank: row.dataset.rank, role: "title", px: size });
           if (size < 26) issues.push(`TOP${row.dataset.rank} title=${size}px < 26px`);
+          const titleOverflow = title.scrollWidth > title.clientWidth + 1;
+          const titleStyle = getComputedStyle(title);
+          if (titleOverflow && titleStyle.textOverflow !== "ellipsis" && titleStyle.overflow !== "hidden") {
+            issues.push(`TOP${row.dataset.rank} title 文本被裁切`);
+          }
+          const box = rowRectOf(title, row);
+          if (box.right > box.cRight + 1 || box.left < box.cLeft - 1) {
+            issues.push(`TOP${row.dataset.rank} title 横向溢出 row`);
+          }
+        }
+        const metrics = row.querySelector(".race-row__metrics");
+        if (metrics && metrics.scrollWidth > metrics.clientWidth + 1) {
+          issues.push(`TOP${row.dataset.rank} metrics 区域被裁切`);
+        }
+        if (rowRect.bottom > 1920.5 || rowRect.top < -1) {
+          issues.push(`TOP${row.dataset.rank} row 外壳越界`);
         }
       }
 

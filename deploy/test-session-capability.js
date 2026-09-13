@@ -1,6 +1,7 @@
 /**
  * 登录/会话能力 integration test：node deploy/test-session-capability.js
- * 无 Chrome 或 browser_state 时自动 SKIP，不让 CI 失败。
+ * CI 模式：无 Chrome/browser_state 时 SKIP。
+ * 严格模式：CAPABILITY_STRICT=1，要求四项能力全部为 true。
  */
 const assert = require("assert");
 const fs = require("fs");
@@ -10,17 +11,16 @@ const http = require("http");
 const ROOT = path.join(__dirname, "..");
 const DATA_DIR = process.env.MAOYAN_DATA_DIR || path.join(ROOT, "data");
 const STORAGE_STATE = path.join(DATA_DIR, "browser_state.json");
+const STRICT = process.env.CAPABILITY_STRICT === "1";
 
 const CHROME_CANDIDATES = [
   "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
   "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
   "C:\\Users\\Administrator\\AppData\\Local\\Google\\Chrome\\Bin\\chrome.exe",
-];
+  process.env.CHROME_PATH,
+].filter(Boolean);
 
 function resolveChrome() {
-  if (process.env.CHROME_PATH && fs.existsSync(process.env.CHROME_PATH)) {
-    return process.env.CHROME_PATH;
-  }
   return CHROME_CANDIDATES.find((p) => fs.existsSync(p));
 }
 
@@ -60,10 +60,12 @@ async function main() {
     validateDetailApiPayload,
     validateDashboardPayload,
     verifyCapabilitiesInContext,
+    pickVerifyMovieFromDashboard,
   } = require("../lib/session-capability");
 
   assert.strictEqual(typeof validateDetailApiPayload, "function");
   assert.strictEqual(typeof validateDashboardPayload, "function");
+  assert.strictEqual(typeof pickVerifyMovieFromDashboard, "function");
 
   const chromePath = resolveChrome();
   const hasState = fs.existsSync(STORAGE_STATE);
@@ -104,7 +106,7 @@ async function main() {
   let serverResult = null;
   if (serverUp) {
     try {
-      const resp = await fetchJson(`${apiBase}/api/verify-capabilities`, 60000);
+      const resp = await fetchJson(`${apiBase}/api/verify-capabilities?force=1`, 120000);
       serverResult = resp.data;
     } catch (error) {
       serverResult = { error: error.message };
@@ -113,10 +115,15 @@ async function main() {
 
   const summary = {
     dashboardAvailable: serverResult?.dashboardAvailable ?? browserResult?.dashboardAvailable ?? false,
-    browserSessionVerified: browserResult?.browserSessionVerified ?? false,
+    browserSessionVerified: serverResult?.browserSessionVerified ?? browserResult?.browserSessionVerified ?? false,
     signatureReady: serverResult?.signatureReady ?? browserResult?.signatureReady ?? false,
     detailApiReady: serverResult?.detailApiReady ?? browserResult?.detailApiReady ?? false,
-    identityCookieExists: browserResult?.identityCookieExists ?? false,
+    identityCookieExists: browserResult?.identityCookieExists ?? serverResult?.identityCookieExists ?? false,
+    verifyMovieId: serverResult?.verifyMovieId ?? browserResult?.verifyMovieId ?? null,
+    verifySource: serverResult?.verifySource ?? browserResult?.verifySource ?? null,
+    signatureCaptured: serverResult?.signatureCaptured ?? browserResult?.signatureCaptured ?? false,
+    detailHttpStatus: serverResult?.detailHttpStatus ?? browserResult?.detailHttpStatus ?? null,
+    detailPayloadValid: serverResult?.detailPayloadValid ?? browserResult?.detailPayloadValid ?? false,
     serverUp,
   };
 
@@ -124,7 +131,28 @@ async function main() {
 
   assert.ok(typeof browserResult?.detailApiReady === "boolean");
   assert.ok(typeof browserResult?.dashboardAvailable === "boolean");
-  console.log("ALL PASSED (session capability integration)");
+
+  const allReady =
+    summary.dashboardAvailable === true &&
+    summary.browserSessionVerified === true &&
+    summary.signatureReady === true &&
+    summary.detailApiReady === true;
+
+  if (STRICT) {
+    if (!allReady) {
+      console.error("CAPABILITY NOT READY (strict mode)");
+      process.exit(1);
+    }
+    console.log("LIVE CAPABILITY PASSED");
+    process.exit(0);
+  }
+
+  if (!allReady) {
+    console.log("CAPABILITY NOT READY");
+    process.exit(0);
+  }
+
+  console.log("LIVE CAPABILITY PASSED");
 }
 
 main().catch((error) => {

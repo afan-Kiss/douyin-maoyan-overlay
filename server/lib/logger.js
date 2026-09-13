@@ -2,9 +2,19 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { STORAGE_STATE, getChromeExecutable } from "./config.js";
+import { STORAGE_STATE, DATA_DIR, getChromeExecutable } from "./config.js";
 import { createRequire } from "module";
-import { getLastCapabilityVerify, getSignatureTTLStatus, isLoginInProgress } from "./capability-verify.js";
+import {
+  getLastCapabilityVerify,
+  getSignatureTTLStatus,
+  getLastSignatureSuccessAt,
+  getLastSignatureError,
+  getLastDashboardSuccessAt,
+  markSignatureSuccess,
+  markSignatureFailure,
+  markDashboardSuccess as recordDashboardSuccess,
+} from "./capability-state.js";
+import { manager } from "./sigManager.js";
 
 const require = createRequire(import.meta.url);
 const { storageFileExists, storageFileLooksLoggedIn } = require("../../lib/storage-auth.js");
@@ -25,9 +35,6 @@ const API_NAMES = {
   unknown: "未知接口",
 };
 
-let lastSignatureSuccessAt = null;
-let lastSignatureError = null;
-let lastDashboardSuccessAt = null;
 
 function getDataDir() {
   return process.env.MAOYAN_DATA_DIR || path.join(__dirname, "..", "..", "data");
@@ -305,8 +312,7 @@ class Logger {
     const ctx = this._ctx();
 
     if (ok) {
-      lastSignatureSuccessAt = new Date().toISOString();
-      lastSignatureError = null;
+      markSignatureSuccess(detail);
       const summary = detail ? `用时${ms}秒，${detail}` : `用时${ms}秒`;
       if (ctx) {
         ctx.setSig(`capture(${summary})`);
@@ -314,7 +320,7 @@ class Logger {
         this._emit(`签名更新完成，${summary}`);
       }
     } else {
-      lastSignatureError = detail || "签名更新失败";
+      markSignatureFailure(detail || "签名更新失败");
       for (const line of this._sigBuffer) {
         this._emit(`签名：${line}`);
       }
@@ -333,7 +339,7 @@ class Logger {
   }
 
   markDashboardSuccess() {
-    lastDashboardSuccessAt = new Date().toISOString();
+    recordDashboardSuccess();
   }
 
   start(port) {
@@ -462,8 +468,14 @@ export function isNonRetryableSigError(error) {
   return NON_RETRYABLE_SIG_ERRORS.has(msg);
 }
 
-export function getLastSignatureSuccessAt() {
-  return lastSignatureSuccessAt;
+export { getLastSignatureSuccessAt, getLastSignatureError, getLastDashboardSuccessAt };
+
+function isLoginInProgress() {
+  try {
+    return fs.existsSync(path.join(DATA_DIR, "login.lock"));
+  } catch {
+    return false;
+  }
 }
 
 export function buildDiagnostics() {
@@ -474,7 +486,7 @@ export function buildDiagnostics() {
   const identityCookieExists = storageFileLooksLoggedIn(STORAGE_STATE);
   const loginInProgress = isLoginInProgress();
   const verify = getLastCapabilityVerify();
-  const sigStatus = getSignatureTTLStatus();
+  const sigStatus = getSignatureTTLStatus(manager.hasFreshSignature());
 
   return {
     serviceReady: true,
@@ -491,13 +503,20 @@ export function buildDiagnostics() {
     detailApiAvailable: verify.detailApiReady,
     detailApiReady: verify.detailApiReady,
     dashboardAvailable: verify.dashboardAvailable,
+    verifyMovieId: verify.verifyMovieId,
+    verifyMovieName: verify.verifyMovieName,
+    verifySource: verify.verifySource,
+    signatureCaptured: verify.signatureCaptured,
+    signatureSource: verify.signatureSource,
+    detailHttpStatus: verify.detailHttpStatus,
+    detailPayloadValid: verify.detailPayloadValid,
     loginInProgress,
     browserLaunchAvailable: chromePathValid && !loginInProgress,
     lastVerifyAt: verify.lastVerifyAt,
     lastVerifyError: verify.lastVerifyError,
-    lastSignatureSuccessAt,
-    lastSignatureError,
-    lastDashboardSuccessAt,
+    lastSignatureSuccessAt: getLastSignatureSuccessAt(),
+    lastSignatureError: getLastSignatureError(),
+    lastDashboardSuccessAt: getLastDashboardSuccessAt(),
   };
 }
 

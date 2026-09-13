@@ -37,6 +37,9 @@ export function applyOverlaySettings(settings) {
   root.style.setProperty("--font-region", `${f.region || 18}px`);
   root.style.setProperty("--font-metric-label", `${f.metricLabel || 12}px`);
   root.style.setProperty("--font-metric-value", `${f.metricValue || 14}px`);
+  root.style.setProperty("--font-row-title", `${Math.max(Math.round(movieTitle * 0.67), 26)}px`);
+  root.style.setProperty("--font-row-label", `${Math.max(f.metricLabel || 12, 18)}px`);
+  root.style.setProperty("--font-row-value", `${Math.max(f.metricValue || 14, 24)}px`);
   root.style.setProperty("--font-table", `${f.table || 12}px`);
   root.style.setProperty("--font-delta", `${f.metricValue || 14}px`);
   root.style.setProperty("--font-footer", `${f.footer || 13}px`);

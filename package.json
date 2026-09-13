@@ -24,6 +24,7 @@
     "test:api-errors": "node deploy/test-api-errors.js",
     "test:layout-top10": "node deploy/test-layout-top10.js",
     "test:session-capability": "node deploy/test-session-capability.js",
+    "test:electron-capture": "node scripts/start-electron.js deploy/test-electron-capture.js",
     "test:admin-ranges": "node deploy/test-admin-font-ranges.js",
     "push:github": "node deploy/push-github.js"
   },

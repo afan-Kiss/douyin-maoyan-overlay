@@ -1,114 +1,101 @@
 import fs from "fs";
 import path from "path";
 import { createRequire } from "module";
-import { STORAGE_STATE, SIG_TTL_SECONDS, DATA_DIR } from "./config.js";
+import { DATA_DIR } from "./config.js";
 import { manager } from "./sigManager.js";
-import { log, getLastSignatureSuccessAt } from "./logger.js";
+import {
+  getLastCapabilityVerify,
+  setLastCapabilityVerify,
+  getSignatureTTLStatus,
+} from "./capability-state.js";
 
 const require = createRequire(import.meta.url);
 const {
-  storageFileExists,
-  storageFileLooksLoggedIn,
-  validateDetailApiPayload,
+  verifyCapabilitiesInContext,
   validateDashboardPayload,
-  VERIFY_MOVIE_ID,
+  pickVerifyMovieFromDashboard,
 } = require("../../lib/session-capability.js");
-
-let lastVerifyResult = {
-  storageStateExists: false,
-  identityCookieExists: false,
-  accountLoggedIn: false,
-  browserSessionReady: false,
-  browserSessionVerified: false,
-  signatureReady: false,
-  detailApiReady: false,
-  dashboardAvailable: false,
-  lastVerifyAt: null,
-  lastVerifyError: null,
-};
 
 let verifyInflight = null;
 
-function readFileFlags() {
-  return {
-    storageStateExists: storageFileExists(STORAGE_STATE),
-    identityCookieExists: storageFileLooksLoggedIn(STORAGE_STATE),
-  };
-}
-
-export function getSignatureTTLStatus() {
-  const lastAt = getLastSignatureSuccessAt();
-  if (!lastAt) {
-    return { signatureReady: manager.hasFreshSignature(), ageSeconds: null };
-  }
-  const ageSeconds = Math.round((Date.now() - new Date(lastAt).getTime()) / 1000);
-  const withinTtl = ageSeconds >= 0 && ageSeconds < SIG_TTL_SECONDS;
-  return {
-    signatureReady: withinTtl || manager.hasFreshSignature(),
-    ageSeconds,
-    withinTtl,
-  };
-}
-
-export function getLastCapabilityVerify() {
-  return { ...lastVerifyResult, ...readFileFlags() };
+export function getLastCapabilityVerifyResult() {
+  return getLastCapabilityVerify();
 }
 
 export async function runCapabilityVerify(options = {}) {
   if (verifyInflight && !options.force) return verifyInflight;
 
   verifyInflight = (async () => {
-    const flags = readFileFlags();
-    const sigStatus = getSignatureTTLStatus();
+    const base = getLastCapabilityVerify();
+    const sigStatus = getSignatureTTLStatus(manager.hasFreshSignature());
     const result = {
-      ...flags,
+      ...base,
       accountLoggedIn: false,
-      browserSessionReady: flags.identityCookieExists,
+      browserSessionReady: base.identityCookieExists,
       browserSessionVerified: false,
       signatureReady: sigStatus.signatureReady,
       detailApiReady: false,
       dashboardAvailable: false,
+      verifyMovieId: null,
+      verifyMovieName: null,
+      verifySource: null,
+      signatureCaptured: false,
+      signatureSource: null,
+      detailHttpStatus: null,
+      detailPayloadValid: false,
       lastVerifyAt: new Date().toISOString(),
       lastVerifyError: null,
     };
 
-    if (!flags.storageStateExists) {
+    if (!base.storageStateExists) {
       result.lastVerifyError = "storage_state_missing";
-      lastVerifyResult = result;
-      return result;
+      return setLastCapabilityVerify(result);
     }
 
+    let dashboardData = null;
+    let verifyPick = null;
     try {
-      const detailRaw = await manager.fetch(VERIFY_MOVIE_ID, 1, { forceRefresh: false });
-      result.detailApiReady = validateDetailApiPayload(detailRaw);
-      result.browserSessionVerified = result.detailApiReady;
-      if (result.detailApiReady) {
-        result.signatureReady = true;
-        result.browserSessionReady = true;
+      dashboardData = await manager.fetchDashboardMovie({}, { forceRefresh: false });
+      result.dashboardAvailable = validateDashboardPayload(dashboardData);
+      verifyPick = pickVerifyMovieFromDashboard(dashboardData);
+    } catch {
+      result.dashboardAvailable = false;
+      dashboardData = null;
+      verifyPick = null;
+    }
+
+    let browser;
+    let context;
+    try {
+      ({ browser, context } = await manager.launchBrowserContext());
+      const verified = await verifyCapabilitiesInContext(context, {
+        checkDashboard: !result.dashboardAvailable,
+        dashboardData,
+        movieId: verifyPick?.verifyMovieId,
+        verifyMovieName: verifyPick?.verifyMovieName,
+        verifySource: verifyPick?.verifySource,
+      });
+      Object.assign(result, verified);
+      if (result.dashboardAvailable) {
+        result.dashboardAvailable = true;
       }
     } catch (error) {
       result.detailApiReady = false;
       result.browserSessionVerified = false;
-      result.lastVerifyError = String(error?.message || error || "detail_api_failed");
-    }
-
-    try {
-      const dashRaw = await manager.fetchDashboardMovie({}, { forceRefresh: false });
-      result.dashboardAvailable = validateDashboardPayload(dashRaw);
-      if (result.dashboardAvailable && !result.browserSessionReady) {
-        result.browserSessionReady = true;
+      result.signatureReady = false;
+      result.lastVerifyError = String(error?.message || error || "verify_failed");
+    } finally {
+      if (browser || context) {
+        await manager.closeBrowserSession(browser, context);
       }
-    } catch {
-      result.dashboardAvailable = false;
     }
 
-    result.accountLoggedIn = Boolean(flags.identityCookieExists && result.detailApiReady);
+    result.accountLoggedIn = Boolean(result.identityCookieExists && result.detailApiReady);
     if (!result.detailApiReady && !result.lastVerifyError) {
       result.lastVerifyError = "detail_api_unavailable";
     }
 
-    lastVerifyResult = result;
-    return result;
+    return setLastCapabilityVerify(result);
   })().finally(() => {
     verifyInflight = null;
   });

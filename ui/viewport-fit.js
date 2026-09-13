@@ -59,7 +59,10 @@ export function fitDesignViewport() {
 
   clearViewportFitStyles(viewport);
 
-  if (near(vw, DESIGN_W) && near(vh, DESIGN_H)) {
+  const params = new URLSearchParams(window.location.search);
+  const forceNative = params.get("liveOutput") === "1";
+
+  if (forceNative || (near(vw, DESIGN_W) && near(vh, DESIGN_H))) {
     viewport.classList.add("viewport--native");
     document.documentElement.style.setProperty("--viewport-scale", "1");
     return;

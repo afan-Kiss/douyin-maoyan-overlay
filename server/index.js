@@ -11,6 +11,7 @@ import {
 } from "./lib/config.js";
 import { log, requestLogMiddleware, explainError, buildDiagnostics } from "./lib/logger.js";
 import { runCapabilityVerify } from "./lib/capability-verify.js";
+import { applyApiErrorToCapability } from "./lib/capability-state.js";
 import { isPortListening } from "./lib/port.js";
 import { UpstreamError, manager } from "./lib/sigManager.js";
 
@@ -156,6 +157,7 @@ function buildApiErrorPayload(e) {
 function sendApiError(res, e) {
   const payload = buildApiErrorPayload(e);
   log.reqFail(payload.code, payload.detail);
+  applyApiErrorToCapability(payload.code);
   res.status(payload.status).json({
     code: payload.code,
     detail: payload.detail,
@@ -359,9 +361,10 @@ async function main() {
     res.json(buildDiagnostics());
   });
 
-  app.get("/api/verify-capabilities", async (_req, res) => {
+  app.get("/api/verify-capabilities", async (req, res) => {
     try {
-      const result = await runCapabilityVerify();
+      const force = req.query.force === "1" || req.query.force === "true";
+      const result = await runCapabilityVerify({ force });
       res.json(result);
     } catch (e) {
       sendApiError(res, e);

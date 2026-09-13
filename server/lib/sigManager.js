@@ -22,6 +22,7 @@ import {
   wukongSessionCachePath,
 } from "./config.js";
 import { log, explainError, isNonRetryableSigError } from "./logger.js";
+import { applyApiErrorToCapability } from "./capability-state.js";
 import {
   buildMygsig,
   generateSignKey,
@@ -782,6 +783,7 @@ export class SigManager {
         throw lastError;
       }
       log.sigFail("页面没返回有效签名，请检查网络或先登录");
+      applyApiErrorToCapability("sig_capture_failed");
       const err = new Error("sig_capture_failed");
       if (lastError) err.cause = lastError;
       throw err;
@@ -911,8 +913,10 @@ export class SigManager {
       if (resp.status === 401 || resp.status === 403) {
         if (resp.status === 403) {
           log.denied();
+          applyApiErrorToCapability("upstream_403");
         } else {
           log.reqTag("401-retry");
+          applyApiErrorToCapability("upstream_401");
         }
         this.cache.delete(key);
         try {
@@ -1249,8 +1253,10 @@ export class SigManager {
     if (resp.status === 401 || resp.status === 403) {
       if (resp.status === 403) {
         log.denied();
+        applyApiErrorToCapability("upstream_403");
       } else {
         log.reqTag("401-retry");
+        applyApiErrorToCapability("upstream_401");
       }
       entry = await recaptureEntry();
       resp = await this.requestWuKongUpstream(apiPath, params, entry);

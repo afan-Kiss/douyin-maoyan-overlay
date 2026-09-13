@@ -111,9 +111,16 @@ function applyWindowSettings(win) {
   const { resolveWindowSize } = getMods().windowSize;
   const overlay = loadSettings();
   const w = overlay.window || {};
-  const size = resolveWindowSize(w.width, w.height, screen.getDisplayMatching(win.getBounds()));
+  const size = resolveWindowSize(w.width, w.height, screen.getDisplayMatching(win.getBounds()), {
+    liveOutput: w.liveOutput === true,
+  });
   win.setContentSize(size.width, size.height);
   win.setAlwaysOnTop(false);
+  win.webContents.send("window-mode-changed", {
+    liveOutput: size.liveOutput === true,
+    contentWidth: size.width,
+    contentHeight: size.height,
+  });
 }
 
 function notifySettingsChanged() {
@@ -135,7 +142,9 @@ function createWindow({ onReadyToShow } = {}) {
   const { confirmUpdateHealth } = getMods().update;
   const config = loadConfig();
   const winCfg = config.window || {};
-  const size = resolveWindowSize(winCfg.width, winCfg.height);
+  const size = resolveWindowSize(winCfg.width, winCfg.height, null, {
+    liveOutput: winCfg.liveOutput === true,
+  });
 
   mainWindow = new BrowserWindow({
     width: size.width,
@@ -310,6 +319,13 @@ function registerIpcHandlers() {
   });
   const { onLoginResult } = require("./lib/maoyan-login");
   onLoginResult((result) => {
+    if (result?.ok && result?.detailApiReady) {
+      const { getApiStatus } = getMods().maoyan;
+      const { forceBackgroundVerify } = require("./lib/session-status");
+      void getApiStatus().then((status) => {
+        if (status.apiBase) forceBackgroundVerify(status.apiBase, require("./maoyan-service").getDataDir());
+      });
+    }
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("login-result", result);
     }

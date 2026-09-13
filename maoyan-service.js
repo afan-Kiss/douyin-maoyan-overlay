@@ -7,6 +7,7 @@ const { getRealExecutablePath } = require("./lib/update/paths");
 const {
   getSessionStatus,
   scheduleBackgroundVerify,
+  forceBackgroundVerify,
   isVerifiedSession,
 } = require("./lib/session-status");
 
