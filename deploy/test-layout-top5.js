@@ -234,6 +234,16 @@ async function renderAndInspect(page, movies, nation) {
     sample(follow[0]?.querySelector(".race-stat em"), "label");
     sample(follow[0]?.querySelector(".race-stat strong"), "value");
 
+    const bubbleHeights = {};
+    for (const item of items) {
+      const rank = item.dataset.rank;
+      const bubble = item.querySelector(".race-card__delta-bubble.is-visible");
+      if (bubble) {
+        bubbleHeights[rank] = bubble.getBoundingClientRect().height;
+        sample(bubble, rank === "1" ? "rank1Bubble" : "followBubble");
+      }
+    }
+
     return {
       itemCount: items.length,
       scrollWidth: document.documentElement.scrollWidth,
@@ -244,6 +254,7 @@ async function renderAndInspect(page, movies, nation) {
       rank1Height: rank1?.getBoundingClientRect().height || 0,
       followHeights: follow.map((el) => el.getBoundingClientRect().height),
       fonts,
+      bubbleHeights,
       issues,
     };
   });
@@ -259,7 +270,21 @@ async function main() {
       window.overlay = {
         getConfig: async () => ({ apiBase: "http://127.0.0.1:8765", pollIntervalMs: 60000, topCount: 5 }),
         getOverlaySettings: async () => ({
-          bubble: { enabled: true, minDelta: 0.001, fontSize: 18, durationMs: 3000, floatHeight: 44 },
+          bubble: { enabled: true, minDelta: 0.001, fontSize: 26, durationMs: 3000, floatHeight: 44 },
+          fonts: {
+            heroTitle: 60,
+            heroSubtitle: 23,
+            nationBox: 32,
+            nationLabel: 21,
+            movieTitle: 46,
+            movieTitleFollow: 37,
+            movieBoxRank1: 52,
+            movieBoxFollow: 41,
+            movieRank: 25,
+            metricLabel: 22,
+            metricValue: 29,
+            metricValueRank1: 32,
+          },
         }),
         onSettingsChanged: () => () => {},
         getApiStatus: async () => ({ ready: false }),
@@ -287,6 +312,20 @@ async function main() {
     assert.ok(reportRich.heroHeight <= 320, `hero height=${reportRich.heroHeight}`);
     assert.strictEqual(reportRich.issues.length, 0, reportRich.issues.join("; "));
     assert.strictEqual(reportSparse.issues.length, 0, `sparse: ${reportSparse.issues.join("; ")}`);
+
+    const f = reportRich.fonts;
+    assert.ok(f.rank1Box >= 46, `rank1Box=${f.rank1Box}`);
+    assert.ok(f.followBox >= 38, `followBox=${f.followBox}`);
+    assert.ok(f.rank1Title >= 42, `rank1Title=${f.rank1Title}`);
+    assert.ok(f.followTitle >= 35, `followTitle=${f.followTitle}`);
+    assert.ok(f.value >= 27, `metricValue=${f.value}`);
+    assert.ok((f.rank1Bubble || 0) >= 26, `rank1Bubble=${f.rank1Bubble}`);
+    assert.ok((f.followBubble || 0) >= 23, `followBubble=${f.followBubble}`);
+    assert.ok((reportRich.bubbleHeights["1"] || 0) >= 44, `rank1 bubble height=${reportRich.bubbleHeights["1"]}`);
+    for (const rank of ["2", "3", "4", "5"]) {
+      const h = reportRich.bubbleHeights[rank];
+      if (h) assert.ok(h >= 38, `rank${rank} bubble height=${h}`);
+    }
 
     const wanDisplay = await page.evaluate(() => {
       const { renderList, updateNation } = window.__racePreview;
@@ -332,6 +371,7 @@ async function main() {
       gapToFooter: reportRich.gapToFooter,
       scrollWidth: reportRich.scrollWidth,
       fonts: reportRich.fonts,
+      bubbleHeights: reportRich.bubbleHeights,
     });
   } finally {
     await browser.close();

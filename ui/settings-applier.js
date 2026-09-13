@@ -12,8 +12,17 @@ export function applyOverlaySettings(settings) {
   const b = settings.bubble || {};
   const f = settings.fonts || {};
   const c = settings.colors || {};
-  const movieTitle = f.movieTitle || 24;
-  const nationBox = f.nationBox || 32;
+  const heroTitle = f.heroTitle ?? 60;
+  const heroSub = f.heroSubtitle ?? 23;
+  const nationBox = f.nationBox ?? 32;
+  const nationLabel = f.nationLabel ?? 21;
+  const movieTitleRank1 = f.movieTitleRank1 ?? f.movieTitle ?? 46;
+  const movieTitleFollow = f.movieTitleFollow ?? Math.round((f.movieTitle ?? 37) * 1);
+  const movieBoxRank1 = f.movieBoxRank1 ?? 52;
+  const movieBoxFollow = f.movieBoxFollow ?? 41;
+  const metricLabel = f.metricLabel ?? 22;
+  const metricValue = f.metricValue ?? 29;
+  const metricValueRank1 = f.metricValueRank1 ?? 32;
 
   root.style.setProperty("--bubble-color", b.color || "#ffd27a");
   root.style.setProperty(
@@ -28,19 +37,20 @@ export function applyOverlaySettings(settings) {
   root.style.setProperty("--bubble-float", `${b.floatHeight || 44}px`);
 
   root.style.setProperty("--font-sans", '"HarmonyOS Sans SC", "HarmonyOS Sans", "PingFang SC", "Microsoft YaHei", sans-serif');
-  root.style.setProperty("--font-hero-title", `${f.heroTitle || 56}px`);
-  root.style.setProperty("--font-hero-sub", `${f.heroSubtitle || 18}px`);
+  root.style.setProperty("--font-hero-title", `${heroTitle}px`);
+  root.style.setProperty("--font-hero-sub", `${heroSub}px`);
   root.style.setProperty("--font-nation-box", `${nationBox}px`);
-  root.style.setProperty("--font-nation-label", `${f.nationLabel || 14}px`);
-  root.style.setProperty("--font-movie-title", `${movieTitle}px`);
-  root.style.setProperty("--font-movie-title-rank1", `${movieTitle}px`);
-  root.style.setProperty("--font-movie-box-rank1", `${Math.round(movieTitle * 0.92)}px`);
-  root.style.setProperty("--font-movie-title-follow", `${Math.round(movieTitle * 0.76)}px`);
-  root.style.setProperty("--font-movie-box-follow", `${Math.round(movieTitle * 0.68)}px`);
-  root.style.setProperty("--font-movie-rank", `${f.movieRank || 32}px`);
-  root.style.setProperty("--font-region", `${f.region || 18}px`);
-  root.style.setProperty("--font-metric-label", `${f.metricLabel || 22}px`);
-  root.style.setProperty("--font-metric-value", `${f.metricValue || 26}px`);
+  root.style.setProperty("--font-nation-label", `${nationLabel}px`);
+  root.style.setProperty("--font-movie-title", `${movieTitleFollow}px`);
+  root.style.setProperty("--font-movie-title-rank1", `${movieTitleRank1}px`);
+  root.style.setProperty("--font-movie-box-rank1", `${movieBoxRank1}px`);
+  root.style.setProperty("--font-movie-title-follow", `${movieTitleFollow}px`);
+  root.style.setProperty("--font-movie-box-follow", `${movieBoxFollow}px`);
+  root.style.setProperty("--font-movie-rank", `${f.movieRank ?? 25}px`);
+  root.style.setProperty("--font-region", `${f.region ?? 18}px`);
+  root.style.setProperty("--font-metric-label", `${metricLabel}px`);
+  root.style.setProperty("--font-metric-value", `${metricValue}px`);
+  root.style.setProperty("--font-metric-value-rank1", `${metricValueRank1}px`);
   root.style.setProperty("--font-table", `${f.table || 12}px`);
   root.style.setProperty("--font-delta", `${f.metricValue || 14}px`);
   root.style.setProperty("--font-footer", `${f.footer || 13}px`);

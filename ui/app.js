@@ -716,7 +716,7 @@ function buildCardStatDefs(movie, isRank1) {
   const core = CORE_STAT_DEFS.map((def) => ({ ...def, always: true }));
   let extras;
   if (isRank1) {
-    extras = EXTRA_STAT_DEFS.slice(0, 3);
+    extras = EXTRA_STAT_DEFS.slice(0, 2);
   } else {
     extras = EXTRA_STAT_DEFS.filter((def) => !isEmptyField(movie[def.key])).slice(0, 2);
   }
@@ -765,7 +765,7 @@ function buildRaceCard(movie) {
   card.dataset.movieId = String(movie.movieId);
   card.dataset.rank = String(movie.rank);
   card.innerHTML = raceCardTemplate(movie);
-  const minTitle = Number(movie.rank) === 1 ? 42 : 30;
+  const minTitle = Number(movie.rank) === 1 ? 42 : 35;
   requestAnimationFrame(() => {
     fitNowrapEl(card.querySelector(".race-card__title"), { minSize: minTitle, allowWrap: true });
   });
@@ -837,7 +837,7 @@ function updateRaceCard(card, movie, isNew = false) {
 
   setTextIfChanged(card.querySelector(".race-card__rank"), `NO.${movie.rank}`);
   if (setTextIfChanged(card.querySelector(".race-card__title"), `《${movie.name}》`)) {
-    const minTitle = Number(movie.rank) === 1 ? 36 : 28;
+    const minTitle = Number(movie.rank) === 1 ? 42 : 35;
     fitNowrapEl(card.querySelector(".race-card__title"), { minSize: minTitle, allowWrap: true });
   }
 
