@@ -645,9 +645,10 @@ function parseBoxShowMetrics(raw, todayStr = "") {
 
   return {
     hourSpeed,
-    hourSpeedText: hourSpeed > 0 ? formatMoneyWan(hourSpeed) : "--",
+    hourSpeedText: hourSpeed > 0 ? `${formatMoneyWan(hourSpeed).replace(/^¥/, "")}/h` : "--",
     yesterdayHourSpeed,
-    yesterdayHourSpeedText: yesterdayHourSpeed > 0 ? formatMoneyWan(yesterdayHourSpeed) : "--",
+    yesterdayHourSpeedText:
+      yesterdayHourSpeed > 0 ? `${formatMoneyWan(yesterdayHourSpeed).replace(/^¥/, "")}/h` : "--",
     yesterdaySamePeriod,
     yesterdaySamePeriodText: yesterdaySamePeriod > 0 ? formatMoneyWan(yesterdaySamePeriod) : "--",
     totalViews,
@@ -957,10 +958,386 @@ export function mergeMovieDetail(base, detail = {}) {
     totalForecastNum: prediction.totalForecastNum || 0,
     totalTrend: prediction.totalTrend || "",
     dailyTable,
-    showCountDesc: base.showCount >= 10000
-      ? `${(base.showCount / 10000).toFixed(1)}万`
-      : String(base.showCount || "--"),
+    showCountDesc:
+      base.showCount > 0
+        ? base.showCount >= 10000
+          ? `${(base.showCount / 10000).toFixed(1)}万场`
+          : `${base.showCount}场`
+        : "--",
   };
+}
+
+function isEmptyMetricValue(val) {
+  if (val == null) return true;
+  if (Array.isArray(val)) return !val.length;
+  const text = String(val).trim();
+  return !text || text === "--" || text === "-";
+}
+
+function normalizeMetricCompare(val) {
+  return String(val ?? "")
+    .replace(/[¥,\s]/g, "")
+    .replace(/场$/, "")
+    .replace(/\/h$/, "")
+    .trim()
+    .toLowerCase();
+}
+
+function metricValuesEquivalent(a, b) {
+  if (isEmptyMetricValue(a) || isEmptyMetricValue(b)) return false;
+  const na = normalizeMetricCompare(a);
+  const nb = normalizeMetricCompare(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  const numA = parseBoxNum(na, na.includes("亿") ? "亿" : "万");
+  const numB = parseBoxNum(nb, nb.includes("亿") ? "亿" : "万");
+  return Number.isFinite(numA) && Number.isFinite(numB) && numA > 0 && Math.abs(numA - numB) < 0.05;
+}
+
+function formatShowCountDesc(movie) {
+  if (!isEmptyMetricValue(movie.showCountDesc) && movie.showCountDesc !== "--") {
+    const text = String(movie.showCountDesc).trim();
+    return text.endsWith("场") ? text : `${text}场`;
+  }
+  if (movie.showCount > 0) {
+    return movie.showCount >= 10000
+      ? `${(movie.showCount / 10000).toFixed(1)}万场`
+      : `${movie.showCount}场`;
+  }
+  return "";
+}
+
+function formatHourSpeedDisplay(text) {
+  if (isEmptyMetricValue(text)) return "";
+  const raw = String(text).trim().replace(/^¥/, "");
+  return raw.includes("/h") ? raw : `${raw}/h`;
+}
+
+export function formatReleaseTag(releaseInfo) {
+  if (isEmptyMetricValue(releaseInfo)) return "";
+  const text = String(releaseInfo).trim();
+  if (text.length > 8) return "";
+  const m = text.match(/(\d+)\s*天/);
+  if (m) return `上映${m[1]}天`;
+  if (/^上映/.test(text) && text.length <= 8) return text;
+  return "";
+}
+
+const DASHBOARD_AUDIT_FIELDS = [
+  "releaseInfo",
+  "todayBox",
+  "todayBoxText",
+  "boxRate",
+  "splitBoxRate",
+  "splitBoxText",
+  "showCount",
+  "showCountRate",
+  "avgShowView",
+  "avgSeatView",
+  "sumBoxDesc",
+  "sumSplitBoxDesc",
+];
+
+const DETAIL_AUDIT_FIELDS = [
+  "dailyIncrease",
+  "hourSpeed",
+  "hourSpeedText",
+  "dynamicForecast",
+  "dynamicTrend",
+  "totalForecast",
+  "totalTrend",
+  "yesterdayTotal",
+  "yesterdayHourSpeedText",
+  "yesterdaySamePeriodText",
+  "totalViews",
+  "endDate",
+  "remainingDays",
+  "mainlandBox",
+  "hmtBox",
+  "overseasBox",
+  "showCountDesc",
+];
+
+const BOX_SHOW_AUDIT_FIELDS = [
+  "hourSpeed",
+  "hourSpeedText",
+  "yesterdayHourSpeed",
+  "yesterdayHourSpeedText",
+  "yesterdaySamePeriod",
+  "yesterdaySamePeriodText",
+  "totalViews",
+  "presaleTotal",
+];
+
+const PREDICTION_AUDIT_FIELDS = [
+  "dynamicForecast",
+  "dynamicForecastNum",
+  "dynamicTrend",
+  "totalForecast",
+  "totalForecastNum",
+  "totalTrend",
+  "dailyForecast",
+];
+
+const GLOBAL_AUDIT_FIELDS = ["mainland", "hmt", "overseas"];
+const TECH_AUDIT_FIELDS = ["endDate", "remainingDays"];
+
+export const EXTRA_METRIC_FIELD_MAP = [
+  { label: "实时票房", key: "todayBox", source: "dashboard", raw: "boxSplitUnit" },
+  { label: "票房占比", key: "boxRate", source: "dashboard", raw: "boxRate" },
+  { label: "排片占比", key: "showCountRate", source: "dashboard", raw: "showCountRate" },
+  { label: "实时上座", key: "avgSeatView", source: "dashboard", raw: "avgSeatView" },
+  { label: "累计票房", key: "sumBoxDesc", source: "dashboard", raw: "sumBoxDesc" },
+  { label: "动态预测", key: "dynamicForecast", source: "getPredictionBox", raw: "predictionBoxList/boxDesc" },
+  { label: "今日时速", key: "hourSpeedText", source: "getBoxShow", raw: "timeChartData.time_solid" },
+  { label: "排片场次", key: "showCountDesc", source: "dashboard", raw: "showCount" },
+  { label: "场均人次", key: "avgShowView", source: "dashboard", raw: "avgShowView" },
+  { label: "昨日票房", key: "yesterdayTotal", source: "dashboard(movieInfo.boxTrends)", raw: "boxTrends.boxDesc" },
+  { label: "昨日同期", key: "yesterdaySamePeriodText", source: "getBoxShow", raw: "timeChartData.time_yesterday" },
+  { label: "累计观影人次", key: "totalViews", source: "getBoxShow", raw: "boxSummaryList" },
+  { label: "总预测", key: "totalForecast", source: "getPredictionBox", raw: "sumPrediction/boxDesc" },
+  { label: "昨日时速", key: "yesterdayHourSpeedText", source: "getBoxShow", raw: "timeChartData.time_yesterday delta" },
+  { label: "上映信息", key: "releaseInfo", source: "dashboard", raw: "movieInfo.releaseInfo" },
+  { label: "下映日期", key: "endDate", source: "getTechData", raw: "endDate" },
+  { label: "剩余天数", key: "remainingDays", source: "getTechData", raw: "remainingDays" },
+  { label: "分账票房", key: "sumSplitBoxDesc", source: "dashboard", raw: "sumSplitBoxDesc" },
+  { label: "分账占比", key: "splitBoxRate", source: "dashboard", raw: "splitBoxRate" },
+  { label: "内地票房", key: "mainlandBox", source: "getBoxShowna", raw: "chinaBoxDesc" },
+  { label: "港澳台票房", key: "hmtBox", source: "getBoxShowna", raw: "hmtBoxDesc" },
+  { label: "海外票房", key: "overseasBox", source: "getBoxShowna", raw: "overseasBoxDesc" },
+];
+
+const EXTRA_METRIC_CANDIDATES = [
+  { key: "dynamicForecast", label: "动态预测", tier: 1, get: (m) => m.dynamicForecast },
+  { key: "hourSpeedText", label: "今日时速", tier: 1, get: (m) => formatHourSpeedDisplay(m.hourSpeedText) },
+  { key: "showCountDesc", label: "排片场次", tier: 1, get: (m) => formatShowCountDesc(m) },
+  { key: "sumBoxDesc", label: "累计票房", tier: 1, get: (m) => m.sumBoxDesc },
+  { key: "yesterdayTotal", label: "昨日票房", tier: 1, get: (m) => m.yesterdayTotal },
+  { key: "avgShowView", label: "场均人次", tier: 1, get: (m) => m.avgShowView },
+  { key: "yesterdaySamePeriodText", label: "昨日同期", tier: 1, get: (m) => m.yesterdaySamePeriodText },
+  { key: "totalViews", label: "累计观影人次", tier: 1, get: (m) => m.totalViews },
+  { key: "totalForecast", label: "总预测", tier: 2, get: (m) => m.totalForecast },
+  { key: "yesterdayHourSpeedText", label: "昨日时速", tier: 2, get: (m) => formatHourSpeedDisplay(m.yesterdayHourSpeedText) },
+  { key: "endDate", label: "下映日期", tier: 2, get: (m) => (isEmptyMetricValue(m.endDate) ? "" : m.endDate) },
+  {
+    key: "remainingDays",
+    label: "剩余天数",
+    tier: 2,
+    get: (m) => (isEmptyMetricValue(m.remainingDays) ? "" : `${m.remainingDays}天`),
+  },
+  { key: "sumSplitBoxDesc", label: "分账票房", tier: 2, get: (m) => m.sumSplitBoxDesc },
+  { key: "splitBoxRate", label: "分账占比", tier: 2, get: (m) => m.splitBoxRate },
+  { key: "mainlandBox", label: "内地票房", tier: 3, get: (m) => m.mainlandBox },
+  { key: "hmtBox", label: "港澳台票房", tier: 3, get: (m) => m.hmtBox },
+  { key: "overseasBox", label: "海外票房", tier: 3, get: (m) => m.overseasBox },
+];
+
+function isValidExtraMetricValue(val, key) {
+  if (isEmptyMetricValue(val)) return false;
+  if (typeof val === "number" && val <= 0) return false;
+  if (key === "avgShowView" || key === "showCount" || key === "showCountDesc") {
+    const n = parseFloat(String(val).replace(/[^\d.]/g, ""));
+    if (Number.isFinite(n) && n <= 0) return false;
+  }
+  return true;
+}
+
+function shouldSkipDuplicateMetric(candidate, value, selected, movie) {
+  if (candidate.key === "mainlandBox") {
+    const sumVal = selected.find((x) => x.key === "sumBoxDesc")?.value || movie?.sumBoxDesc;
+    if (!isEmptyMetricValue(sumVal) && metricValuesEquivalent(value, sumVal)) return true;
+  }
+  if (candidate.key === "totalForecast") {
+    const dynamic = selected.find((x) => x.key === "dynamicForecast")?.value || movie?.dynamicForecast;
+    if (!isEmptyMetricValue(dynamic) && metricValuesEquivalent(value, dynamic)) return true;
+  }
+  for (const item of selected) {
+    if (metricValuesEquivalent(value, item.value)) return true;
+  }
+  return false;
+}
+
+export function getExtraMetrics(movie, options = {}) {
+  const rank = Number(movie?.rank) || 99;
+  const maxCount = options.maxCount ?? (rank === 1 ? 6 : 4);
+  const selected = [];
+
+  for (const candidate of EXTRA_METRIC_CANDIDATES) {
+    if (selected.length >= maxCount) break;
+    const value = candidate.get(movie);
+    if (!isValidExtraMetricValue(value, candidate.key)) continue;
+    if (shouldSkipDuplicateMetric(candidate, value, selected, movie)) continue;
+    selected.push({
+      key: candidate.key,
+      label: candidate.label,
+      value: String(value).trim(),
+      tier: candidate.tier,
+    });
+  }
+
+  return selected;
+}
+
+export function getExtraMetricsGridClass(count) {
+  if (count <= 0) return "race-card__extra-grid--0";
+  if (count === 1) return "race-card__extra-grid--1";
+  if (count === 2) return "race-card__extra-grid--2";
+  if (count === 3) return "race-card__extra-grid--3";
+  if (count === 4) return "race-card__extra-grid--4";
+  return "race-card__extra-grid--6";
+}
+
+export function buildDailyTrendItems(movie) {
+  if (Number(movie?.rank) !== 1) return [];
+  const rows = Array.isArray(movie?.dailyTable) ? movie.dailyTable : [];
+  if (rows.length < 2) return [];
+  return rows.slice(0, 3).flatMap((row) => {
+    const forecast = row?.forecast;
+    if (isEmptyMetricValue(forecast) || forecast === "--") return [];
+    return [{ label: `${row.label || ""}预测`, value: String(forecast).replace(/^¥/, "") }];
+  });
+}
+
+function describeAuditValue(val) {
+  if (val == null) return { type: "null", sample: "null" };
+  if (Array.isArray(val)) {
+    return { type: "array", sample: `[${val.length}]` };
+  }
+  if (typeof val === "number") {
+    return { type: "number", sample: Number.isFinite(val) ? String(val) : "NaN" };
+  }
+  if (typeof val === "boolean") {
+    return { type: "boolean", sample: val ? "true" : "false" };
+  }
+  const text = String(val).trim();
+  if (text.length > 48) {
+    return { type: "string", sample: `${text.slice(0, 24)}…(${text.length})` };
+  }
+  return { type: "string", sample: text };
+}
+
+function snapshotFields(source, fields) {
+  const out = {};
+  if (!source) return out;
+  for (const field of fields) {
+    const val = source[field];
+    if (val == null || val === "" || val === "--" || val === "-") continue;
+    if (typeof val === "number" && val <= 0 && field !== "rank") continue;
+    out[field] = describeAuditValue(val);
+  }
+  return out;
+}
+
+function snapshotDashboardMovie(movie) {
+  return snapshotFields(movie, DASHBOARD_AUDIT_FIELDS);
+}
+
+function snapshotDetailMovie(movie) {
+  return snapshotFields(movie, DETAIL_AUDIT_FIELDS);
+}
+
+function snapshotParsedDetail(detail = {}) {
+  return {
+    boxShow: snapshotFields(detail.boxShow, BOX_SHOW_AUDIT_FIELDS),
+    prediction: snapshotFields(detail.prediction, PREDICTION_AUDIT_FIELDS),
+    global: snapshotFields(detail.global, GLOBAL_AUDIT_FIELDS),
+    tech: snapshotFields(detail.tech, TECH_AUDIT_FIELDS),
+    trends: snapshotFields(detail.trends, ["yesterdayBox", "yesterdayDesc", "todayTrendBox", "todayTrendDesc"]),
+  };
+}
+
+let lastFieldAuditEntries = [];
+
+export function getLastFieldAuditEntries() {
+  return lastFieldAuditEntries.slice();
+}
+
+export function isFieldAuditEnabled(options = {}) {
+  if (options.enabled === true) return true;
+  if (typeof process !== "undefined" && process?.env?.MAOYAN_FIELD_AUDIT === "1") return true;
+  if (typeof location !== "undefined") {
+    return new URLSearchParams(location.search).has("maoyanFieldAudit");
+  }
+  return false;
+}
+
+export function logMaoyanFieldAudit(movies, detailSnapshots = {}, options = {}) {
+  if (!isFieldAuditEnabled(options)) return;
+  const list = (movies || []).slice(0, 5);
+  lastFieldAuditEntries = list.map((movie) => {
+    const key = String(movie.movieId);
+    const snap = detailSnapshots[key] || {};
+    const entry = {
+      movieId: movie.movieId,
+      name: movie.name,
+      dashboard: snapshotDashboardMovie(movie),
+      detail: snapshotDetailMovie(movie),
+      boxShow: snap.boxShow || {},
+      prediction: snap.prediction || {},
+      global: snap.global || {},
+      tech: snap.tech || {},
+    };
+    console.log("[MAOYAN_FIELD_AUDIT]", entry);
+    return entry;
+  });
+  return lastFieldAuditEntries;
+}
+
+const fieldAuditHistory = new Map();
+
+export function classifyFieldStability(entries) {
+  const tallies = new Map();
+  for (const entry of entries) {
+    const groups = {
+      dashboard: entry.dashboard,
+      detail: entry.detail,
+      boxShow: entry.boxShow,
+      prediction: entry.prediction,
+      global: entry.global,
+      tech: entry.tech,
+    };
+    for (const [group, fields] of Object.entries(groups)) {
+      for (const field of Object.keys(fields || {})) {
+        const id = `${group}.${field}`;
+        tallies.set(id, (tallies.get(id) || 0) + 1);
+      }
+    }
+  }
+  const total = Math.max(entries.length, 1);
+  const stable = [];
+  const occasional = [];
+  const empty = [];
+  for (const def of EXTRA_METRIC_FIELD_MAP) {
+    const candidates = [
+      `dashboard.${def.key}`,
+      `detail.${def.key}`,
+      `boxShow.${def.key}`,
+      `prediction.${def.key}`,
+      `global.${def.key === "mainlandBox" ? "mainland" : def.key === "hmtBox" ? "hmt" : def.key === "overseasBox" ? "overseas" : def.key}`,
+      `tech.${def.key}`,
+    ];
+    const hit = Math.max(...candidates.map((id) => tallies.get(id) || 0));
+    if (hit >= total) stable.push(def);
+    else if (hit > 0) occasional.push(def);
+    else empty.push(def);
+  }
+  return { stable, occasional, empty, totalRuns: total };
+}
+
+export function recordFieldAuditRun(entries) {
+  for (const entry of entries) {
+    const key = String(entry.movieId);
+    const prev = fieldAuditHistory.get(key) || { runs: 0, hits: {} };
+    prev.runs += 1;
+    const groups = ["dashboard", "detail", "boxShow", "prediction", "global", "tech"];
+    for (const group of groups) {
+      for (const field of Object.keys(entry[group] || {})) {
+        const id = `${group}.${field}`;
+        prev.hits[id] = (prev.hits[id] || 0) + 1;
+      }
+    }
+    fieldAuditHistory.set(key, prev);
+  }
 }
 
 function mergeDailyRowField(primary, fallback, isToday, todayFallback) {
@@ -1158,6 +1535,7 @@ async function fetchMovieExtraDetail(apiBase, movie, todayStr, speed = {}, paren
   }
 
   detail.extraErrors = extraErrors;
+  detail.audit = snapshotParsedDetail(detail);
   return detail;
 }
 
@@ -1200,6 +1578,7 @@ export async function enrichMovies(apiBase, movies, options = {}) {
   const targets = movies.slice(0, trendLimit);
 
   const parentSignal = options.signal;
+  const detailSnapshots = {};
 
   if (enableExtraApis && targets.length) {
     try {
@@ -1223,6 +1602,7 @@ export async function enrichMovies(apiBase, movies, options = {}) {
     }
 
     const detail = await fetchMovieExtraDetail(apiBase, movie, todayStr, speed, parentSignal);
+    detailSnapshots[String(movie.movieId)] = detail.audit || snapshotParsedDetail(detail);
     for (const item of detail.extraErrors || []) {
       lastEnrichErrors.push({
         movieId: movie.movieId,
@@ -1233,5 +1613,6 @@ export async function enrichMovies(apiBase, movies, options = {}) {
     results[idx] = mergeMovieDetail(movie, detail);
   }, parentSignal);
 
+  logMaoyanFieldAudit(results.slice(0, trendLimit), detailSnapshots, options);
   return results;
 }

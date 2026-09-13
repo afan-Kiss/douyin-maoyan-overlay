@@ -34,6 +34,8 @@
     "test:round5-fixes": "node deploy/test-round5-fixes.js",
     "test:box-units": "node deploy/test-box-units.js",
     "test:core": "node deploy/test-core.js",
+    "test:extra-metrics": "node deploy/test-extra-metrics.js",
+    "audit:maoyan-fields": "node deploy/audit-maoyan-fields.js",
     "push:github": "node deploy/push-github.js"
   },
   "dependencies": {

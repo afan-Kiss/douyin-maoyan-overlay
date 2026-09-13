@@ -14,6 +14,10 @@ import {
   resolveNationSeatMetric,
   computeMovieBoxDeltaWan,
   traceDashboardData,
+  getExtraMetrics,
+  getExtraMetricsGridClass,
+  buildDailyTrendItems,
+  formatReleaseTag,
 } from "./maoyan-api.js";
 import { applyOverlaySettings, getOverlaySettings } from "./settings-applier.js";
 import { bindDesignViewport } from "./viewport-fit.js";
@@ -450,7 +454,7 @@ function purgeMovieState(id) {
 }
 
 function getMovieBoxAmount(movie) {
-  if (movie.todayBox > 0) return movie.todayBox;
+  if (movie.todayBox > 0 && movie.todayBox < 100000) return movie.todayBox;
   if (movie.todayBoxHtml) {
     const decoded = decodeBoxFromHtml(movie.todayBoxHtml, movie.todayUnit);
     if (decoded > 0) return decoded;
@@ -718,11 +722,38 @@ const CORE_STAT_DEFS = [
   { label: "实时上座", key: "avgSeatView", cls: "js-seat-view" },
 ];
 
-const HIDDEN_EXTRA_STAT_DEFS = [
-  { label: "动态预测", key: "dynamicForecast", cls: "js-forecast", trend: "dynamicTrend" },
-  { label: "今日时速", key: "hourSpeedText", cls: "js-hour-speed" },
-];
+function buildExtraStatHtml(metric, rank) {
+  const rankCls = rank === 1 ? " race-stat--rank1" : "";
+  return `<div class="race-stat race-stat--extra${rankCls}" data-stat-key="${metric.key}">
+    <em>${metric.label}</em>
+    <strong>${escapeHtml(metric.value)}</strong>
+  </div>`;
+}
 
+function buildExtraGridHtml(movie) {
+  const rank = Number(movie.rank) || 99;
+  const metrics = getExtraMetrics(movie);
+  if (!metrics.length) return "";
+  const gridClass = getExtraMetricsGridClass(metrics.length);
+  return `<div class="race-card__extra-grid ${gridClass}">${metrics.map((m) => buildExtraStatHtml(m, rank)).join("")}</div>`;
+}
+
+function buildDailyTrendHtml(movie) {
+  const items = buildDailyTrendItems(movie);
+  if (items.length < 2) return "";
+  return `<div class="race-card__daily-trend">${items
+    .map(
+      (item) =>
+        `<div class="race-card__trend-item"><em>${escapeHtml(item.label)}</em><strong>${escapeHtml(item.value)}</strong></div>`,
+    )
+    .join("")}</div>`;
+}
+
+function buildReleaseTagHtml(movie) {
+  const tag = formatReleaseTag(movie.releaseInfo);
+  if (!tag) return "";
+  return `<span class="race-card__release-tag">${escapeHtml(tag)}</span>`;
+}
 function statValue(movie, def) {
   const raw = movie[def.key];
   if (isEmptyField(raw)) return "--";
@@ -749,26 +780,6 @@ function buildCoreStatsHtml(movie) {
   return CORE_STAT_DEFS.map((def) => buildStatItemHtml(def, movie)).join("");
 }
 
-function buildHiddenExtraStatsHtml(movie) {
-  const rank = Number(movie.rank) || 99;
-  if (rank > 2) return "";
-  return HIDDEN_EXTRA_STAT_DEFS.map((def) => buildStatItemHtml(def, movie, true)).join("");
-}
-
-function buildStatsColumnHtml(movie) {
-  return `${buildCoreStatsHtml(movie)}${buildHiddenExtraStatsHtml(movie)}`;
-}
-
-function formatSumBox(movie) {
-  return isEmptyField(movie.sumBoxDesc) ? "--" : escapeHtml(String(movie.sumBoxDesc));
-}
-
-const SUM_BAR_ICON = `<svg class="race-card__sum-icon" viewBox="0 0 24 24" aria-hidden="true">
-  <rect x="3" y="12" width="4" height="8" rx="1" fill="currentColor" opacity="0.85"/>
-  <rect x="10" y="8" width="4" height="12" rx="1" fill="currentColor"/>
-  <rect x="17" y="5" width="4" height="15" rx="1" fill="currentColor" opacity="0.72"/>
-</svg>`;
-
 function raceCardTemplate(movie) {
   const boxText = formatDisplayBox(movie);
   const rank = Number(movie.rank) || 1;
@@ -778,24 +789,24 @@ function raceCardTemplate(movie) {
       <span class="race-card__medal ${medalClassName(rank)}" aria-hidden="true">
         <span class="race-card__medal-num">${rank}</span>
       </span>
-      <h2 class="race-card__title">《${escapeHtml(movie.name)}》</h2>
+      <div class="race-card__title-wrap">
+        <h2 class="race-card__title">《${escapeHtml(movie.name)}》</h2>
+        ${buildReleaseTagHtml(movie)}
+      </div>
     </div>
-    <div class="race-card__body">
-      <div class="race-card__box-block">
+    <div class="race-card__content">
+      <div class="race-card__box-row">
         <span class="race-card__box-label">实时票房</span>
         <div class="race-card__box-value">
           <strong class="js-day-box">${escapeHtml(boxText)}</strong>
           <span class="race-card__delta-bubble" aria-hidden="true"></span>
         </div>
       </div>
-      <div class="race-card__stats">
-        ${buildStatsColumnHtml(movie)}
+      <div class="race-card__core-stats">
+        ${buildCoreStatsHtml(movie)}
       </div>
-    </div>
-    <div class="race-card__sum-bar">
-      ${SUM_BAR_ICON}
-      <span class="race-card__sum-label">累计票房</span>
-      <strong class="js-sum-box">${formatSumBox(movie)}</strong>
+      ${buildExtraGridHtml(movie)}
+      ${buildDailyTrendHtml(movie)}
     </div>
   `;
 }
@@ -891,18 +902,53 @@ function updateRaceCard(card, movie, isNew = false) {
     fitNowrapEl(card.querySelector(".race-card__title"), { minSize: minTitle, allowWrap: true });
   }
 
-  setTextIfChanged(card.querySelector(".js-day-box"), formatDisplayBox(movie));
-
-  const statsCol = card.querySelector(".race-card__stats");
-  const nextStats = buildStatsColumnHtml(movie);
-  if (statsCol && statsCol.innerHTML !== nextStats) {
-    statsCol.innerHTML = nextStats;
+  const titleWrap = card.querySelector(".race-card__title-wrap");
+  if (titleWrap) {
+    const tagHtml = buildReleaseTagHtml(movie);
+    const tagEl = titleWrap.querySelector(".race-card__release-tag");
+    if (tagHtml) {
+      if (tagEl) setTextIfChanged(tagEl, formatReleaseTag(movie.releaseInfo));
+      else titleWrap.insertAdjacentHTML("beforeend", tagHtml);
+    } else if (tagEl) {
+      tagEl.remove();
+    }
   }
 
-  const sumEl = card.querySelector(".js-sum-box");
-  if (sumEl) {
-    const nextSum = isEmptyField(movie.sumBoxDesc) ? "--" : String(movie.sumBoxDesc);
-    setTextIfChanged(sumEl, nextSum);
+  setTextIfChanged(card.querySelector(".js-day-box"), formatDisplayBox(movie));
+
+  const coreStats = card.querySelector(".race-card__core-stats");
+  const nextCoreStats = buildCoreStatsHtml(movie);
+  if (coreStats && coreStats.innerHTML !== nextCoreStats) {
+    coreStats.innerHTML = nextCoreStats;
+  }
+
+  const content = card.querySelector(".race-card__content");
+  const nextExtraGrid = buildExtraGridHtml(movie);
+  const nextTrend = buildDailyTrendHtml(movie);
+  let extraGrid = card.querySelector(".race-card__extra-grid");
+  if (nextExtraGrid) {
+    if (extraGrid) {
+      const tmp = document.createElement("div");
+      tmp.innerHTML = nextExtraGrid;
+      extraGrid.replaceWith(tmp.firstElementChild);
+    } else if (content) {
+      content.insertAdjacentHTML("beforeend", nextExtraGrid);
+    }
+  } else if (extraGrid) {
+    extraGrid.remove();
+  }
+
+  let trendEl = card.querySelector(".race-card__daily-trend");
+  if (nextTrend) {
+    if (trendEl) {
+      const tmp = document.createElement("div");
+      tmp.innerHTML = nextTrend;
+      trendEl.replaceWith(tmp.firstElementChild);
+    } else if (content) {
+      content.insertAdjacentHTML("beforeend", nextTrend);
+    }
+  } else if (trendEl) {
+    trendEl.remove();
   }
 
   updateRaceCardDelta(card, movie, isNew);
@@ -940,13 +986,15 @@ function renderLoadingSkeleton() {
           <span class="race-card__medal skeleton-block"></span>
           <h2 class="race-card__title skeleton-block">加载中</h2>
         </div>
-        <div class="race-card__body">
-          <div class="race-card__box-block skeleton-block"></div>
-          <div class="race-card__stats">
+        <div class="race-card__content">
+          <div class="race-card__box-row skeleton-block"></div>
+          <div class="race-card__core-stats">
+            ${Array.from({ length: 3 }, () => '<div class="race-stat skeleton-block"></div>').join("")}
+          </div>
+          <div class="race-card__extra-grid race-card__extra-grid--3">
             ${Array.from({ length: 3 }, () => '<div class="race-stat skeleton-block"></div>').join("")}
           </div>
         </div>
-        <div class="race-card__sum-bar skeleton-block"></div>
       </article>
     `;
   }).join("");
@@ -1588,6 +1636,9 @@ async function init() {
       resolveChampionBoxWan,
       resolveNationSeatMetric,
       computeMovieBoxDeltaWan,
+      getExtraMetrics,
+      getExtraMetricsGridClass,
+      buildDailyTrendItems,
     };
     setStatus("ok", "");
     return;

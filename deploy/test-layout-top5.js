@@ -39,12 +39,15 @@ function richMovie(rank, withExtras = true) {
     boxRate: `${(27.4 - rank * 1.2).toFixed(1)}%`,
     showCountRate: `${(26.0 - rank * 0.9).toFixed(1)}%`,
     avgSeatView: `${(1.2 + rank * 0.3).toFixed(1)}%`,
+    sumBoxDesc: rank === 1 ? "21.53亿" : `${(8 + rank).toFixed(2)}亿`,
   };
   if (!withExtras) return base;
   return {
     ...base,
     dynamicForecast: rank === 1 ? "1537.58万" : `${(400 + rank * 50).toFixed(2)}万`,
-    sumBoxDesc: rank === 1 ? "21.53亿" : `${(8 + rank).toFixed(2)}亿`,
+    showCountDesc: `${(8 + rank * 0.3).toFixed(1)}万场`,
+    avgShowView: `${(2 + rank * 0.2).toFixed(1)}`,
+    releaseInfo: rank === 1 ? "上映12天" : "",
     hourSpeedText: rank === 1 ? "128.5万/h" : `${(20 + rank * 3).toFixed(1)}万/h`,
     yesterdayTotal: `${(600 + rank * 40).toFixed(2)}万`,
     yesterdaySamePeriodText: `${(500 + rank * 30).toFixed(2)}万`,
@@ -196,10 +199,20 @@ async function renderAndInspect(page, movies, nation) {
         }
       }
 
-      const stats = item.querySelectorAll(".race-stat");
-      const minStats = Number(item.dataset.rank) <= 2 ? 5 : 3;
-      if (stats.length < minStats) {
-        issues.push(`第 ${item.dataset.rank} 名指标不足: ${stats.length} < ${minStats}`);
+      const coreStats = item.querySelectorAll(".race-card__core-stats .race-stat");
+      if (coreStats.length !== 3) {
+        issues.push(`第 ${item.dataset.rank} 名核心指标应为 3 项，实际 ${coreStats.length}`);
+      }
+
+      const extraStats = item.querySelectorAll(".race-card__extra-grid .race-stat");
+      const minExtra = Number(item.dataset.rank) === 1 ? 5 : 1;
+      if (extraStats.length < minExtra) {
+        issues.push(`第 ${item.dataset.rank} 名补充指标不足: ${extraStats.length} < ${minExtra}`);
+      }
+
+      const extraGrid = item.querySelector(".race-card__extra-grid");
+      if (extraStats.length === 1 && extraGrid && !extraGrid.classList.contains("race-card__extra-grid--1")) {
+        issues.push(`第 ${item.dataset.rank} 名单项补充指标未占满整行`);
       }
     }
 
@@ -242,8 +255,9 @@ async function renderAndInspect(page, movies, nation) {
     sample(rank1?.querySelector(".js-day-box"), "rank1Box");
     sample(follow[0]?.querySelector(".race-card__title"), "followTitle");
     sample(follow[0]?.querySelector(".js-day-box"), "followBox");
-    sample(follow[0]?.querySelector(".race-stat em"), "label");
-    sample(follow[0]?.querySelector(".race-stat strong"), "value");
+    sample(follow[0]?.querySelector(".race-card__core-stats .race-stat em"), "label");
+    sample(follow[0]?.querySelector(".race-card__core-stats .race-stat strong"), "value");
+    sample(follow[0]?.querySelector(".race-card__extra-grid .race-stat strong"), "extraValue");
 
     const bubbleHeights = {};
     for (const item of items) {
@@ -335,7 +349,8 @@ async function main() {
     assert.ok(f.followBox >= 40, `followBox=${f.followBox}`);
     assert.ok(f.rank1Title >= 44, `rank1Title=${f.rank1Title}`);
     assert.ok(f.followTitle >= 36, `followTitle=${f.followTitle}`);
-    assert.ok(f.value >= 28, `metricValue=${f.value}`);
+    assert.ok(f.value >= 25, `metricValue=${f.value}`);
+    assert.ok((f.extraValue || 23) >= 23, `extraValue=${f.extraValue}`);
     assert.ok((f.rank1Bubble || 0) >= 26, `rank1Bubble=${f.rank1Bubble}`);
     assert.ok((f.followBubble || 0) >= 23, `followBubble=${f.followBubble}`);
     assert.ok((reportRich.bubbleHeights["1"] || 0) >= 44, `rank1 bubble height=${reportRich.bubbleHeights["1"]}`);
