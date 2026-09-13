@@ -9,7 +9,7 @@
   --bubble-shadow: rgba(255, 170, 60, 0.35);
   --bubble-glow: rgba(255, 200, 100, 0.25);
   --bubble-font-size: 22px;
-  --bubble-duration: 1600ms;
+  --bubble-duration: 3000ms;
   --bubble-float: 52px;
 
   --font-sans: "HarmonyOS Sans SC", "HarmonyOS Sans", "PingFang SC", "Microsoft YaHei", sans-serif;

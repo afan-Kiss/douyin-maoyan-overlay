@@ -31,6 +31,7 @@
     "test:electron-capture": "node scripts/start-electron.js deploy/test-electron-capture.js",
     "test:admin-ranges": "node deploy/test-admin-font-ranges.js",
     "test:enrich-interval": "node deploy/test-enrich-interval.js",
+    "test:round5-fixes": "node deploy/test-round5-fixes.js",
     "test:box-units": "node deploy/test-box-units.js",
     "test:core": "node deploy/test-core.js",
     "push:github": "node deploy/push-github.js"

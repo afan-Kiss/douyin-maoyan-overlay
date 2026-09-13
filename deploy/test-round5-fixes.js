@@ -36,6 +36,72 @@ async function testWanDisplay() {
   console.log("  215300 -> 21.53亿");
 }
 
+async function testEnrich403Backoff() {
+  const schedulerPath = pathToFileURL(path.join(ROOT, "ui", "enrich-scheduler.js")).href;
+  const {
+    createEnrichScheduleSimulator,
+    createEnrichScheduleState,
+    shouldScheduleFullEnrich,
+    shouldMarkFullEnrichFailure,
+    getFullEnrichRetryDelayMs,
+    markFullEnrichSuccess,
+    FULL_ENRICH_FAILURE_BACKOFF_MS,
+  } = await import(schedulerPath);
+
+  const errors403 = [
+    { movieId: "1001", label: "日期票房", code: "upstream_403", detail: "403 forbidden" },
+  ];
+  assert.ok(shouldMarkFullEnrichFailure(errors403), "403 应归类为 full enrich 失败");
+
+  const partialErrors = [
+    { movieId: "1001", label: "全球票房", code: "api_error", detail: "timeout" },
+  ];
+  assert.ok(!shouldMarkFullEnrichFailure(partialErrors), "个别非关键字段失败不应记 full failure");
+
+  const POLL_INTERVAL_MS = 5000;
+  const FULL_INTERVAL_MS = 60000;
+
+  const failSim = createEnrichScheduleSimulator({
+    fullIntervalMs: FULL_INTERVAL_MS,
+    runEnrich: async () => ({ errors: errors403 }),
+  });
+
+  await failSim.onPoll(0);
+  await failSim.waitSettled();
+  assert.strictEqual(failSim.state.enrichFailureCount, 1, "403 后 failureCount=1");
+  assert.strictEqual(getFullEnrichRetryDelayMs(1), 30000);
+  assert.strictEqual(failSim.getStats().fullEnrichCount, 1, "首次 enrich 应执行");
+
+  for (let i = 1; i <= 5; i++) {
+    await failSim.onPoll(i * POLL_INTERVAL_MS);
+  }
+  await failSim.waitSettled();
+  assert.strictEqual(
+    failSim.getStats().fullEnrichCount,
+    1,
+    "403 失败后 30 秒内不得再次 full enrich",
+  );
+
+  const backoffState = createEnrichScheduleState();
+  backoffState.enrichFailureCount = 0;
+  backoffState.lastFullEnrichAttempt = 0;
+  for (let i = 0; i < FULL_ENRICH_FAILURE_BACKOFF_MS.length; i++) {
+    backoffState.enrichFailureCount = i + 1;
+    backoffState.lastFullEnrichAttempt = 1000;
+    const delay = getFullEnrichRetryDelayMs(backoffState.enrichFailureCount);
+    assert.strictEqual(delay, FULL_ENRICH_FAILURE_BACKOFF_MS[i]);
+    assert.ok(!shouldScheduleFullEnrich(1000 + delay - 1, backoffState, FULL_INTERVAL_MS));
+    assert.ok(shouldScheduleFullEnrich(1000 + delay, backoffState, FULL_INTERVAL_MS));
+  }
+
+  markFullEnrichSuccess(backoffState, Date.now());
+  assert.strictEqual(backoffState.enrichFailureCount, 0, "成功一次后 failureCount=0");
+
+  console.log("PASS enrich 403 backoff + real error classification");
+  console.log(`  failureCount=${failSim.state.enrichFailureCount}`);
+  console.log(`  retry delays=${FULL_ENRICH_FAILURE_BACKOFF_MS.join(",")}ms`);
+}
+
 async function testEnrichIntervalWithScheduler() {
   const schedulerPath = pathToFileURL(path.join(ROOT, "ui", "enrich-scheduler.js")).href;
   const {
@@ -60,28 +126,95 @@ async function testEnrichIntervalWithScheduler() {
   assert.strictEqual(stats.fullEnrichCount, 1, "60s 内应仅 1 次完整 enrich");
   assert.strictEqual(stats.maxConcurrentFullEnrich, 1);
 
-  const failSim = createEnrichScheduleSimulator({
-    fullIntervalMs: FULL_INTERVAL_MS,
-    runEnrich: async () => ({ failed: true }),
-  });
-
-  await failSim.onPoll(0);
-  await failSim.waitSettled();
-  assert.strictEqual(failSim.getStats().fullEnrichCount, 1, "首次 enrich 应执行");
-
-  for (let i = 1; i <= 5; i++) {
-    await failSim.onPoll(i * POLL_INTERVAL_MS);
-  }
-  await failSim.waitSettled();
-  assert.strictEqual(
-    failSim.getStats().fullEnrichCount,
-    1,
-    "失败后 30 秒内不得再次 full enrich",
-  );
-
   console.log("PASS enrich interval via real scheduler");
   console.log(`  fullEnrichCount=${stats.fullEnrichCount}`);
-  console.log(`  failure retry blocked for 30s`);
+}
+
+async function testSettingsResetSingleflight() {
+  const schedulerPath = pathToFileURL(path.join(ROOT, "ui", "enrich-scheduler.js")).href;
+  const {
+    createEnrichScheduleState,
+    shouldScheduleFullEnrich,
+    markFullEnrichAttempt,
+    resetEnrichScheduleState,
+  } = await import(schedulerPath);
+
+  const state = createEnrichScheduleState();
+  let enrichGeneration = 0;
+  let currentController = null;
+  let currentPromise = null;
+  let fullEnrichCount = 0;
+  let concurrentFullEnrich = 0;
+  let maxConcurrentFullEnrich = 0;
+  let firstStillRunning = false;
+
+  async function abortAndReset() {
+    enrichGeneration += 1;
+    currentController?.abort();
+    if (currentPromise) {
+      try {
+        await currentPromise;
+      } catch {
+        /* aborted */
+      }
+    }
+    currentController = null;
+    currentPromise = null;
+    resetEnrichScheduleState(state, { clearInflight: true });
+  }
+
+  function tryStartEnrich(now, pollCount = 1) {
+    if (state.enrichingBackground) return false;
+    state.pollCount = pollCount;
+    if (!shouldScheduleFullEnrich(now, state, 60000)) return false;
+
+    const gen = enrichGeneration;
+    state.enrichingBackground = true;
+    markFullEnrichAttempt(state, now);
+    fullEnrichCount += 1;
+    concurrentFullEnrich += 1;
+    maxConcurrentFullEnrich = Math.max(maxConcurrentFullEnrich, concurrentFullEnrich);
+
+    const controller = new AbortController();
+    currentController = controller;
+
+    const promise = new Promise((resolve, reject) => {
+      controller.signal.addEventListener("abort", () => {
+        reject(new DOMException("Aborted", "AbortError"));
+      });
+      setTimeout(() => {
+        if (gen === enrichGeneration) firstStillRunning = false;
+        resolve();
+      }, 5000);
+    }).finally(() => {
+      concurrentFullEnrich -= 1;
+      if (gen === enrichGeneration) state.enrichingBackground = false;
+      if (currentPromise === promise) {
+        currentController = null;
+        currentPromise = null;
+      }
+    });
+
+    currentPromise = promise;
+    firstStillRunning = true;
+    return true;
+  }
+
+  assert.ok(tryStartEnrich(0), "第一轮 enrich 应启动");
+  assert.ok(state.enrichingBackground, "第一轮 enrich 进行中");
+
+  await abortAndReset();
+  assert.ok(!firstStillRunning || currentPromise === null, "settings reset 应等待旧任务 settle");
+
+  assert.ok(tryStartEnrich(1000), "settings reset 后 refresh 可启动新一轮");
+  assert.strictEqual(maxConcurrentFullEnrich, 1, "两轮 enrich 不得重叠");
+
+  currentController?.abort();
+  if (currentPromise) await currentPromise.catch(() => {});
+
+  console.log("PASS settings reset singleflight");
+  console.log(`  maxConcurrentFullEnrich=${maxConcurrentFullEnrich}`);
+  console.log(`  fullEnrichCount=${fullEnrichCount}`);
 }
 
 async function testEnrichTimeoutSingleflight() {
@@ -129,18 +262,26 @@ async function testEnrichTimeoutSingleflight() {
 function testBubbleDurationCss() {
   const css = fs.readFileSync(path.join(ROOT, "ui", "styles.css"), "utf-8");
   const appJs = fs.readFileSync(path.join(ROOT, "ui", "app.js"), "utf-8");
+  const { DEFAULT_SETTINGS, sanitizeSettings } = require(path.join(ROOT, "lib", "settings.js"));
 
+  assert.strictEqual(DEFAULT_SETTINGS.bubble.durationMs, 3000);
+  assert.strictEqual(sanitizeSettings({}).bubble.durationMs, 3000);
+  assert.strictEqual(sanitizeSettings({ bubble: { durationMs: 1800 } }).bubble.durationMs, 1800);
+
+  assert.match(css, /--bubble-duration:\s*3000ms/);
   assert.match(css, /animation:\s*inlineDeltaFloat\s+var\(--bubble-duration/);
   assert.doesNotMatch(css, /animation:\s*inlineDeltaFloat\s+3s/);
   assert.match(appJs, /getBubbleDurationMs\(\)/);
   assert.doesNotMatch(appJs, /DELTA_ANIM_MS/);
 
-  console.log("PASS bubble duration uses --bubble-duration + settings timer");
+  console.log("PASS bubble duration default 3000ms + settings timer");
 }
 
 async function main() {
   await testWanDisplay();
+  await testEnrich403Backoff();
   await testEnrichIntervalWithScheduler();
+  await testSettingsResetSingleflight();
   await testEnrichTimeoutSingleflight();
   testBubbleDurationCss();
   console.log("\nALL PASSED (round5 fixes)");

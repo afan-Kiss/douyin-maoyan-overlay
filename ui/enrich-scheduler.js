@@ -3,6 +3,59 @@
 export const FULL_ENRICH_FAILURE_BACKOFF_MS = [30000, 60000, 120000, 300000];
 export const FULL_ENRICH_GLOBAL_TIMEOUT_MS = 120000;
 
+export const FATAL_ENRICH_ERROR_CODES = new Set([
+  "login_required",
+  "upstream_401",
+  "upstream_403",
+  "sig_capture_failed",
+]);
+
+export const ENRICH_DETAIL_API_LABELS = new Set([
+  "预测票房",
+  "日期票房",
+  "全球票房",
+  "下映时间",
+]);
+
+export function isFatalEnrichError(error) {
+  const code = String(error?.code || "");
+  if (FATAL_ENRICH_ERROR_CODES.has(code)) return true;
+  if (error?.action === "login" || error?.action === "refresh") return true;
+  if (/sig_capture|upstream_40[13]|signature|refresh/i.test(code)) return true;
+  const detail = String(error?.detail || "");
+  return /签名|refresh|sig_capture/i.test(detail);
+}
+
+function groupEnrichErrorsByMovie(errors) {
+  const map = new Map();
+  for (const error of errors || []) {
+    if (!error?.movieId) continue;
+    const key = String(error.movieId);
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(error);
+  }
+  return map;
+}
+
+function movieDetailFullyFailed(movieErrors) {
+  if (!movieErrors?.length) return false;
+  if (movieErrors.some(isFatalEnrichError)) return true;
+  const failedLabels = new Set(
+    movieErrors.map((error) => error.label).filter((label) => ENRICH_DETAIL_API_LABELS.has(label)),
+  );
+  return failedLabels.size >= ENRICH_DETAIL_API_LABELS.size;
+}
+
+/** enrich resolve 后根据 lastEnrichErrors 判断是否应记为 full enrich 失败 */
+export function shouldMarkFullEnrichFailure(errors, topCount = 5) {
+  if (!errors?.length) return false;
+  if (errors.some(isFatalEnrichError)) return true;
+
+  const byMovie = groupEnrichErrorsByMovie(errors);
+  const fullyFailedCount = [...byMovie.values()].filter(movieDetailFullyFailed).length;
+  return fullyFailedCount >= topCount;
+}
+
 export function createEnrichScheduleState() {
   return {
     lastFullEnrich: 0,
@@ -49,10 +102,13 @@ export function markFullEnrichFailure(state) {
   state.enrichFailureCount = (state.enrichFailureCount || 0) + 1;
 }
 
-export function resetEnrichScheduleState(state) {
+export function resetEnrichScheduleState(state, options = {}) {
   state.lastFullEnrich = 0;
   state.lastFullEnrichAttempt = 0;
   state.enrichFailureCount = 0;
+  if (options.clearInflight) {
+    state.enrichingBackground = false;
+  }
 }
 
 /**
@@ -85,7 +141,8 @@ export function createEnrichScheduleSimulator(options = {}) {
     const task = (async () => {
       try {
         const result = await options.runEnrich?.({ state, now, signal: controller.signal });
-        if (result?.failed) {
+        const errors = result?.errors || [];
+        if (result?.failed || shouldMarkFullEnrichFailure(errors, options.topCount ?? 5)) {
           markFullEnrichFailure(state);
         } else {
           markFullEnrichSuccess(state, now);

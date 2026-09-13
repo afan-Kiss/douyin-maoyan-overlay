@@ -21,6 +21,7 @@ import {
   markFullEnrichSuccess,
   markFullEnrichFailure,
   resetEnrichScheduleState,
+  shouldMarkFullEnrichFailure,
   FULL_ENRICH_GLOBAL_TIMEOUT_MS,
 } from "./enrich-scheduler.js";
 
@@ -47,6 +48,8 @@ let hasDisplayedData = false;
 let pollCount = 0;
 const enrichSchedule = createEnrichScheduleState();
 let enrichGeneration = 0;
+let currentEnrichController = null;
+let currentEnrichPromise = null;
 
 const cardPool = new Map();
 const prevValues = new Map();
@@ -1072,6 +1075,21 @@ function updateNation(nation, parsed) {
   }
 }
 
+async function abortAndResetEnrichSchedule() {
+  enrichGeneration += 1;
+  currentEnrichController?.abort();
+  if (currentEnrichPromise) {
+    try {
+      await currentEnrichPromise;
+    } catch {
+      /* aborted or failed */
+    }
+  }
+  currentEnrichController = null;
+  currentEnrichPromise = null;
+  resetEnrichScheduleState(enrichSchedule, { clearInflight: true });
+}
+
 function scheduleBackgroundEnrich(requestPollGen, parsed, speed) {
   if (enrichSchedule.enrichingBackground) return;
 
@@ -1079,14 +1097,15 @@ function scheduleBackgroundEnrich(requestPollGen, parsed, speed) {
   enrichSchedule.pollCount = pollCount;
   if (!shouldScheduleFullEnrich(now, enrichSchedule, FULL_ENRICH_INTERVAL_MS)) return;
 
-  const gen = ++enrichGeneration;
+  const gen = enrichGeneration;
   enrichSchedule.enrichingBackground = true;
   markFullEnrichAttempt(enrichSchedule, now);
 
   const controller = new AbortController();
+  currentEnrichController = controller;
   const timeoutId = setTimeout(() => controller.abort(), FULL_ENRICH_GLOBAL_TIMEOUT_MS);
 
-  (async () => {
+  const promise = (async () => {
     try {
       if (await window.overlay?.isLoginRunning?.()) return;
 
@@ -1107,9 +1126,14 @@ function scheduleBackgroundEnrich(requestPollGen, parsed, speed) {
       const currentSpeed = buildSpeedMap(baseMovies);
       const movies = mergeEnrichedMovies(baseMovies, enriched, currentSpeed);
       renderList(movies);
-      updatePartialDataWarning(getLastEnrichErrors());
+      const errors = getLastEnrichErrors();
+      updatePartialDataWarning(errors);
       setStatus("ok", "");
-      markFullEnrichSuccess(enrichSchedule);
+      if (shouldMarkFullEnrichFailure(errors, RACE_TOP_COUNT)) {
+        markFullEnrichFailure(enrichSchedule);
+      } else {
+        markFullEnrichSuccess(enrichSchedule);
+      }
     } catch (err) {
       console.warn("后台补充字段失败", err);
       if (gen === enrichGeneration) markFullEnrichFailure(enrichSchedule);
@@ -1124,8 +1148,14 @@ function scheduleBackgroundEnrich(requestPollGen, parsed, speed) {
     } finally {
       clearTimeout(timeoutId);
       if (gen === enrichGeneration) enrichSchedule.enrichingBackground = false;
+      if (currentEnrichPromise === promise) {
+        currentEnrichController = null;
+        currentEnrichPromise = null;
+      }
     }
   })();
+
+  currentEnrichPromise = promise;
 }
 
 function scheduleDecodeRetry() {
@@ -1256,7 +1286,7 @@ async function syncOverlaySettings() {
   config.enrichConcurrency = settings.enrich?.concurrency;
   config.trendLimit = RACE_TOP_COUNT;
   FULL_ENRICH_INTERVAL_MS = settings.enrich?.fullIntervalMs || 60000;
-  resetEnrichScheduleState(enrichSchedule);
+  await abortAndResetEnrichSchedule();
   if (hasDisplayedData && pollTimer) restartPolling();
 }
 
@@ -1345,7 +1375,7 @@ async function finishLoginSuccess() {
   await updateLoginButton(false);
   resetApiSigWarm();
   partialDataWarning = "";
-  resetEnrichScheduleState(enrichSchedule);
+  await abortAndResetEnrichSchedule();
   setStatus("loading", "登录成功，正在拉取票房数据…");
   const status = await window.overlay?.ensureApi?.();
   if (status?.apiBase) config.apiBase = status.apiBase;
@@ -1473,14 +1503,14 @@ async function init() {
   config.topCount = RACE_TOP_COUNT;
 
   await syncOverlaySettings();
-  window.overlay?.onSettingsChanged?.((settings) => {
+  window.overlay?.onSettingsChanged?.(async (settings) => {
     applyOverlaySettings(settings);
     config.pollIntervalMs = settings.pollIntervalMs;
     config.topCount = RACE_TOP_COUNT;
     config.enrichConcurrency = settings.enrich?.concurrency;
     config.trendLimit = RACE_TOP_COUNT;
     FULL_ENRICH_INTERVAL_MS = settings.enrich?.fullIntervalMs || 60000;
-    resetEnrichScheduleState(enrichSchedule);
+    await abortAndResetEnrichSchedule();
     if (hasDisplayedData) {
       restartPolling();
       refreshData();
