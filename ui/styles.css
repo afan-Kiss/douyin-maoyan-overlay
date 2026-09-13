@@ -3,12 +3,12 @@
   --design-h: 1920;
   --viewport-scale: 1;
 
-  --bubble-color: #ffd27a;
-  --bubble-bg: linear-gradient(135deg, rgba(60, 12, 18, 0.94) 0%, rgba(90, 18, 24, 0.9) 100%);
-  --bubble-border: rgba(255, 196, 110, 0.55);
-  --bubble-shadow: rgba(255, 170, 60, 0.35);
-  --bubble-glow: rgba(255, 200, 100, 0.25);
-  --bubble-font-size: 28px;
+  --bubble-color: #52e878;
+  --bubble-bg: linear-gradient(135deg, rgba(12, 40, 22, 0.94) 0%, rgba(18, 56, 30, 0.9) 100%);
+  --bubble-border: rgba(82, 232, 120, 0.65);
+  --bubble-shadow: rgba(82, 232, 120, 0.35);
+  --bubble-glow: rgba(82, 232, 120, 0.45);
+  --bubble-font-size: 34px;
   --bubble-duration: 3000ms;
   --bubble-float: 52px;
 
@@ -1079,7 +1079,7 @@ body:not(.is-ready) .bg-curtain--r {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: max(calc(var(--bubble-font-size) * 1.08), calc(22px + var(--card-data-boost) * 0.45));
+  font-size: max(calc(var(--bubble-font-size) * 1.12), calc(26px + var(--card-data-boost) * 0.5));
   font-weight: 800;
   padding: 4px 14px;
   border-radius: 999px;
@@ -1089,9 +1089,10 @@ body:not(.is-ready) .bg-curtain--r {
   white-space: nowrap;
   overflow: visible;
   text-overflow: clip;
-  background: rgba(80, 12, 18, 0.92);
-  border: 1px solid rgba(255, 196, 110, 0.55);
-  box-shadow: 0 0 8px rgba(255, 170, 60, 0.28);
+  color: var(--bubble-color);
+  background: rgba(12, 40, 22, 0.92);
+  border: 1px solid var(--bubble-border);
+  box-shadow: 0 0 12px var(--bubble-shadow);
   transform: none;
   opacity: 1;
 }
@@ -1135,7 +1136,7 @@ body:not(.is-ready) .bg-curtain--r {
 /* ========== 内联涨幅气泡 ========== */
 .nation-pill__delta,
 .race-card__delta-bubble {
-  font-size: max(calc(var(--bubble-font-size) * 1.05), 26px);
+  font-size: max(calc(var(--bubble-font-size) * 1.1), 30px);
   font-weight: 800;
   color: var(--bubble-color);
   font-variant-numeric: tabular-nums;
@@ -1197,7 +1198,7 @@ body:not(.is-ready) .bg-curtain--r {
 }
 
 .race-card--rank1 .race-card__delta-float.race-card__delta-bubble.is-visible {
-  font-size: max(calc(var(--bubble-font-size) * 1.18), calc(24px + var(--card-data-boost) * 0.5));
+  font-size: max(calc(var(--bubble-font-size) * 1.22), calc(30px + var(--card-data-boost) * 0.55));
   padding: 5px 16px;
 }
 

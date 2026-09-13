@@ -4,6 +4,7 @@ import path from "path";
 import express from "express";
 import {
   DIR,
+  DATA_DIR,
   SESSION_CACHE_DIR,
   ensureConfigTemplate,
   getApiPort,
@@ -30,6 +31,45 @@ function parseMovieQuery(req) {
     boxLevel: parseBoxLevel(q.boxLevel ?? q.box_level),
     forceRefresh: q.force_refresh === "true" || q.forceRefresh === "true",
   };
+}
+
+function parseDisplayLimit(query = {}) {
+  const raw = query.displayLimit ?? query.topCount ?? query.limit ?? 0;
+  const n = parseInt(String(raw), 10);
+  if (!Number.isFinite(n) || n < 1) return 0;
+  return Math.min(n, 20);
+}
+
+function trimDashboardPayload(data, limit) {
+  if (!limit || !data?.movieList?.list) return data;
+  const list = data.movieList.list;
+  if (list.length <= limit) return data;
+  return {
+    ...data,
+    movieList: {
+      ...data.movieList,
+      list: list.slice(0, limit),
+    },
+  };
+}
+
+function saveDashboardSnapshot(data, meta = {}) {
+  try {
+    const dir = path.join(DATA_DIR, "logs");
+    fs.mkdirSync(dir, { recursive: true });
+    const payload = {
+      savedAt: new Date().toISOString(),
+      ...meta,
+      data,
+    };
+    fs.writeFileSync(
+      path.join(dir, "last-dashboard.json"),
+      JSON.stringify(payload, null, 2),
+      "utf-8",
+    );
+  } catch {
+    /* 快照失败不阻塞接口 */
+  }
 }
 
 function buildApiErrorPayload(e) {
@@ -229,7 +269,14 @@ async function handleDashboardMovie(req, res) {
       { ...req.query },
       { forceRefresh, signal: controller.signal },
     );
-    res.json(data);
+    const displayLimit = parseDisplayLimit(req.query);
+    const payload = displayLimit ? trimDashboardPayload(data, displayLimit) : data;
+    saveDashboardSnapshot(payload, {
+      displayLimit: displayLimit || 0,
+      movieCount: payload?.movieList?.list?.length || 0,
+      query: { ...req.query },
+    });
+    res.json(payload);
   } catch (e) {
     if (controller.signal.aborted && e?.name !== "TimeoutError") {
       const err = new Error("dashboard_timeout");

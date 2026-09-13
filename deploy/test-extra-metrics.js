@@ -51,11 +51,10 @@ async function main() {
   const threeOnly = getExtraMetrics(
     richMovie(2, {
       dynamicForecast: "100万",
-      hourSpeedText: "10万/h",
       showCountDesc: "1.2万场",
+      yesterdaySamePeriodText: "900.2万",
       sumBoxDesc: "--",
       yesterdayTotal: "--",
-      yesterdaySamePeriodText: "--",
       avgShowView: "--",
       totalViews: "--",
       mainlandBox: "--",

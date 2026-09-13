@@ -14,6 +14,7 @@ import {
   resolveNationSeatMetric,
   computeMovieBoxDeltaWan,
   isUntrustedBoxDecode,
+  isEncodedBoxHtml,
   boxHtmlUsesAntiScrapeFont,
   refreshMovieBoxFields,
   traceDashboardData,
@@ -99,6 +100,7 @@ const PRESERVE_MOVIE_FIELDS = [
   "todayBoxText",
   "boxRate",
   "showCountRate",
+  "avgShowView",
   "avgSeatView",
   "sumBoxDesc",
   "mainlandBox",
@@ -137,6 +139,10 @@ function formatMainlandDisplay(movie) {
   return `¥${text}`;
 }
 
+function mainlandLabel() {
+  return "中国内地";
+}
+
 function formatMoneyMetric(val) {
   if (isEmptyField(val)) return "";
   const text = String(val).trim();
@@ -147,7 +153,7 @@ function formatMoneyMetric(val) {
 
 function shouldPreferEncodedBox(movie) {
   if (!movie?.todayBoxHtml) return false;
-  if (boxHtmlUsesAntiScrapeFont(movie.todayBoxHtml)) return true;
+  if (isEncodedBoxHtml(movie.todayBoxHtml)) return true;
   const raw = String(movie.todayBoxText || "").trim();
   return raw && raw !== "--" && isUntrustedBoxDecode(raw);
 }
@@ -219,12 +225,10 @@ const SUMMARY_COLUMN_DEFS = [
   ],
   [
     {
-      key: "hourSpeed",
-      label: "时速",
-      get: (m) => formatMoneyMetric(formatHourSpeedDisplay(m.hourSpeedText)),
-      fallbacks: [
-        (m) => (m.hourSpeed > 0 ? formatMoneyMetric(formatHourSpeedDisplay(`${m.hourSpeed}万`)) : ""),
-      ],
+      key: "avgShowView",
+      label: "场均人次",
+      get: (m) => m.avgShowView,
+      fallbacks: [],
     },
     {
       key: "showCountRate",
@@ -249,7 +253,6 @@ const EXTRA_SUMMARY_DEFS = [
     get: (m) => formatMoneyMetric(formatHourSpeedDisplay(m.yesterdayHourSpeedText)),
   },
   { key: "totalViews", label: "总人次", get: (m) => m.totalViews },
-  { key: "avgShowView", label: "场均人次", get: (m) => m.avgShowView },
   {
     key: "showCountDesc",
     label: "排片场次",
@@ -545,6 +548,28 @@ function safeDecodeBox(html, unit = "万") {
   return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
+function isTrustedMovieBoxAmount(movie) {
+  if (!movie) return false;
+  const text = String(movie.todayBoxText || "").trim();
+  if (text && text !== "--" && isUntrustedBoxDecode(text)) return false;
+  const amount = getMovieBoxAmount(movie);
+  if (amount <= 0) return false;
+  if (isUntrustedBoxDecode(String(amount))) return false;
+  return true;
+}
+
+function isReasonableBoxDelta(prevAmount, nextAmount, delta) {
+  if (!Number.isFinite(delta) || delta <= 0) return false;
+  if (!Number.isFinite(prevAmount) || !Number.isFinite(nextAmount)) return false;
+  if (nextAmount <= prevAmount) return false;
+  if (isUntrustedBoxDecode(String(nextAmount)) || isUntrustedBoxDecode(String(prevAmount))) {
+    return false;
+  }
+  // 单次轮询涨幅不应超过当前票房的 35%（解码失败时常出现 1111 级跳变）
+  if (prevAmount >= 1 && delta > prevAmount * 0.35) return false;
+  return true;
+}
+
 function resolvePrevAmount(prevAmount, prevHtml, unit) {
   if (Number.isFinite(prevAmount) && prevAmount > 0) return prevAmount;
   if (prevHtml) return safeDecodeBox(prevHtml, unit);
@@ -663,6 +688,7 @@ function mergeEnrichedMovies(baseMovies, enrichedMovies, speed = {}) {
     if (movie.todayBox > 0) merged.todayBox = movie.todayBox;
     if (!isEmptyField(movie.boxRate)) merged.boxRate = movie.boxRate;
     if (!isEmptyField(movie.showCountRate)) merged.showCountRate = movie.showCountRate;
+    if (!isEmptyField(movie.avgShowView)) merged.avgShowView = movie.avgShowView;
     if (!isEmptyField(movie.avgSeatView)) merged.avgSeatView = movie.avgSeatView;
     if (!isEmptyField(movie.sumBoxDesc)) merged.sumBoxDesc = movie.sumBoxDesc;
     if (Array.isArray(enriched.dailyTable) && enriched.dailyTable.length) {
@@ -759,11 +785,8 @@ function buildSpeedMap(movies) {
   for (const movie of movies) {
     const key = String(movie.movieId);
     const prev = speedSnapshots.get(key);
-    const box =
-      movie.todayBox > 0
-        ? movie.todayBox
-        : decodeBoxFromHtml(movie.todayBoxHtml, movie.todayUnit);
-    if (prev && box > 0) {
+    const box = getMovieBoxAmount(movie);
+    if (prev && box > 0 && isTrustedMovieBoxAmount(movie)) {
       map[key] = estimateSpeedMetrics(key, box, prev, now - prev.at);
     }
     if (box > 0) {
@@ -1049,14 +1072,23 @@ function getSummaryMetricsByColumn(movie) {
   return colDefs;
 }
 
-function buildSummaryMetricValueHtml(def, movie) {
+function buildSummaryMetricValueHtml(def, movie, previousHtml = "") {
   if (def.key === "dailyBox" && shouldPreferEncodedBox(movie)) {
     const unit = escapeHtml(movie.todayUnit || "万");
     return `<span class="mtsi-font metric__box-encoded">${movie.todayBoxHtml}</span><span class="unit">${unit}</span>`;
   }
   const raw = resolveMetricRaw(def, movie);
   const trend = def.trend && !isEmptyField(raw) ? trendArrow(def.trend(movie)) : "";
-  const value = isEmptyField(raw) ? "--" : String(raw);
+  if (isEmptyField(raw)) {
+    const prevText = String(previousHtml || "")
+      .replace(/<[^>]+>/g, "")
+      .trim();
+    if (prevText && prevText !== "--") {
+      return previousHtml;
+    }
+    return "--";
+  }
+  const value = String(raw);
   return `${escapeHtml(value)}${trend}`;
 }
 
@@ -1076,7 +1108,7 @@ function updateSummaryInPlace(summaryWrap, movie) {
     for (let i = 0; i < defs.length; i += 1) {
       if (metrics[i].dataset.metric !== defs[i].key) return null;
       const valueEl = metrics[i].querySelector(".metric__value");
-      const nextHtml = buildSummaryMetricValueHtml(defs[i], movie);
+      const nextHtml = buildSummaryMetricValueHtml(defs[i], movie, valueEl?.innerHTML || "");
       if (valueEl && valueEl.innerHTML !== nextHtml) {
         valueEl.innerHTML = nextHtml;
         changed = true;
@@ -1309,6 +1341,10 @@ function dailyTableHtml(rows) {
 
 const RACE_TOP_COUNT = 5;
 
+function getDisplayMovieCount() {
+  return Math.max(1, Number(config.topCount) || RACE_TOP_COUNT);
+}
+
 function cardClassName(movie) {
   const rank = Math.min(Number(movie.rank) || 99, RACE_TOP_COUNT);
   return `race-card race-card--rank${rank}`;
@@ -1336,7 +1372,7 @@ function raceCardTemplate(movie) {
       <div class="race-card__mainland-wrap">
         <span class="race-card__delta-bubble race-card__delta-float" aria-hidden="true"></span>
         <div class="race-card__mainland${isEmptyField(mainland) || mainland === "--" ? " is-empty" : ""}">
-          <em>中国内地：</em>
+          <em class="js-mainland-label">${mainlandLabel()}：</em>
           <strong class="js-mainland">${escapeHtml(mainland)}</strong>
         </div>
       </div>
@@ -1346,12 +1382,30 @@ function raceCardTemplate(movie) {
   `;
 }
 
+function applyCardEncodedBoxes(card, movie) {
+  if (!card || !movie) return;
+  const summaryWrap = card.querySelector(".race-card__summary-wrap");
+  if (summaryWrap) updateSummaryInPlace(summaryWrap, movie);
+
+  const tableRows = ensureDailyTable(movie);
+  const tableWrap = card.querySelector(".race-card__table-wrap");
+  if (tableWrap) {
+    const table = tableWrap.querySelector(".race-card__table");
+    const inPlace = table ? updateDailyTableInPlace(table, tableRows) : null;
+    if (inPlace === null) {
+      tableWrap.innerHTML = `<div class="race-card__table-scaler">${dailyTableHtml(tableRows)}</div>`;
+    }
+    tableWrap.dataset.tableSig = dailyTableSignature(tableRows);
+  }
+}
+
 function buildRaceCard(movie) {
   const card = document.createElement("article");
   card.className = cardClassName(movie);
   card.dataset.movieId = String(movie.movieId);
   card.dataset.rank = String(movie.rank);
   card.innerHTML = raceCardTemplate(movie);
+  applyCardEncodedBoxes(card, movie);
   const tableWrap = card.querySelector(".race-card__table-wrap");
   if (tableWrap) {
     tableWrap.dataset.tableSig = dailyTableSignature(ensureDailyTable(movie));
@@ -1369,13 +1423,16 @@ function computeMovieDelta(movie, isNew) {
   const stored = prevValues.get(key);
   const storedHtml = prevBoxHtml.get(key);
   const decoded = getMovieBoxAmount(movie);
+  if (!isTrustedMovieBoxAmount(movie)) return 0;
+
   let delta = 0;
   if (movie.todayBoxHtml && storedHtml && storedHtml !== movie.todayBoxHtml) {
     delta = computeBoxIncrease(stored, storedHtml, movie.todayBoxHtml, unit);
   }
   if (delta <= 0 && decoded > 0 && stored != null && decoded > stored) {
-    delta = decoded - stored;
+    delta = computeMovieBoxDeltaWan(stored, decoded);
   }
+  if (!isReasonableBoxDelta(stored ?? 0, decoded, delta)) return 0;
   return delta;
 }
 
@@ -1393,16 +1450,18 @@ function trackBoxDelta(_card, movie) {
   const decoded = getMovieBoxAmount(movie);
   const stored = prevValues.get(key);
 
-  // 只抬升/写入有效票房基线；同一次轮询里字体重绘若数值不变则不反复重置
-  if (decoded > 0) {
+  // 只抬升/写入可信票房基线，拒绝 1111.1 等解码垃圾污染气泡
+  if (isTrustedMovieBoxAmount(movie)) {
     if (stored == null || decoded >= stored) {
       prevValues.set(key, decoded);
     }
   }
   if (movie.todayBoxHtml) {
     const prevHtml = prevBoxHtml.get(key);
-    if (!prevHtml || prevHtml !== movie.todayBoxHtml || decoded > 0) {
-      prevBoxHtml.set(key, movie.todayBoxHtml);
+    if (!prevHtml || prevHtml !== movie.todayBoxHtml) {
+      if (isTrustedMovieBoxAmount(movie) || boxHtmlUsesAntiScrapeFont(movie.todayBoxHtml)) {
+        prevBoxHtml.set(key, movie.todayBoxHtml);
+      }
     }
   }
 }
@@ -1436,8 +1495,13 @@ function updateRaceCard(card, movie, isNew = false) {
   const mainland = formatMainlandDisplay(movie);
   const mainlandWrap = card.querySelector(".race-card__mainland");
   const mainlandEl = card.querySelector(".js-mainland");
+  const mainlandLabelEl = card.querySelector(".js-mainland-label");
+  if (mainlandLabelEl) {
+    setTextIfChanged(mainlandLabelEl, `${mainlandLabel()}：`);
+  }
   if (mainlandWrap && mainlandEl) {
     mainlandWrap.classList.toggle("is-empty", isEmptyField(mainland) || mainland === "--");
+    mainlandEl.classList.remove("mtsi-font");
     if (!isEmptyField(mainland) && mainland !== "--") {
       setTextIfChanged(mainlandEl, mainland);
     }
@@ -1515,7 +1579,7 @@ function ensureRaceCard(movie) {
 
 function renderLoadingSkeleton() {
   if (!raceListEl) return;
-  raceListEl.innerHTML = Array.from({ length: RACE_TOP_COUNT }, (_, i) => {
+  raceListEl.innerHTML = Array.from({ length: getDisplayMovieCount() }, (_, i) => {
     const rank = i + 1;
     return `
       <article class="race-card race-card--skeleton race-card--rank${rank}" aria-hidden="true">
@@ -1541,7 +1605,7 @@ function renderList(movies) {
   const list = (movies || [])
     .slice()
     .sort((a, b) => a.rank - b.rank)
-    .slice(0, RACE_TOP_COUNT);
+    .slice(0, getDisplayMovieCount());
   const activeIds = new Set(list.map((m) => String(m.movieId)));
 
   raceListEl.querySelectorAll(".race-card--skeleton").forEach((el) => el.remove());
@@ -1622,12 +1686,14 @@ function isDataTraceEnabled() {
 }
 
 function resolveDisplayBoxAmount(html, unit, numeric, text) {
-  if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  if (Number.isFinite(numeric) && numeric > 0 && !isUntrustedBoxDecode(String(text || numeric))) {
+    return numeric;
+  }
   const fromHtml = safeDecodeBox(html, unit);
   if (fromHtml > 0) return fromHtml;
-  if (!isEmptyField(text)) {
+  if (!isEmptyField(text) && !isUntrustedBoxDecode(text)) {
     const n = parseBoxNum(text, unit || "万");
-    if (n > 0) return n;
+    if (n > 0 && !isUntrustedBoxDecode(String(n))) return n;
   }
   return 0;
 }
@@ -1709,9 +1775,11 @@ function updateNation(nation, parsed) {
     }
     if (nation.todayBoxHtml) prevBoxHtml.set("__nation__", nation.todayBoxHtml);
   } else if (nationAmount > 0) {
-    if (prevNation != null && nationAmount > prevNation) {
-      const delta = nationAmount - prevNation;
-      pulseInlineDelta(nationDeltaEl, delta, "__nation__");
+    if (
+      prevNation != null &&
+      isReasonableBoxDelta(prevNation, nationAmount, nationAmount - prevNation)
+    ) {
+      pulseInlineDelta(nationDeltaEl, nationAmount - prevNation, "__nation__");
     }
     setPlainBoxValue(nationBoxEl, nationAmount, unitEl);
     prevValues.set("__nation__", nationAmount);
@@ -1781,12 +1849,13 @@ function scheduleBackgroundEnrich(requestPollGen, parsed, speed) {
         concurrency: config.enrichConcurrency || 2,
         todayStr: parsed.calendar?.today || "",
         speed,
-        trendLimit: RACE_TOP_COUNT,
+        trendLimit: getDisplayMovieCount(),
         enableExtraApis: true,
         signal: controller.signal,
       };
 
-      const enriched = await enrichMovies(config.apiBase, parsed.movies, enrichOpts);
+      const visibleMovies = parsed.movies.slice(0, getDisplayMovieCount());
+      const enriched = await enrichMovies(config.apiBase, visibleMovies, enrichOpts);
 
       if (gen !== enrichGeneration) return;
 
@@ -1797,7 +1866,7 @@ function scheduleBackgroundEnrich(requestPollGen, parsed, speed) {
       const errors = getLastEnrichErrors();
       updatePartialDataWarning(errors);
       setStatus("ok", "");
-      if (shouldMarkFullEnrichFailure(errors, RACE_TOP_COUNT)) {
+      if (shouldMarkFullEnrichFailure(errors, getDisplayMovieCount())) {
         markFullEnrichFailure(enrichSchedule, Date.now());
       } else {
         markFullEnrichSuccess(enrichSchedule, Date.now());
@@ -1871,8 +1940,9 @@ async function refreshData() {
       }
     }
 
-    const raw = await fetchDashboard(config.apiBase);
-    const parsed = parseDashboard(raw, RACE_TOP_COUNT);
+    const displayCount = getDisplayMovieCount();
+    const raw = await fetchDashboard(config.apiBase, "", { topCount: displayCount });
+    const parsed = parseDashboard(raw, displayCount);
     resetLastGoodIfDayChanged(parsed.calendar?.today);
     traceDashboardData(parsed, raw, { enabled: isDataTraceEnabled() });
     if (!parsed.movies.length) {
@@ -1880,47 +1950,37 @@ async function refreshData() {
       return;
     }
 
+    if (raw.fontStyle) {
+      try {
+        await injectFontStyle(raw.fontStyle);
+      } catch (err) {
+        console.warn("字体加载失败", err);
+      }
+    }
+
     pollGeneration += 1;
-    latestMovies = parsed.movies;
-    latestNation = parsed.nation;
+    latestMovies = parsed.movies.map(refreshMovieBoxFields);
+    latestNation = parsed.nation
+      ? refreshMovieBoxFields({ ...parsed.nation, todayBoxHtml: parsed.nation.todayBoxHtml || "" })
+      : parsed.nation;
     latestParsedMeta = parsed;
-    const speed = buildSpeedMap(parsed.movies);
+    const speed = buildSpeedMap(latestMovies);
     latestSpeedMap = speed;
-    const movies = enrichMoviesQuick(parsed.movies, speed).map(stabilizeMovie);
+    const movies = enrichMoviesQuick(latestMovies, speed).map(stabilizeMovie);
 
     renderList(movies);
-    updateNation(parsed.nation, parsed);
+    updateNation(latestNation, parsed);
 
     hasDisplayedData = true;
     document.body.classList.add("is-ready");
     setStatus("ok", "");
 
-    // D+F: 首屏只出大盘；enrich 延后到验签窗口之后，避免与无头 Chrome 叠峰
     if (!firstDashboardPainted) {
       firstDashboardPainted = true;
-      pendingEnrichArgs = { requestPollGen: pollGeneration, parsed, speed };
-      setTimeout(() => {
-        enrichAllowed = true;
-        const args = pendingEnrichArgs;
-        pendingEnrichArgs = null;
-        if (args) scheduleBackgroundEnrich(args.requestPollGen, args.parsed, args.speed);
-      }, 4000);
-    } else {
-      scheduleBackgroundEnrich(pollGeneration, parsed, speed);
     }
-    void injectFontStyle(raw.fontStyle)
-      .then(() => {
-        if (!latestMovies.length) return;
-        latestMovies = latestMovies.map(refreshMovieBoxFields);
-        if (latestNation) {
-          latestNation = refreshMovieBoxFields({ ...latestNation, todayBoxHtml: latestNation.todayBoxHtml || "" });
-        }
-        const decoded = enrichMoviesQuick(latestMovies, latestSpeedMap).map(stabilizeMovie);
-        renderList(decoded);
-        if (latestNation) updateNation(latestNation, latestParsedMeta || {});
-        scheduleDecodeRetry();
-      })
-      .catch((err) => console.warn("字体加载失败", err));
+    enrichAllowed = true;
+    scheduleBackgroundEnrich(pollGeneration, parsed, speed);
+    scheduleDecodeRetry();
     await updateLoginButton();
   } catch (e) {
     const msg = String(e.message || "");
@@ -2199,10 +2259,17 @@ async function handleLoginClick() {
         const running = await window.overlay?.isLoginRunning?.();
         if (running) return;
         const session = (await window.overlay?.getSessionStatus?.()) || {};
-        if (session.detailApiReady && session.identityCookieExists) {
+        if (
+          session.detailApiReady ||
+          (session.loginCookieReady && session.storageStateExists)
+        ) {
           clearInterval(loginWatchTimer);
           loginWatchTimer = null;
-          resolve({ ok: true, detailApiReady: true });
+          resolve({
+            ok: true,
+            detailApiReady: Boolean(session.detailApiReady),
+            loginCookieReady: Boolean(session.loginCookieReady),
+          });
         }
       }, 2000);
     }),

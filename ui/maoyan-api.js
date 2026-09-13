@@ -31,7 +31,6 @@ const DASHBOARD_PARAMS = {
   sVersion: "2",
   signKey: "",
   WuKongReady: "h5",
-  force_refresh: "true",
 };
 
 function mergeFetchSignal(parentSignal, timeoutMs) {
@@ -57,15 +56,37 @@ function runClientInflight(store, key, fn) {
   return task;
 }
 
+export function resolveDisplayMovieCount(count) {
+  const n = Number(count);
+  if (!Number.isFinite(n) || n < 1) return 5;
+  return Math.min(Math.floor(n), 20);
+}
+
+/** 大盘列表只保留 UI 需要的前 N 部，避免解析/传递整榜数据 */
+export function trimDashboardRaw(raw, topCount) {
+  const limit = resolveDisplayMovieCount(topCount);
+  const list = raw?.movieList?.list;
+  if (!raw || !Array.isArray(list) || list.length <= limit) return raw;
+  return {
+    ...raw,
+    movieList: {
+      ...raw.movieList,
+      list: list.slice(0, limit),
+    },
+  };
+}
+
 export async function fetchDashboard(apiBase, movieId = "", options = {}) {
-  const url =
-    `${apiBase}/i/api/dashboard-ajax/movie?` +
-    new URLSearchParams({ ...DASHBOARD_PARAMS, movieId: String(movieId || "") });
+  const topCount = !movieId ? resolveDisplayMovieCount(options.topCount) : 0;
+  const params = { ...DASHBOARD_PARAMS, movieId: String(movieId || "") };
+  if (topCount > 0) params.displayLimit = String(topCount);
+  const url = `${apiBase}/i/api/dashboard-ajax/movie?` + new URLSearchParams(params);
   const dedupeKey = url;
   return runClientInflight(dashboardInflight, dedupeKey, async () => {
-    const resp = await fetch(url, { signal: mergeFetchSignal(options.signal, 60000) });
+    const resp = await fetch(url, { signal: mergeFetchSignal(options.signal, 25000) });
     if (!resp.ok) throw await readApiError(resp);
-    return resp.json();
+    const raw = await resp.json();
+    return topCount > 0 ? trimDashboardRaw(raw, topCount) : raw;
   });
 }
 
@@ -210,8 +231,21 @@ export function isUntrustedBoxDecode(text) {
   return false;
 }
 
+/** API 常返回 &#xe6d5; 实体或 PUA 字符，均属反爬字体票房 */
+export function isEncodedBoxHtml(numHtml) {
+  const raw = String(numHtml || "");
+  if (!raw) return false;
+  if (/&#x[e-f0-9]{3,4};/i.test(raw)) return true;
+  if (/[\uE000-\uF8FF]/.test(raw)) return true;
+  if (typeof document === "undefined") return false;
+  const el = ensureDecoder();
+  el.innerHTML = raw;
+  return hasPrivateUseChars(el.textContent || "");
+}
+
 export function boxHtmlUsesAntiScrapeFont(numHtml) {
   if (!numHtml) return false;
+  if (/&#x[e-f0-9]{3,4};/i.test(String(numHtml))) return true;
   if (typeof document === "undefined") {
     return /[\uE000-\uF8FF]/.test(String(numHtml));
   }
@@ -391,11 +425,13 @@ export function parseBoxNum(text, unit = "万") {
 }
 
 function resolveTodayBox(todayRaw, todayUnit) {
+  if (!todayRaw || isUntrustedBoxDecode(todayRaw)) return 0;
   let todayBox = parseBoxNum(todayRaw, todayUnit);
-  if (todayBox > 0) return todayBox;
-  if (todayRaw) {
-    const retry = parseBoxNum(todayRaw.replace(/[^\d.]/g, ""), todayUnit);
-    if (retry > 0) return retry;
+  if (todayBox > 0 && !isUntrustedBoxDecode(String(todayBox))) return todayBox;
+  const stripped = String(todayRaw).replace(/[^\d.]/g, "");
+  if (stripped && !isUntrustedBoxDecode(stripped)) {
+    const retry = parseBoxNum(stripped, todayUnit);
+    if (retry > 0 && !isUntrustedBoxDecode(String(retry))) return retry;
   }
   return 0;
 }
@@ -487,10 +523,39 @@ export function refreshMovieBoxFields(movie) {
   const todayBoxHtml = movie.todayBoxHtml || "";
   const todayUnit = normalizeUnit(movie.todayUnit);
   const todayRaw = decodeFontNum(todayBoxHtml);
+  const prevText = String(movie.todayBoxText || "").trim();
+  const prevBox = movie.todayBox;
+  const prevTrusted =
+    prevBox > 0 && !isUntrustedBoxDecode(prevText || String(prevBox));
+
+  if (!todayRaw) {
+    if (prevTrusted) {
+      return { ...movie, todayUnit };
+    }
+    return {
+      ...movie,
+      todayBoxText: "--",
+      todayBox: 0,
+      todayUnit,
+    };
+  }
+
   const todayBox = resolveTodayBox(todayRaw, todayUnit);
+  if (todayBox <= 0) {
+    if (prevTrusted) {
+      return { ...movie, todayUnit };
+    }
+    return {
+      ...movie,
+      todayBoxText: "--",
+      todayBox: 0,
+      todayUnit,
+    };
+  }
+
   return {
     ...movie,
-    todayBoxText: todayRaw || "--",
+    todayBoxText: todayRaw,
     todayBox,
     todayUnit,
   };
@@ -818,6 +883,21 @@ function parseBoxShowMetrics(raw, todayStr = "") {
     latest?.viewCountDesc ||
     "--";
 
+  let yesterdayDesc = "--";
+  let yesterdayBox = 0;
+  for (const title of ["昨日综合票房", "昨日票房", "昨日总票房"]) {
+    const item = summary[title];
+    const val = item?.valueDesc;
+    if (val == null || String(val).trim() === "") continue;
+    const unit = item?.unitDesc || "万";
+    const text = formatDescMoney(
+      String(val).includes("亿") || String(val).includes("万") ? String(val) : `${val}${unit}`,
+    );
+    yesterdayDesc = text;
+    yesterdayBox = parseBoxNum(text);
+    break;
+  }
+
   return {
     hourSpeed,
     hourSpeedText: formatHourSpeedText(hourSpeed),
@@ -825,6 +905,8 @@ function parseBoxShowMetrics(raw, todayStr = "") {
     yesterdayHourSpeedText: formatHourSpeedText(yesterdayHourSpeed),
     yesterdaySamePeriod,
     yesterdaySamePeriodText: yesterdaySamePeriod > 0 ? formatMoneyWan(yesterdaySamePeriod) : "--",
+    yesterdayDesc,
+    yesterdayBox,
     totalViews,
     presaleTotal: summary["累计综合票房(含预售)"]?.valueDesc || "--",
     dailyRows: mapBoxShowRowsToDaily(rows, todayStr),
@@ -1033,8 +1115,9 @@ function mapDashboardItem(item, index) {
   const info = item.movieInfo || {};
   const todayBoxHtml = item.boxSplitUnit?.num || "";
   const todayUnit = normalizeUnit(item.boxSplitUnit?.unit);
-  const todayRaw = decodeFontNum(todayBoxHtml);
-  const todayBox = resolveTodayBox(todayRaw, todayUnit);
+  const encodedBox = isEncodedBoxHtml(todayBoxHtml);
+  const todayRaw = encodedBox ? "" : decodeFontNum(todayBoxHtml);
+  const todayBox = encodedBox ? 0 : resolveTodayBox(todayRaw, todayUnit);
   const splitHtml = item.splitBoxSplitUnit?.num || "";
   const splitUnit = normalizeUnit(item.splitBoxSplitUnit?.unit);
   const splitRaw = decodeFontNum(splitHtml);
@@ -1065,11 +1148,14 @@ function mapDashboardItem(item, index) {
 }
 
 export function parseDashboard(raw, topCount = 5) {
-  const list = raw?.movieList?.list ?? [];
-  const nation = raw?.movieList?.nationBoxInfo ?? {};
-  const updateInfo = raw?.movieList?.updateInfo ?? {};
-  const calendar = raw?.calendar ?? {};
-  const movies = list.slice(0, topCount).map(mapDashboardItem);
+  const trimmed = trimDashboardRaw(raw, topCount);
+  const limit = resolveDisplayMovieCount(topCount);
+  const list = trimmed?.movieList?.list ?? [];
+  const nation = trimmed?.movieList?.nationBoxInfo ?? {};
+  const updateInfo = trimmed?.movieList?.updateInfo ?? {};
+  const calendar = trimmed?.calendar ?? {};
+  // 排名严格跟随猫眼大盘 API 顺序（当日票房占比），禁止客户端二次排序
+  const movies = list.slice(0, limit).map(mapDashboardItem);
 
   const nationBoxHtml = nation.nationBoxSplitUnit?.num || "";
   const nationUnit = normalizeUnit(nation.nationBoxSplitUnit?.unit);
@@ -1080,7 +1166,7 @@ export function parseDashboard(raw, topCount = 5) {
   const nationSplitUnit = normalizeUnit(nation.nationSplitBoxSplitUnit?.unit);
   const nationSplitRaw = decodeFontNum(nationSplitHtml);
 
-  const globalTrends = parseTrends(raw?.movieInfo?.boxTrends, calendar.today);
+  const globalTrends = parseTrends(trimmed?.movieInfo?.boxTrends, calendar.today);
   const seatMetric = resolveNationSeatMetric(nation);
 
   return {
@@ -1107,7 +1193,7 @@ export function parseDashboard(raw, topCount = 5) {
     updateGapSecond: updateInfo.updateGapSecond || 5,
     updateTimestamp: updateInfo.updateTimestamp || Date.now(),
     updateTimeText: formatTimestamp(updateInfo.updateTimestamp) || "",
-    fontStyle: raw?.fontStyle || "",
+    fontStyle: trimmed?.fontStyle || "",
     updatedAt: Date.now(),
     globalTrends,
   };
@@ -1145,6 +1231,9 @@ export function mergeMovieDetail(base, detail = {}) {
   if (!isEmptyMetricValue(trends.yesterdayDesc)) {
     merged.yesterdayTotal = trends.yesterdayDesc;
     if (trends.yesterdayBox > 0) merged.yesterdayBox = trends.yesterdayBox;
+  } else if (!isEmptyMetricValue(boxShow.yesterdayDesc)) {
+    merged.yesterdayTotal = boxShow.yesterdayDesc;
+    if (boxShow.yesterdayBox > 0) merged.yesterdayBox = boxShow.yesterdayBox;
   }
 
   const hourSpeedFromBoxShow =
@@ -1342,7 +1431,6 @@ export const EXTRA_METRIC_FIELD_MAP = [
 
 const EXTRA_METRIC_CANDIDATES = [
   { key: "dynamicForecast", label: "动态预测", tier: 1, get: (m) => m.dynamicForecast },
-  { key: "hourSpeedText", label: "今日时速", tier: 1, get: (m) => formatHourSpeedDisplay(m.hourSpeedText) },
   { key: "showCountDesc", label: "排片场次", tier: 1, get: (m) => formatShowCountDesc(m) },
   { key: "sumBoxDesc", label: "累计票房", tier: 1, get: (m) => m.sumBoxDesc },
   { key: "yesterdayTotal", label: "昨日票房", tier: 1, get: (m) => m.yesterdayTotal },
@@ -1350,7 +1438,6 @@ const EXTRA_METRIC_CANDIDATES = [
   { key: "yesterdaySamePeriodText", label: "昨日同期", tier: 1, get: (m) => m.yesterdaySamePeriodText },
   { key: "totalViews", label: "累计观影人次", tier: 1, get: (m) => m.totalViews },
   { key: "totalForecast", label: "总预测", tier: 2, get: (m) => m.totalForecast },
-  { key: "yesterdayHourSpeedText", label: "昨日时速", tier: 2, get: (m) => formatHourSpeedDisplay(m.yesterdayHourSpeedText) },
   { key: "endDate", label: "下映日期", tier: 2, get: (m) => (isEmptyMetricValue(m.endDate) ? "" : m.endDate) },
   {
     key: "remainingDays",
@@ -1688,15 +1775,6 @@ async function mapPool(items, limit, worker, parentSignal) {
   return results;
 }
 
-async function fetchMovieTrends(apiBase, movie, todayStr, parentSignal) {
-  try {
-    const trendRaw = await fetchDashboard(apiBase, movie.movieId, { signal: parentSignal });
-    return parseTrends(trendRaw?.movieInfo?.boxTrends, trendRaw?.calendar?.today || todayStr);
-  } catch {
-    return {};
-  }
-}
-
 export function enrichMoviesQuick(movies, speed = {}) {
   return movies.map((movie) =>
     mergeMovieDetail(movie, { speed: speed[String(movie.movieId)] || {} })
@@ -1709,7 +1787,7 @@ async function fetchMovieExtraDetail(apiBase, movie, todayStr, speed = {}, paren
   }
 
   const detail = {
-    trends: await fetchMovieTrends(apiBase, movie, todayStr, parentSignal),
+    trends: {},
     boxShow: {},
     prediction: {},
     global: {},
@@ -1781,28 +1859,22 @@ async function fetchMovieExtraDetail(apiBase, movie, todayStr, speed = {}, paren
 export async function enrichMoviesLight(apiBase, movies, options = {}) {
   const concurrency = options.concurrency || 3;
   const todayStr = options.todayStr || "";
-  // 仅前 trendLimit 名请求详细接口；其余排名依赖大盘 parseDashboard 字段
-  const trendLimit = options.trendLimit ?? 5;
+  const trendLimit = resolveDisplayMovieCount(options.trendLimit ?? 5);
   const enableExtraApis = options.enableExtraApis !== false;
-  const results = enrichMoviesQuick(movies, options.speed || {});
+  const visible = (movies || []).slice(0, trendLimit);
+  if (!visible.length) return [];
 
-  const targets = movies.slice(0, trendLimit);
   const parentSignal = options.signal;
-  const enriched = await mapPool(targets, concurrency, async (movie) => {
+  const enriched = await mapPool(visible, concurrency, async (movie) => {
     const speed = options.speed?.[String(movie.movieId)] || {};
     if (!enableExtraApis) {
-      const trends = await fetchMovieTrends(apiBase, movie, todayStr, parentSignal);
-      return mergeMovieDetail(movie, { trends, speed });
+      return mergeMovieDetail(movie, { speed });
     }
     const detail = await fetchMovieExtraDetail(apiBase, movie, todayStr, speed, parentSignal);
     return mergeMovieDetail(movie, detail);
   }, parentSignal);
 
-  for (let i = 0; i < enriched.length; i++) {
-    const idx = movies.indexOf(targets[i]);
-    if (idx >= 0) results[idx] = enriched[i];
-  }
-  return results;
+  return enriched;
 }
 
 export { parsePredictionMetrics, parseBoxShowMetrics };
@@ -1811,34 +1883,33 @@ export async function enrichMovies(apiBase, movies, options = {}) {
   const concurrency = options.concurrency || 2;
   const enableExtraApis = options.enableExtraApis !== false;
   const todayStr = options.todayStr || "";
-  // 显示的前 trendLimit 名均走详细 enrich（默认与 TOP5 榜单一致）
-  const trendLimit = options.trendLimit ?? 5;
+  const trendLimit = resolveDisplayMovieCount(options.trendLimit ?? 5);
+  const visible = (movies || []).slice(0, trendLimit);
+  if (!visible.length) return [];
 
   lastEnrichErrors = [];
-  const results = enrichMoviesQuick(movies, options.speed || {});
-  const targets = movies.slice(0, trendLimit);
+  const results = enrichMoviesQuick(visible, options.speed || {});
 
   const parentSignal = options.signal;
   const detailSnapshots = {};
 
-  if (enableExtraApis && targets.length) {
+  if (enableExtraApis && visible.length) {
     try {
-      await warmMovieApiSignatures(apiBase, targets[0].movieId, parentSignal);
+      await warmMovieApiSignatures(apiBase, visible[0].movieId, parentSignal);
     } catch (error) {
       if (parentSignal?.aborted) throw error;
       const warmErr = getWarmLastError() || summarizeEnrichError(error);
-      lastEnrichErrors.push({ movieId: targets[0].movieId, label: "签名预热", ...warmErr });
+      lastEnrichErrors.push({ movieId: visible[0].movieId, label: "签名预热", ...warmErr });
     }
   }
 
-  await mapPool(targets, concurrency, async (movie) => {
-    const idx = movies.indexOf(movie);
+  await mapPool(visible, concurrency, async (movie) => {
+    const idx = visible.indexOf(movie);
     if (idx < 0) return;
 
     const speed = options.speed?.[String(movie.movieId)] || {};
     if (!enableExtraApis) {
-      const trends = await fetchMovieTrends(apiBase, movie, todayStr, parentSignal);
-      results[idx] = mergeMovieDetail(movie, { trends, speed });
+      results[idx] = mergeMovieDetail(movie, { speed });
       return;
     }
 
@@ -1854,6 +1925,6 @@ export async function enrichMovies(apiBase, movies, options = {}) {
     results[idx] = mergeMovieDetail(movie, detail);
   }, parentSignal);
 
-  logMaoyanFieldAudit(results.slice(0, trendLimit), detailSnapshots, options);
+  logMaoyanFieldAudit(results, detailSnapshots, options);
   return results;
 }

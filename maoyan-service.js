@@ -379,6 +379,32 @@ function checkHealth(apiBase) {
   });
 }
 
+/** 服务就绪后在后台预热大盘缓存，缩短首屏等待（与 ui/maoyan-api DASHBOARD_PARAMS 一致） */
+function warmDashboardCache(apiBase) {
+  const base = String(apiBase || "").trim();
+  if (!base) return;
+  const qs = new URLSearchParams({
+    orderType: "0",
+    uuid: "",
+    timeStamp: "",
+    "User-Agent": "",
+    index: "240",
+    channelId: "40009",
+    sVersion: "2",
+    signKey: "",
+    WuKongReady: "h5",
+    displayLimit: "5",
+  });
+  const url = `${base}/i/api/dashboard-ajax/movie?${qs}`;
+  const req = http.get(url, { timeout: 90000 }, (res) => {
+    res.resume();
+  });
+  req.on("error", () => {});
+  req.on("timeout", () => {
+    req.destroy();
+  });
+}
+
 function handleMaoyanChildExit(child, code) {
   if (maoyanProcess !== child) return;
   maoyanProcess = null;
@@ -602,6 +628,7 @@ async function ensureMaoyanServiceInner(config) {
   if (await checkHealth(apiBase)) {
     apiStatus.ready = true;
     Object.assign(apiStatus, getMaoyanSessionStatus());
+    warmDashboardCache(apiBase);
     // 延后验签，先让首屏大盘出来（避免启动瞬间再起无头 Chrome）
     setTimeout(() => scheduleBackgroundVerify(apiBase, getDataDir()), 12000);
     return apiStatus;
@@ -611,6 +638,7 @@ async function ensureMaoyanServiceInner(config) {
   if (await checkHealth(apiBase)) {
     apiStatus.ready = true;
     Object.assign(apiStatus, getMaoyanSessionStatus());
+    warmDashboardCache(apiBase);
     setTimeout(() => scheduleBackgroundVerify(apiBase, getDataDir()), 12000);
     return apiStatus;
   }
@@ -642,6 +670,7 @@ async function ensureMaoyanServiceInner(config) {
     apiStatus.ready = true;
     apiStatus.error = "";
     Object.assign(apiStatus, getMaoyanSessionStatus());
+    warmDashboardCache(apiBase);
     setTimeout(() => scheduleBackgroundVerify(apiBase, getDataDir()), 12000);
   } else {
     const crash = summarizeChildCrash(child);

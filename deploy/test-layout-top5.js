@@ -51,6 +51,7 @@ function richMovie(rank, withExtras = true) {
     boxRate: `${(27.4 - rank * 1.2).toFixed(1)}%`,
     showCountRate: `${(26.0 - rank * 0.9).toFixed(1)}%`,
     avgSeatView: `${(1.2 + rank * 0.3).toFixed(1)}%`,
+    avgShowView: rank === 1 ? "35" : `${28 - rank * 2}`,
     sumBoxDesc: rank === 1 ? "21.53亿" : `${(8 + rank).toFixed(2)}亿`,
     mainlandBox: rank === 1 ? "21.53亿" : `${(8 + rank).toFixed(2)}亿`,
     dailyIncrease: `${todayBox.toFixed(2)}万`,
@@ -60,7 +61,6 @@ function richMovie(rank, withExtras = true) {
   return {
     ...base,
     dynamicForecast: rank === 1 ? "1537.58万" : `${(400 + rank * 50).toFixed(2)}万`,
-    hourSpeedText: rank === 1 ? "128.5万/h" : `${(20 + rank * 3).toFixed(1)}万/h`,
     totalForecast: rank === 1 ? "21.53亿" : `${(8 + rank).toFixed(2)}亿`,
   };
 }
@@ -275,7 +275,7 @@ async function renderAndInspect(page, movies, nation) {
       }
 
       const metricLabels = [...metrics].map((el) => el.querySelector(".metric__label")?.textContent?.trim());
-      const coreLabels = ["动态预测", "总预测", "实时上座", "实时票房", "票房占比", "时速", "排片占比"];
+      const coreLabels = ["动态预测", "总预测", "实时上座", "实时票房", "票房占比", "场均人次", "排片占比"];
       for (const label of coreLabels) {
         if (!metricLabels.includes(label)) {
           issues.push(`第 ${rank} 名缺少核心摘要字段: ${label}`);
