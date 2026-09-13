@@ -17,8 +17,8 @@ import { bindDesignViewport } from "./viewport-fit.js";
 const $ = (id) => document.getElementById(id);
 
 const raceListEl = $("race-list");
-const deltaOverlayEl = $("delta-overlay");
 const statusEl = $("status");
+const nationDeltaEl = $("nation-delta");
 const nationBoxEl = $("nation-box");
 const nationShowsEl = $("nation-shows");
 const nationViewsEl = $("nation-views");
@@ -46,14 +46,14 @@ const prevRankMap = new Map();
 const speedSnapshots = new Map();
 const lastGoodMovies = new Map();
 const lastGoodNation = {};
-const lastDeltaDisplay = new Map();
 let latestMovies = [];
 let latestSpeedMap = {};
 let latestNation = null;
 let latestParsedMeta = null;
 let pollGeneration = 0;
 let FULL_ENRICH_INTERVAL_MS = 60000;
-const DELTA_PERSIST_MS = 4000;
+const DELTA_ANIM_MS = 3000;
+const inlineDeltaTimers = new Map();
 let partialDataWarning = "";
 
 function isEmptyField(val) {
@@ -241,42 +241,38 @@ function formatDelta(deltaWan) {
   return `+${deltaWan.toFixed(2)}万`;
 }
 
+function formatDeltaWithArrow(deltaWan) {
+  const text = formatDelta(deltaWan);
+  return text ? `${text} ↑` : "";
+}
+
+function pulseInlineDelta(el, deltaWan, timerKey) {
+  const bubble = getOverlaySettings()?.bubble;
+  const minDelta = bubble?.minDelta ?? 0.001;
+  if (!el || bubble?.enabled === false) return;
+  if (!Number.isFinite(deltaWan) || deltaWan < minDelta) return;
+
+  el.textContent = formatDeltaWithArrow(deltaWan);
+  el.classList.remove("is-animating");
+  void el.offsetWidth;
+  el.classList.add("is-visible", "is-animating");
+
+  const key = timerKey || el;
+  if (inlineDeltaTimers.has(key)) clearTimeout(inlineDeltaTimers.get(key));
+  inlineDeltaTimers.set(
+    key,
+    setTimeout(() => {
+      el.classList.remove("is-visible", "is-animating");
+      el.textContent = "";
+      inlineDeltaTimers.delete(key);
+    }, DELTA_ANIM_MS),
+  );
+}
+
 function safeDecodeBox(html, unit = "万") {
   if (!html) return 0;
   const value = decodeBoxFromHtml(html, unit);
   return Number.isFinite(value) && value > 0 ? value : 0;
-}
-
-function showBoxDelta(anchorEl, delta) {
-  const bubble = getOverlaySettings()?.bubble;
-  const minDelta = bubble?.minDelta ?? 0.001;
-  if (bubble?.enabled === false) return;
-  if (!anchorEl || !deltaOverlayEl || !Number.isFinite(delta) || delta < minDelta) return;
-
-  const rect = anchorEl.getBoundingClientRect();
-  if (!rect.width && !rect.height) return;
-
-  const el = document.createElement("span");
-  el.className = "delta-bubble";
-  el.textContent = formatDelta(delta);
-  el.style.left = `${rect.left + rect.width * 0.5}px`;
-  el.style.top = `${Math.max(8, rect.top - 6)}px`;
-  deltaOverlayEl.appendChild(el);
-
-  requestAnimationFrame(() => el.classList.add("delta-bubble--pop"));
-  el.addEventListener("animationend", () => el.remove(), { once: true });
-}
-
-function showBoxDeltaWhenReady(anchorEl, delta, attempt = 0) {
-  if (!anchorEl) return;
-  const rect = anchorEl.getBoundingClientRect();
-  if (rect.width || rect.height) {
-    showBoxDelta(anchorEl, delta);
-    return;
-  }
-  if (attempt < 8) {
-    requestAnimationFrame(() => showBoxDeltaWhenReady(anchorEl, delta, attempt + 1));
-  }
 }
 
 function resolvePrevAmount(prevAmount, prevHtml, unit) {
@@ -292,12 +288,6 @@ function computeBoxIncrease(prevAmount, prevHtml, nextHtml, unit) {
   if (prev <= 0 || next <= prev) return 0;
   const delta = next - prev;
   return delta >= 0.001 ? delta : 0;
-}
-
-function maybeShowBoxIncrease(anchorEl, prevAmount, prevHtml, nextHtml, unit, isNew) {
-  if (isNew || !anchorEl) return;
-  const delta = computeBoxIncrease(prevAmount, prevHtml, nextHtml, unit);
-  if (delta > 0) showBoxDeltaWhenReady(anchorEl, delta);
 }
 
 function mergeDailyTableRows(prevRows, nextRows) {
@@ -419,7 +409,6 @@ function purgeMovieState(id) {
   prevRankMap.delete(id);
   speedSnapshots.delete(id);
   lastGoodMovies.delete(id);
-  lastDeltaDisplay.delete(id);
 }
 
 function getMovieBoxAmount(movie) {
@@ -685,42 +674,71 @@ function formatDisplayBox(movie) {
   return "--";
 }
 
-function buildRankExtras(movie) {
-  if (Number(movie.rank) !== 1) return "";
-  const parts = [];
-  if (!isEmptyField(movie.dynamicForecast)) {
-    parts.push(
-      `<span class="race-card__extra"><em>动态预测</em><strong>${escapeHtml(movie.dynamicForecast)}${trendArrow(movie.dynamicTrend)}</strong></span>`,
-    );
+const CORE_STAT_DEFS = [
+  { label: "票房占比", key: "boxRate", cls: "js-box-rate" },
+  { label: "排片占比", key: "showCountRate", cls: "js-show-rate" },
+  { label: "实时上座", key: "avgSeatView", cls: "js-seat-view" },
+];
+
+const EXTRA_STAT_DEFS = [
+  { label: "动态预测", key: "dynamicForecast", cls: "js-forecast", trend: "dynamicTrend" },
+  { label: "累计票房", key: "sumBoxDesc", cls: "js-sum-box" },
+  { label: "今日时速", key: "hourSpeedText", cls: "js-hour-speed" },
+  { label: "昨日票房", key: "yesterdayTotal", cls: "js-yest-total" },
+  { label: "昨日同期", key: "yesterdaySamePeriodText", cls: "js-yest-same" },
+];
+
+function statValue(movie, def) {
+  const raw = movie[def.key];
+  if (isEmptyField(raw)) return "--";
+  const trend = def.trend ? trendArrow(movie[def.trend]) : "";
+  return `${escapeHtml(String(raw))}${trend}`;
+}
+
+function buildCardStatDefs(movie, isRank1) {
+  const core = CORE_STAT_DEFS.map((def) => ({ ...def, always: true }));
+  let extras;
+  if (isRank1) {
+    extras = EXTRA_STAT_DEFS.slice(0, 3);
+  } else {
+    extras = EXTRA_STAT_DEFS.filter((def) => !isEmptyField(movie[def.key])).slice(0, 2);
   }
-  if (!isEmptyField(movie.sumBoxDesc)) {
-    parts.push(
-      `<span class="race-card__extra"><em>累计票房</em><strong>${escapeHtml(movie.sumBoxDesc)}</strong></span>`,
-    );
-  }
-  return parts.length ? `<div class="race-card__extras">${parts.join("")}</div>` : "";
+  return [...core, ...extras];
+}
+
+function buildStatsGridHtml(movie) {
+  const isRank1 = Number(movie.rank) === 1;
+  const defs = buildCardStatDefs(movie, isRank1);
+  return defs
+    .map((def) => {
+      const hide = !def.always && isEmptyField(movie[def.key]);
+      if (hide) return "";
+      return `<div class="race-stat" data-stat="${def.cls}">
+        <em>${def.label}</em>
+        <strong class="${def.cls}">${statValue(movie, def)}</strong>
+      </div>`;
+    })
+    .join("");
 }
 
 function raceCardTemplate(movie) {
   const boxText = formatDisplayBox(movie);
+  const isRank1 = Number(movie.rank) === 1;
   return `
-    <div class="race-card__top">
-      <span class="race-card__rank">NO.${movie.rank}</span>
+    <div class="race-card__head">
       <h2 class="race-card__title">《${escapeHtml(movie.name)}》</h2>
+      <span class="race-card__rank">NO.${movie.rank}</span>
     </div>
-    <div class="race-card__boxline">
-      <span class="race-card__delta"></span>
-      <div class="race-card__box">
-        <em>实时票房</em>
+    <div class="race-card__box-row">
+      <span class="race-card__box-label">实时票房</span>
+      <div class="race-card__box-value">
         <strong class="js-day-box">${escapeHtml(boxText)}</strong>
+        <span class="race-card__delta-bubble" aria-hidden="true"></span>
       </div>
     </div>
-    <div class="race-card__stats">
-      <div class="race-stat"><em>票房占比</em><strong class="js-box-rate">${escapeHtml(movie.boxRate || "--")}</strong></div>
-      <div class="race-stat"><em>排片占比</em><strong class="js-show-rate">${escapeHtml(movie.showCountRate || "--")}</strong></div>
-      <div class="race-stat"><em>实时上座</em><strong class="js-seat-view">${escapeHtml(movie.avgSeatView || "--")}</strong></div>
+    <div class="race-card__grid${isRank1 ? " race-card__grid--rank1" : ""}">
+      ${buildStatsGridHtml(movie)}
     </div>
-    ${buildRankExtras(movie)}
   `;
 }
 
@@ -737,54 +755,30 @@ function buildRaceCard(movie) {
   return card;
 }
 
-function updateRaceCardDelta(card, movie, isNew) {
-  const deltaEl = card.querySelector(".race-card__delta");
-  if (!deltaEl) return;
-
+function computeMovieDelta(movie, isNew) {
+  if (isNew) return 0;
   const key = String(movie.movieId);
   const unit = movie.todayUnit || "万";
   const stored = prevValues.get(key);
   const storedHtml = prevBoxHtml.get(key);
   const decoded = getMovieBoxAmount(movie);
   let delta = 0;
-
-  if (!isNew && movie.todayBoxHtml && storedHtml && storedHtml !== movie.todayBoxHtml) {
+  if (movie.todayBoxHtml && storedHtml && storedHtml !== movie.todayBoxHtml) {
     delta = computeBoxIncrease(stored, storedHtml, movie.todayBoxHtml, unit);
   }
-  if (delta <= 0 && !isNew && decoded > 0 && stored != null && decoded > stored) {
+  if (delta <= 0 && decoded > 0 && stored != null && decoded > stored) {
     delta = decoded - stored;
   }
+  return delta;
+}
 
+function updateRaceCardDelta(card, movie, isNew) {
+  const bubbleEl = card.querySelector(".race-card__delta-bubble");
+  if (!bubbleEl) return;
+  const delta = computeMovieDelta(movie, isNew);
   if (delta > 0) {
-    const text = formatDelta(delta);
-    deltaEl.textContent = text;
-    deltaEl.classList.add("has-rise");
-    lastDeltaDisplay.set(key, { text, until: Date.now() + DELTA_PERSIST_MS });
-    showBoxDeltaWhenReady(getDeltaBubbleAnchor(card), delta);
-    return;
+    pulseInlineDelta(bubbleEl, delta, `movie-${movie.movieId}`);
   }
-
-  const cached = lastDeltaDisplay.get(key);
-  if (cached && Date.now() < cached.until) {
-    deltaEl.textContent = cached.text;
-    deltaEl.classList.add("has-rise");
-    return;
-  }
-
-  deltaEl.textContent = "";
-  deltaEl.classList.remove("has-rise");
-}
-
-function getDeltaBubbleAnchor(card) {
-  return (
-    card.querySelector(".js-day-box") ||
-    card.querySelector(".race-card__delta") ||
-    card.querySelector(".race-card__title")
-  );
-}
-
-function getBoxAnchor(card) {
-  return getDeltaBubbleAnchor(card);
 }
 
 function trackBoxDelta(card, movie, isNew) {
@@ -816,8 +810,8 @@ function updateRaceCard(card, movie, isNew = false) {
     card.classList.add("is-flash");
   }
 
-  const top = card.querySelector(".race-card__top");
-  if (!top) {
+  const head = card.querySelector(".race-card__head");
+  if (!head) {
     card.innerHTML = raceCardTemplate(movie);
     updateRaceCardDelta(card, movie, isNew);
     trackBoxDelta(card, movie, isNew);
@@ -826,26 +820,17 @@ function updateRaceCard(card, movie, isNew = false) {
 
   setTextIfChanged(card.querySelector(".race-card__rank"), `NO.${movie.rank}`);
   if (setTextIfChanged(card.querySelector(".race-card__title"), `《${movie.name}》`)) {
-    const minTitle = Number(movie.rank) === 1 ? 42 : 30;
+    const minTitle = Number(movie.rank) === 1 ? 36 : 28;
     fitNowrapEl(card.querySelector(".race-card__title"), { minSize: minTitle, allowWrap: true });
   }
 
   setTextIfChanged(card.querySelector(".js-day-box"), formatDisplayBox(movie));
-  setTextIfChanged(card.querySelector(".js-box-rate"), movie.boxRate || "--");
-  setTextIfChanged(card.querySelector(".js-show-rate"), movie.showCountRate || "--");
-  setTextIfChanged(card.querySelector(".js-seat-view"), movie.avgSeatView || "--");
 
-  const extrasHtml = buildRankExtras(movie);
-  const existingExtras = card.querySelector(".race-card__extras");
-  if (extrasHtml) {
-    if (!existingExtras) {
-      card.insertAdjacentHTML("beforeend", extrasHtml);
-    } else {
-      const next = extrasHtml.replace(/^<div class="race-card__extras">|<\/div>$/g, "");
-      setHtmlIfChanged(existingExtras, next);
-    }
-  } else if (existingExtras) {
-    existingExtras.remove();
+  const grid = card.querySelector(".race-card__grid");
+  const nextGrid = buildStatsGridHtml(movie);
+  if (grid && grid.innerHTML !== nextGrid) {
+    grid.innerHTML = nextGrid;
+    grid.classList.toggle("race-card__grid--rank1", Number(movie.rank) === 1);
   }
 
   updateRaceCardDelta(card, movie, isNew);
@@ -860,7 +845,7 @@ function isFirstSeen(movieId) {
 function ensureRaceCard(movie) {
   const key = String(movie.movieId);
   let card = cardPool.get(key);
-  if (!card || !card.classList.contains("race-card") || !card.querySelector(".race-card__top")) {
+  if (!card || !card.classList.contains("race-card") || !card.querySelector(".race-card__head")) {
     card?.remove();
     card = buildRaceCard(movie);
     cardPool.set(key, card);
@@ -878,13 +863,13 @@ function renderLoadingSkeleton() {
     const rank = i + 1;
     return `
       <article class="race-card race-card--skeleton race-card--rank${rank}" aria-hidden="true">
-        <div class="race-card__top">
-          <span class="race-card__rank skeleton-block">NO.${rank}</span>
+        <div class="race-card__head">
           <h2 class="race-card__title skeleton-block">加载中</h2>
+          <span class="race-card__rank skeleton-block">NO.${rank}</span>
         </div>
-        <div class="race-card__boxline skeleton-block"></div>
-        <div class="race-card__stats">
-          ${Array.from({ length: 3 }, () => '<div class="race-stat skeleton-block"></div>').join("")}
+        <div class="race-card__box-row skeleton-block"></div>
+        <div class="race-card__grid">
+          ${Array.from({ length: 6 }, () => '<div class="race-stat skeleton-block"></div>').join("")}
         </div>
       </article>
     `;
@@ -1049,8 +1034,7 @@ function updateNation(nation, parsed) {
   if (nationAmount > 0) {
     if (prevNation != null && nationAmount > prevNation) {
       const delta = nationAmount - prevNation;
-      const minDelta = getOverlaySettings()?.bubble?.minDelta ?? 0.001;
-      if (delta >= minDelta) showBoxDeltaWhenReady(nationBoxEl, delta);
+      pulseInlineDelta(nationDeltaEl, delta, "__nation__");
     }
     setPlainBoxValue(nationBoxEl, nationAmount);
     prevValues.set("__nation__", nationAmount);
@@ -1488,9 +1472,9 @@ async function init() {
   window.overlay?.onSettingsChanged?.((settings) => {
     applyOverlaySettings(settings);
     config.pollIntervalMs = settings.pollIntervalMs;
-    config.topCount = Number(settings.topCount) || RACE_TOP_COUNT;
+    config.topCount = RACE_TOP_COUNT;
     config.enrichConcurrency = settings.enrich?.concurrency;
-    config.trendLimit = settings.enrich?.trendLimit;
+    config.trendLimit = RACE_TOP_COUNT;
     FULL_ENRICH_INTERVAL_MS = settings.enrich?.fullIntervalMs || 60000;
     lastFullEnrich = 0;
     if (hasDisplayedData) {
@@ -1502,7 +1486,15 @@ async function init() {
   await updateLoginButton();
 
   if (new URLSearchParams(location.search).has("preview")) {
-    window.__racePreview = { renderList, updateNation, setStatus, stabilizeMovie };
+    window.__racePreview = {
+      renderList,
+      updateNation,
+      setStatus,
+      stabilizeMovie,
+      pulseInlineDelta,
+      computeMovieDelta,
+      formatDeltaWithArrow,
+    };
     setStatus("ok", "");
     return;
   }

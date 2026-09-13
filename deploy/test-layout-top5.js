@@ -28,24 +28,35 @@ const MIME = {
 const LONG_NAME =
   "中华人民共和国北京市朝阳区电影发行放映有限责任公司年度巨制动作冒险科幻史诗";
 
-function mockMovies() {
-  return Array.from({ length: 5 }, (_, i) => {
-    const rank = i + 1;
-    const hasAll = true;
-    return {
-      movieId: 1000 + rank,
-      rank,
-      name: rank === 1 ? LONG_NAME : rank === 2 ? `${LONG_NAME}续集` : `测试电影第${rank}名超长中文片名验证`,
-      todayBox: rank === 1 ? 99999.99 : 1234.56 + rank * 111.11,
-      todayUnit: "万",
-      todayBoxText: rank === 1 ? "99999.99" : String((1234.56 + rank * 111.11).toFixed(2)),
-      boxRate: `${(50 - rank).toFixed(1)}%`,
-      showCountRate: `${(30 - rank * 0.8).toFixed(1)}%`,
-      avgSeatView: `${(15 - rank * 0.5).toFixed(1)}%`,
-      sumBoxDesc: rank === 1 ? "￥12亿8888.88万" : "--",
-      dynamicForecast: rank === 1 ? "8888.88万" : "--",
-    };
-  });
+function richMovie(rank, withExtras = true) {
+  const base = {
+    movieId: 1000 + rank,
+    rank,
+    name: rank === 1 ? LONG_NAME : rank === 2 ? `${LONG_NAME}续集` : `测试电影第${rank}名`,
+    todayBox: rank === 1 ? 852.22 : 312.4 + rank * 41.2,
+    todayUnit: "万",
+    todayBoxText: rank === 1 ? "852.22" : String((312.4 + rank * 41.2).toFixed(2)),
+    boxRate: `${(27.4 - rank * 1.2).toFixed(1)}%`,
+    showCountRate: `${(26.0 - rank * 0.9).toFixed(1)}%`,
+    avgSeatView: `${(1.2 + rank * 0.3).toFixed(1)}%`,
+  };
+  if (!withExtras) return base;
+  return {
+    ...base,
+    dynamicForecast: rank === 1 ? "1537.58万" : `${(400 + rank * 50).toFixed(2)}万`,
+    sumBoxDesc: rank === 1 ? "21.53亿" : `${(8 + rank).toFixed(2)}亿`,
+    hourSpeedText: rank === 1 ? "128.5万/h" : `${(20 + rank * 3).toFixed(1)}万/h`,
+    yesterdayTotal: `${(600 + rank * 40).toFixed(2)}万`,
+    yesterdaySamePeriodText: `${(500 + rank * 30).toFixed(2)}万`,
+  };
+}
+
+function mockMoviesRich() {
+  return [1, 2, 3, 4, 5].map((rank) => richMovie(rank, true));
+}
+
+function mockMoviesSparse() {
+  return [1, 2, 3, 4, 5].map((rank) => richMovie(rank, rank <= 2));
 }
 
 function startStaticServer(root) {
@@ -77,11 +88,6 @@ function resolveChrome() {
   return CHROME_CANDIDATES.find((p) => fs.existsSync(p));
 }
 
-function parsePx(value) {
-  const n = parseFloat(String(value || "0"));
-  return Number.isFinite(n) ? n : 0;
-}
-
 async function launchBrowser() {
   const chromePath = resolveChrome();
   const launchOpts = { headless: true, args: ["--no-sandbox", "--disable-gpu"] };
@@ -96,6 +102,153 @@ async function launchBrowser() {
   }
 }
 
+function rectContains(outer, inner, pad = 0) {
+  return (
+    inner.left >= outer.left - pad &&
+    inner.top >= outer.top - pad &&
+    inner.right <= outer.right + pad &&
+    inner.bottom <= outer.bottom + pad
+  );
+}
+
+async function renderAndInspect(page, movies, nation) {
+  await page.evaluate(
+    ({ movies, nation }) => {
+      const { renderList, updateNation, setStatus, pulseInlineDelta } = window.__racePreview;
+      renderList(movies);
+      updateNation(nation, { updateTimeText: "2026-09-13 12:00:00", calendar: { today: "2026-09-13" } });
+      setStatus("ok", "");
+      for (const movie of movies) {
+        const card = document.querySelector(`.race-card[data-movie-id="${movie.movieId}"]`);
+        const bubble = card?.querySelector(".race-card__delta-bubble");
+        if (bubble) pulseInlineDelta(bubble, 10 + movie.rank, `test-${movie.movieId}`);
+      }
+      const nationBubble = document.getElementById("nation-delta");
+      if (nationBubble) pulseInlineDelta(nationBubble, 981.1, "test-nation");
+    },
+    {
+      movies,
+      nation: {
+        todayBox: 2092.2,
+        todayUnit: "万",
+        todayBoxText: "2092.2",
+        viewCountDesc: "999.9万",
+        showCountDesc: "99999",
+      },
+    },
+  );
+
+  await page.waitForTimeout(400);
+
+  return page.evaluate(() => {
+    const rectContains = (outer, inner, pad = 0) =>
+      inner.left >= outer.left - pad &&
+      inner.top >= outer.top - pad &&
+      inner.right <= outer.right + pad &&
+      inner.bottom <= outer.bottom + pad;
+
+    const raceList = document.getElementById("race-list");
+    const hero = document.querySelector(".hero");
+    const footer = document.getElementById("stage-footer");
+    const items = [...(raceList?.querySelectorAll(".race-card") || [])];
+    const issues = [];
+    const fonts = {};
+
+    if (items.length !== 5) {
+      issues.push(`race-list 应有 5 项，实际 ${items.length}`);
+    }
+
+    const heroBottom = hero?.getBoundingClientRect().bottom || 0;
+    const firstTop = items[0]?.getBoundingClientRect().top || 0;
+    const heroGap = firstTop - heroBottom;
+    if (heroGap > 48) {
+      issues.push(`顶部空白过大: hero→TOP1 间距 ${heroGap.toFixed(1)}px`);
+    }
+    if (hero && hero.getBoundingClientRect().height > 320) {
+      issues.push(`顶部区域过高: ${hero.getBoundingClientRect().height.toFixed(1)}px`);
+    }
+
+    const nationBubble = document.getElementById("nation-delta");
+    const nationPill = document.querySelector(".nation-pill--main");
+    if (nationBubble?.classList.contains("is-visible") && nationPill) {
+      if (!rectContains(nationPill.getBoundingClientRect(), nationBubble.getBoundingClientRect(), 4)) {
+        issues.push("全国大盘涨幅气泡不在今日大盘胶囊内");
+      }
+    }
+
+    for (const item of items) {
+      const rect = item.getBoundingClientRect();
+      if (rect.top < -1 || rect.bottom > 1921) {
+        issues.push(`第 ${item.dataset.rank} 名纵向越界: top=${rect.top.toFixed(1)} bottom=${rect.bottom.toFixed(1)}`);
+      }
+      if (rect.right > 1081 || rect.left < -1) {
+        issues.push(`第 ${item.dataset.rank} 名横向越界`);
+      }
+
+      const bubble = item.querySelector(".race-card__delta-bubble");
+      if (bubble?.classList.contains("is-visible")) {
+        if (!rectContains(rect, bubble.getBoundingClientRect(), 2)) {
+          issues.push(`第 ${item.dataset.rank} 名涨幅气泡漂出卡片`);
+        }
+      }
+
+      const stats = item.querySelectorAll(".race-stat");
+      const minStats = Number(item.dataset.rank) <= 2 ? 5 : 3;
+      if (stats.length < minStats) {
+        issues.push(`第 ${item.dataset.rank} 名指标不足: ${stats.length} < ${minStats}`);
+      }
+    }
+
+    const last = items[items.length - 1];
+    const lastBottom = last?.getBoundingClientRect().bottom || 0;
+    const footerTop = footer?.getBoundingClientRect().top || 1920;
+    const gapToFooter = footerTop - lastBottom;
+    if (gapToFooter > 80) {
+      issues.push(`最后一张卡片距 footer 空白过大: ${gapToFooter.toFixed(1)}px`);
+    }
+    if (lastBottom > 1920.5) {
+      issues.push(`第 5 名 bottom=${lastBottom.toFixed(1)} 超出 1920`);
+    }
+
+    if (document.documentElement.scrollWidth > 1081) {
+      issues.push(`scrollWidth=${document.documentElement.scrollWidth}`);
+    }
+
+    const stage = document.querySelector(".stage");
+    if (stage && stage.scrollHeight > stage.clientHeight + 2) {
+      issues.push("stage 产生纵向滚动");
+    }
+
+    const rank1 = items.find((el) => el.dataset.rank === "1");
+    const follow = items.filter((el) => Number(el.dataset.rank) > 1);
+
+    const sample = (el, key) => {
+      if (!el) return;
+      fonts[key] = parseFloat(getComputedStyle(el).fontSize);
+    };
+
+    sample(rank1?.querySelector(".race-card__title"), "rank1Title");
+    sample(rank1?.querySelector(".js-day-box"), "rank1Box");
+    sample(follow[0]?.querySelector(".race-card__title"), "followTitle");
+    sample(follow[0]?.querySelector(".js-day-box"), "followBox");
+    sample(follow[0]?.querySelector(".race-stat em"), "label");
+    sample(follow[0]?.querySelector(".race-stat strong"), "value");
+
+    return {
+      itemCount: items.length,
+      scrollWidth: document.documentElement.scrollWidth,
+      lastBottom,
+      gapToFooter,
+      heroGap,
+      heroHeight: hero?.getBoundingClientRect().height || 0,
+      rank1Height: rank1?.getBoundingClientRect().height || 0,
+      followHeights: follow.map((el) => el.getBoundingClientRect().height),
+      fonts,
+      issues,
+    };
+  });
+}
+
 async function main() {
   const { server, baseUrl } = await startStaticServer(UI_DIR);
   const browser = await launchBrowser();
@@ -105,7 +258,9 @@ async function main() {
     await page.addInitScript(() => {
       window.overlay = {
         getConfig: async () => ({ apiBase: "http://127.0.0.1:8765", pollIntervalMs: 60000, topCount: 5 }),
-        getOverlaySettings: async () => null,
+        getOverlaySettings: async () => ({
+          bubble: { enabled: true, minDelta: 0.001, fontSize: 18, durationMs: 3000, floatHeight: 44 },
+        }),
         onSettingsChanged: () => () => {},
         getApiStatus: async () => ({ ready: false }),
         ensureApi: async () => ({ ready: false }),
@@ -119,128 +274,32 @@ async function main() {
     await page.goto(`${baseUrl}/index.html?preview=1`);
     await page.waitForFunction(() => Boolean(window.__racePreview));
 
-    const movies = mockMovies();
-    await page.evaluate(
-      ({ movies, nation }) => {
-        const { renderList, updateNation, setStatus } = window.__racePreview;
-        renderList(movies);
-        updateNation(nation, { updateTimeText: "2026-09-13 12:00:00", calendar: { today: "2026-09-13" } });
-        setStatus("ok", "");
-      },
-      {
-        movies,
-        nation: {
-          todayBox: 99999.99,
-          todayUnit: "万",
-          todayBoxText: "99999.99",
-          viewCountDesc: "999.9万",
-          showCountDesc: "99999",
-        },
-      },
-    );
-
-    await page.waitForTimeout(900);
-
-    const report = await page.evaluate(() => {
-      const raceList = document.getElementById("race-list");
-      const footer = document.getElementById("stage-footer");
-      const items = [...(raceList?.querySelectorAll(".race-card") || [])];
-      const issues = [];
-      const fonts = {};
-
-      if (items.length !== 5) {
-        issues.push(`race-list 应有 5 项，实际 ${items.length}`);
-      }
-
-      const rank1 = items.find((el) => el.dataset.rank === "1");
-      const follow = items.filter((el) => Number(el.dataset.rank) > 1);
-
-      for (const item of items) {
-        const rect = item.getBoundingClientRect();
-        if (rect.top < -1 || rect.bottom > 1921) {
-          issues.push(`第 ${item.dataset.rank} 名纵向越界: top=${rect.top.toFixed(1)} bottom=${rect.bottom.toFixed(1)}`);
-        }
-        if (rect.right > 1081 || rect.left < -1) {
-          issues.push(`第 ${item.dataset.rank} 名横向越界`);
-        }
-      }
-
-      const last = items[items.length - 1];
-      const lastBottom = last?.getBoundingClientRect().bottom || 0;
-      const footerTop = footer?.getBoundingClientRect().top || 1920;
-      const gapToFooter = footerTop - lastBottom;
-      if (gapToFooter > 80) {
-        issues.push(`最后一张卡片距 footer 空白过大: ${gapToFooter.toFixed(1)}px`);
-      }
-      if (lastBottom > 1920.5) {
-        issues.push(`第 5 名 bottom=${lastBottom.toFixed(1)} 超出 1920`);
-      }
-
-      if (document.documentElement.scrollWidth > 1081) {
-        issues.push(`scrollWidth=${document.documentElement.scrollWidth}`);
-      }
-
-      const stage = document.querySelector(".stage");
-      if (stage && stage.scrollHeight > stage.clientHeight + 2) {
-        issues.push("stage 产生纵向滚动");
-      }
-
-      const sample = (el, key) => {
-        if (!el) return;
-        fonts[key] = parseFloat(getComputedStyle(el).fontSize);
-      };
-
-      sample(rank1?.querySelector(".race-card__title"), "rank1Title");
-      sample(rank1?.querySelector(".js-day-box"), "rank1Box");
-      sample(follow[0]?.querySelector(".race-card__title"), "followTitle");
-      sample(follow[0]?.querySelector(".js-day-box"), "followBox");
-      sample(follow[0]?.querySelector(".race-stat em"), "label");
-      sample(follow[0]?.querySelector(".race-stat strong"), "value");
-
-      if (fonts.rank1Title < 46) issues.push(`TOP1 电影名 ${fonts.rank1Title}px < 46px`);
-      if (fonts.rank1Box < 42) issues.push(`TOP1 票房 ${fonts.rank1Box}px < 42px`);
-      if (fonts.followTitle < 34) issues.push(`TOP2~5 电影名 ${fonts.followTitle}px < 34px`);
-      if (fonts.followBox < 30) issues.push(`TOP2~5 票房 ${fonts.followBox}px < 30px`);
-      if (fonts.label < 20) issues.push(`label ${fonts.label}px < 20px`);
-      if (fonts.value < 24) issues.push(`value ${fonts.value}px < 24px`);
-
-      const rank1Height = rank1?.getBoundingClientRect().height || 0;
-      const moviesTop = items[0]?.getBoundingClientRect().top || 0;
-      const moviesBottom = lastBottom;
-      const moviesRegionHeight = moviesBottom - moviesTop;
-
-      return {
-        itemCount: items.length,
-        scrollWidth: document.documentElement.scrollWidth,
-        lastBottom,
-        gapToFooter,
-        rank1Height,
-        followHeights: follow.map((el) => el.getBoundingClientRect().height),
-        moviesRegionHeight,
-        fonts,
-        issues,
-      };
-    });
-
+    const reportRich = await renderAndInspect(page, mockMoviesRich());
     await page.screenshot({ path: OUT_PNG, fullPage: false });
 
-    assert.strictEqual(report.itemCount, 5, "race-list 应有 5 项");
-    assert.ok(report.lastBottom <= 1920.5, `第 5 名 bottom=${report.lastBottom}`);
-    assert.ok(report.scrollWidth <= 1081, `scrollWidth=${report.scrollWidth}`);
-    assert.ok(report.gapToFooter <= 80, `footer gap=${report.gapToFooter}`);
-    assert.strictEqual(report.issues.length, 0, report.issues.join("; "));
+    const reportSparse = await renderAndInspect(page, mockMoviesSparse());
+
+    assert.strictEqual(reportRich.itemCount, 5, "race-list 应有 5 项");
+    assert.ok(reportRich.lastBottom <= 1920.5, `第 5 名 bottom=${reportRich.lastBottom}`);
+    assert.ok(reportRich.scrollWidth <= 1081, `scrollWidth=${reportRich.scrollWidth}`);
+    assert.ok(reportRich.gapToFooter <= 80, `footer gap=${reportRich.gapToFooter}`);
+    assert.ok(reportRich.heroGap <= 48, `hero gap=${reportRich.heroGap}`);
+    assert.ok(reportRich.heroHeight <= 320, `hero height=${reportRich.heroHeight}`);
+    assert.strictEqual(reportRich.issues.length, 0, reportRich.issues.join("; "));
+    assert.strictEqual(reportSparse.issues.length, 0, `sparse: ${reportSparse.issues.join("; ")}`);
 
     console.log("TOP5 layout OK");
     console.log("Screenshot:", OUT_PNG);
     console.log("Layout:", {
-      items: report.itemCount,
-      rank1Height: report.rank1Height,
-      followHeights: report.followHeights,
-      moviesRegionHeight: report.moviesRegionHeight,
-      lastBottom: report.lastBottom,
-      gapToFooter: report.gapToFooter,
-      scrollWidth: report.scrollWidth,
-      fonts: report.fonts,
+      items: reportRich.itemCount,
+      heroHeight: reportRich.heroHeight,
+      heroGap: reportRich.heroGap,
+      rank1Height: reportRich.rank1Height,
+      followHeights: reportRich.followHeights,
+      lastBottom: reportRich.lastBottom,
+      gapToFooter: reportRich.gapToFooter,
+      scrollWidth: reportRich.scrollWidth,
+      fonts: reportRich.fonts,
     });
   } finally {
     await browser.close();
