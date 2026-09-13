@@ -285,6 +285,7 @@ function registerIpcHandlers() {
   const {
     getApiStatus,
     isMaoyanLoggedIn,
+    getMaoyanSessionStatus,
     startMaoyanLogin,
   } = getMods().maoyan;
 
@@ -298,6 +299,7 @@ function registerIpcHandlers() {
   ipcMain.handle("get-api-status", () => getApiStatus());
   ipcMain.handle("ensure-api", () => startMaoyanService());
   ipcMain.handle("is-logged-in", () => isMaoyanLoggedIn());
+  ipcMain.handle("get-session-status", () => getMaoyanSessionStatus());
   ipcMain.handle("is-login-running", () => {
     const { isLoginRunning } = require("./lib/maoyan-login");
     return isLoginRunning();

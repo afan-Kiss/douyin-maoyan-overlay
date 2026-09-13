@@ -54,9 +54,15 @@ async function fetchMovieApi(apiBase, apiPath, movieId, extra = {}, timeoutMs = 
 
 let apiSigWarmed = false;
 let lastEnrichErrors = [];
+let warmLastError = null;
 
 export function resetApiSigWarm() {
   apiSigWarmed = false;
+  warmLastError = null;
+}
+
+export function getWarmLastError() {
+  return warmLastError ? { ...warmLastError } : null;
 }
 
 export function getLastEnrichErrors() {
@@ -79,17 +85,25 @@ function summarizeEnrichError(error) {
 }
 
 async function warmMovieApiSignatures(apiBase, movieId) {
-  if (apiSigWarmed || !apiBase || !movieId) return false;
+  if (apiSigWarmed || !apiBase || !movieId) return true;
+  const url =
+    `${apiBase}/api/refresh?` +
+    new URLSearchParams({ movieId: String(movieId), boxLevel: "1" });
   try {
-    const url =
-      `${apiBase}/api/refresh?` +
-      new URLSearchParams({ movieId: String(movieId), boxLevel: "1" });
     const resp = await fetch(url, { signal: AbortSignal.timeout(45000) });
-    if (!resp.ok) return false;
+    if (!resp.ok) {
+      const err = await readApiError(resp);
+      warmLastError = summarizeEnrichError(err);
+      throw err;
+    }
     apiSigWarmed = true;
+    warmLastError = null;
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    warmLastError = summarizeEnrichError(error);
+    throw error instanceof MaoyanApiError
+      ? error
+      : new MaoyanApiError(warmLastError.detail, warmLastError);
   }
 }
 
@@ -1019,6 +1033,7 @@ async function fetchMovieExtraDetail(apiBase, movie, todayStr, speed = {}) {
 export async function enrichMoviesLight(apiBase, movies, options = {}) {
   const concurrency = options.concurrency || 3;
   const todayStr = options.todayStr || "";
+  // 仅前 trendLimit 名请求详细接口；其余排名依赖大盘 parseDashboard 字段
   const trendLimit = options.trendLimit ?? 5;
   const enableExtraApis = options.enableExtraApis !== false;
   const results = enrichMoviesQuick(movies, options.speed || {});
@@ -1045,6 +1060,7 @@ export async function enrichMovies(apiBase, movies, options = {}) {
   const concurrency = options.concurrency || 2;
   const enableExtraApis = options.enableExtraApis !== false;
   const todayStr = options.todayStr || "";
+  // TOP1～前 trendLimit 名走详细 enrich；TOP4～10 仅展示大盘基础字段（实时/占比/排片/上座）
   const trendLimit = options.trendLimit ?? 5;
 
   lastEnrichErrors = [];
@@ -1052,7 +1068,12 @@ export async function enrichMovies(apiBase, movies, options = {}) {
   const targets = movies.slice(0, trendLimit);
 
   if (enableExtraApis && targets.length) {
-    await warmMovieApiSignatures(apiBase, targets[0].movieId);
+    try {
+      await warmMovieApiSignatures(apiBase, targets[0].movieId);
+    } catch (error) {
+      const warmErr = getWarmLastError() || summarizeEnrichError(error);
+      lastEnrichErrors.push({ movieId: targets[0].movieId, label: "签名预热", ...warmErr });
+    }
   }
 
   await mapPool(targets, concurrency, async (movie) => {

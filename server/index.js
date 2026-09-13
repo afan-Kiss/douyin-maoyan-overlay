@@ -10,6 +10,7 @@ import {
   getChromeExecutable,
 } from "./lib/config.js";
 import { log, requestLogMiddleware, explainError, buildDiagnostics } from "./lib/logger.js";
+import { runCapabilityVerify } from "./lib/capability-verify.js";
 import { isPortListening } from "./lib/port.js";
 import { UpstreamError, manager } from "./lib/sigManager.js";
 
@@ -167,7 +168,12 @@ async function handleBoxShow(req, res) {
   const { movieId, boxLevel, forceRefresh } = parseMovieQuery(req);
 
   if (!movieId) {
-    res.status(400).json({ detail: "电影编号不能为空" });
+    res.status(400).json({
+      code: "movie_id_required",
+      detail: "电影编号不能为空",
+      retryable: false,
+      action: null,
+    });
     return;
   }
 
@@ -186,7 +192,12 @@ function createBrowserApiHandler(apiName, apiPath) {
       req.query.force_refresh === "true" || req.query.forceRefresh === "true";
 
     if (!movieId) {
-      res.status(400).json({ detail: "电影编号不能为空" });
+      res.status(400).json({
+        code: "movie_id_required",
+        detail: "电影编号不能为空",
+        retryable: false,
+        action: null,
+      });
       return;
     }
 
@@ -348,6 +359,15 @@ async function main() {
     res.json(buildDiagnostics());
   });
 
+  app.get("/api/verify-capabilities", async (_req, res) => {
+    try {
+      const result = await runCapabilityVerify();
+      res.json(result);
+    } catch (e) {
+      sendApiError(res, e);
+    }
+  });
+
   const boxShowPaths = [
     "/api/boxshow",
     "/api/movie/getBoxShow",
@@ -398,14 +418,22 @@ async function main() {
 
   app.use((req, res) => {
     res.status(404).json({
+      code: "not_found",
       detail: `接口不存在: ${req.method} ${req.path}`,
+      retryable: false,
+      action: null,
     });
   });
 
   app.use((err, _req, res, _next) => {
     log.reqFail("服务内部错误", "程序内部出错");
     if (!res.headersSent) {
-      res.status(500).json({ detail: "服务内部出错，请稍后再试" });
+      res.status(500).json({
+        code: "internal_error",
+        detail: "服务内部出错，请稍后再试",
+        retryable: false,
+        action: null,
+      });
     }
   });
 

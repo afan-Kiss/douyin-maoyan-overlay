@@ -194,10 +194,35 @@ function updatePartialDataWarning(errors = []) {
 
 function isLoginRelatedError(error) {
   if (error instanceof MaoyanApiError) {
-    return error.action === "login" || /login|401|403/.test(String(error.code));
+    return (
+      error.action === "login" ||
+      error.code === "login_required" ||
+      error.code === "upstream_401"
+    );
   }
   const msg = String(error?.message || "");
-  return /登录|签名|401|403/.test(msg);
+  return /登录失效|需要登录|login_required|upstream_401|\b401\b/.test(msg);
+}
+
+function isSignatureRelatedError(error) {
+  if (error instanceof MaoyanApiError) {
+    return (
+      error.action === "refresh" ||
+      ["upstream_403", "sig_capture_failed"].includes(String(error.code))
+    );
+  }
+  const msg = String(error?.message || "");
+  return /签名|风控|upstream_403|sig_capture/.test(msg);
+}
+
+function formatUserFacingError(error) {
+  if (isSignatureRelatedError(error)) {
+    return "猫眼签名失效或触发风控，正在尝试刷新签名";
+  }
+  if (error instanceof MaoyanApiError) {
+    return error.detail || error.message;
+  }
+  return String(error?.message || "请求失败");
 }
 
 function escapeHtml(s) {
@@ -691,7 +716,7 @@ function buildRaceRow(movie) {
   card.dataset.rank = String(movie.rank);
   card.innerHTML = raceRowTemplate(movie);
   requestAnimationFrame(() => {
-    fitNowrapEl(card.querySelector(".race-row__title"), { minSize: 20, allowWrap: true });
+    fitNowrapEl(card.querySelector(".race-row__title"), { minSize: 26, allowWrap: true });
   });
   return card;
 }
@@ -707,7 +732,7 @@ function updateRaceRow(card, movie, isNew = false) {
   }
   setTextIfChanged(card.querySelector(".race-card__rank"), `NO.${movie.rank}`);
   if (setTextIfChanged(card.querySelector(".race-card__title"), `《${movie.name}》`)) {
-    fitNowrapEl(card.querySelector(".race-row__title"), { minSize: 20, allowWrap: true });
+    fitNowrapEl(card.querySelector(".race-row__title"), { minSize: 26, allowWrap: true });
   }
   const boxText = formatCompactBox(movie);
   setTextIfChanged(card.querySelector(".js-day-box"), boxText);
@@ -1174,7 +1199,10 @@ function scheduleBackgroundEnrich(requestPollGen, parsed, speed) {
       console.warn("后台补充字段失败", err);
       if (isLoginRelatedError(err)) {
         await updateLoginButton(true);
-        partialDataWarning = `部分详细数据获取失败：${err.detail || err.message || "请重新登录"}`;
+        partialDataWarning = `部分详细数据获取失败：${formatUserFacingError(err)}`;
+        setStatus("ok", "");
+      } else if (isSignatureRelatedError(err)) {
+        partialDataWarning = `部分详细数据获取失败：${formatUserFacingError(err)}`;
         setStatus("ok", "");
       }
     } finally {
@@ -1271,10 +1299,11 @@ async function refreshData() {
       else setStatus("ok", "");
       const status = await window.overlay?.ensureApi?.();
       if (status?.apiBase) config.apiBase = status.apiBase;
-    } else if (e instanceof MaoyanApiError || isLoginRelatedError(e)) {
-      await updateLoginButton(true);
-      const detail = e instanceof MaoyanApiError ? e.detail : msg;
-      setStatus("error", detail || "登录已过期，请点击右上角「登录」完成登录");
+    } else if (e instanceof MaoyanApiError || isLoginRelatedError(e) || isSignatureRelatedError(e)) {
+      if (isLoginRelatedError(e)) {
+        await updateLoginButton(true);
+      }
+      setStatus("error", formatUserFacingError(e) || "请求失败，请稍后重试");
     } else if (!hasDisplayedData) {
       setStatus("error", msg || "拉取数据失败，正在重试…");
     } else {
@@ -1355,10 +1384,12 @@ async function waitForApiReady() {
 async function updateLoginButton(forceShow = false) {
   const btn = $("btn-login");
   if (!btn) return;
-  const loggedIn = forceShow ? false : await window.overlay?.isLoggedIn?.();
+  const status = (await window.overlay?.getSessionStatus?.()) || {};
+  const verified =
+    !forceShow && status.detailApiReady && status.identityCookieExists;
   btn.classList.remove("is-hidden");
-  btn.textContent = loggedIn ? "重新登录" : "登录";
-  btn.title = loggedIn ? "重新登录猫眼账号" : "登录猫眼账号";
+  btn.textContent = verified ? "重新登录" : "登录";
+  btn.title = verified ? "重新登录猫眼账号" : "登录猫眼账号";
 }
 
 async function finishLoginSuccess() {
@@ -1393,7 +1424,7 @@ async function handleLoginClick() {
     loginWatchTimer = null;
   }
   $("btn-login")?.classList.remove("is-highlight");
-  const relogin = await window.overlay?.isLoggedIn?.();
+  const relogin = (await window.overlay?.getSessionStatus?.())?.identityCookieExists;
   setStatus("loading", relogin ? "正在打开登录窗口，请重新完成登录…" : "正在打开登录窗口，请在浏览器中完成登录…");
 
   let offResult = null;
@@ -1423,11 +1454,11 @@ async function handleLoginClick() {
         }
         const running = await window.overlay?.isLoginRunning?.();
         if (running) return;
-        const loggedIn = await window.overlay?.isLoggedIn?.();
-        if (loggedIn) {
+        const session = (await window.overlay?.getSessionStatus?.()) || {};
+        if (session.detailApiReady && session.identityCookieExists) {
           clearInterval(loginWatchTimer);
           loginWatchTimer = null;
-          resolve({ ok: true, loggedIn: true });
+          resolve({ ok: true, detailApiReady: true });
         }
       }, 2000);
     }),
@@ -1439,7 +1470,7 @@ async function handleLoginClick() {
     loginWatchTimer = null;
   }
 
-  if (result?.ok && result?.loggedIn) {
+  if (result?.ok && (result?.detailApiReady || result?.loggedIn)) {
     await finishLoginSuccess();
     return;
   }

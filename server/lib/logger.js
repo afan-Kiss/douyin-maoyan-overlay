@@ -4,6 +4,7 @@ import { fileURLToPath } from "url";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { STORAGE_STATE, getChromeExecutable } from "./config.js";
 import { createRequire } from "module";
+import { getLastCapabilityVerify, getSignatureTTLStatus, isLoginInProgress } from "./capability-verify.js";
 
 const require = createRequire(import.meta.url);
 const { storageFileExists, storageFileLooksLoggedIn } = require("../../lib/storage-auth.js");
@@ -461,24 +462,39 @@ export function isNonRetryableSigError(error) {
   return NON_RETRYABLE_SIG_ERRORS.has(msg);
 }
 
+export function getLastSignatureSuccessAt() {
+  return lastSignatureSuccessAt;
+}
+
 export function buildDiagnostics() {
   const chromePath = getChromeExecutable();
   const chromeFound = Boolean(chromePath);
   const chromePathValid = chromeFound && fs.existsSync(chromePath);
-  const loginStateExists = storageFileExists(STORAGE_STATE);
-  const loginVerified = storageFileLooksLoggedIn(STORAGE_STATE);
-  const loginLock = fs.existsSync(path.join(getDataDir(), "login.lock"));
+  const storageStateExists = storageFileExists(STORAGE_STATE);
+  const identityCookieExists = storageFileLooksLoggedIn(STORAGE_STATE);
+  const loginInProgress = isLoginInProgress();
+  const verify = getLastCapabilityVerify();
+  const sigStatus = getSignatureTTLStatus();
 
   return {
     serviceReady: true,
     chromeFound,
     chromePathValid,
     chromePath: chromePathValid ? chromePath : "",
-    loginStateExists,
-    loginVerified,
-    loginInProgress: loginLock,
-    browserLaunchAvailable: chromePathValid && !loginLock,
-    signatureAvailable: Boolean(lastSignatureSuccessAt),
+    storageStateExists,
+    identityCookieExists,
+    accountLoggedIn: Boolean(identityCookieExists && verify.detailApiReady),
+    browserSessionVerified: verify.browserSessionVerified,
+    signatureAvailable: sigStatus.signatureReady,
+    signatureReady: sigStatus.signatureReady,
+    signatureAgeSeconds: sigStatus.ageSeconds,
+    detailApiAvailable: verify.detailApiReady,
+    detailApiReady: verify.detailApiReady,
+    dashboardAvailable: verify.dashboardAvailable,
+    loginInProgress,
+    browserLaunchAvailable: chromePathValid && !loginInProgress,
+    lastVerifyAt: verify.lastVerifyAt,
+    lastVerifyError: verify.lastVerifyError,
     lastSignatureSuccessAt,
     lastSignatureError,
     lastDashboardSuccessAt,

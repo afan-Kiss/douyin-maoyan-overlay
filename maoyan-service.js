@@ -4,6 +4,11 @@ const http = require("http");
 const net = require("net");
 const path = require("path");
 const { getRealExecutablePath } = require("./lib/update/paths");
+const {
+  getSessionStatus,
+  scheduleBackgroundVerify,
+  isVerifiedSession,
+} = require("./lib/session-status");
 
 const SERVER_DIR = path.join(__dirname, "server");
 const LEGACY_DATA_DIR = path.join(__dirname, "data");
@@ -203,13 +208,11 @@ function hasServerDeps() {
 }
 
 function isMaoyanLoggedIn() {
-  try {
-    const file = path.join(getDataDir(), "browser_state.json");
-    const { storageFileLooksLoggedIn } = require("./lib/storage-auth");
-    return storageFileLooksLoggedIn(file);
-  } catch {
-    return false;
-  }
+  return isVerifiedSession(getDataDir());
+}
+
+function getMaoyanSessionStatus() {
+  return getSessionStatus(getDataDir());
 }
 
 function parsePortFromApiBase(apiBase) {
@@ -508,7 +511,7 @@ async function ensureMaoyanService(config) {
 async function ensureMaoyanServiceInner(config) {
   migrateLegacyDataDir();
   const apiBase = buildApiBase(config);
-  apiStatus = { ready: false, error: "", apiBase, loggedIn: isMaoyanLoggedIn() };
+  apiStatus = { ready: false, error: "", apiBase, ...getMaoyanSessionStatus() };
 
   if (!hasServerDeps()) {
     apiStatus.error = "缺少依赖，请运行 setup.bat 完成安装";
@@ -517,14 +520,16 @@ async function ensureMaoyanServiceInner(config) {
 
   if (await checkHealth(apiBase)) {
     apiStatus.ready = true;
-    apiStatus.loggedIn = isMaoyanLoggedIn();
+    Object.assign(apiStatus, getMaoyanSessionStatus());
+    scheduleBackgroundVerify(apiBase, getDataDir());
     return apiStatus;
   }
 
   await recoverStalePort(apiBase);
   if (await checkHealth(apiBase)) {
     apiStatus.ready = true;
-    apiStatus.loggedIn = isMaoyanLoggedIn();
+    Object.assign(apiStatus, getMaoyanSessionStatus());
+    scheduleBackgroundVerify(apiBase, getDataDir());
     return apiStatus;
   }
 
@@ -553,7 +558,8 @@ async function ensureMaoyanServiceInner(config) {
   if (ok) {
     apiStatus.ready = true;
     apiStatus.error = "";
-    apiStatus.loggedIn = isMaoyanLoggedIn();
+    Object.assign(apiStatus, getMaoyanSessionStatus());
+    scheduleBackgroundVerify(apiBase, getDataDir());
   } else {
     apiStatus.error = "票房服务启动超时，请检查端口占用或 Chrome 是否可用";
     await shutdownMaoyanServiceAndWait();
@@ -629,15 +635,17 @@ async function runThrottledHealthCheck(apiBase) {
 }
 
 async function getApiStatus() {
-  const loggedIn = isMaoyanLoggedIn();
+  const session = getMaoyanSessionStatus();
   if (apiStatus.ready) {
     const alive = await runThrottledHealthCheck(apiStatus.apiBase);
     if (!alive && consecutiveHealthFails >= HEALTH_FAIL_THRESHOLD) {
       apiStatus.ready = false;
       apiStatus.error = "票房服务已断开，正在尝试恢复…";
+    } else if (alive && !session.detailApiReady && !session.verifyPending) {
+      scheduleBackgroundVerify(apiStatus.apiBase, getDataDir());
     }
   }
-  return { ...apiStatus, loggedIn };
+  return { ...apiStatus, ...getMaoyanSessionStatus() };
 }
 
 function _testResetMaoyanState() {
@@ -698,6 +706,7 @@ module.exports = {
   shutdownMaoyanServiceAndWait,
   checkHealth,
   isMaoyanLoggedIn,
+  getMaoyanSessionStatus,
   startMaoyanLogin,
   buildApiBase,
   getDataDir,

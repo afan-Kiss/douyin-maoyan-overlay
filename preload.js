@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld("overlay", {
   getApiStatus: () => ipcRenderer.invoke("get-api-status"),
   ensureApi: () => ipcRenderer.invoke("ensure-api"),
   isLoggedIn: () => ipcRenderer.invoke("is-logged-in"),
+  getSessionStatus: () => ipcRenderer.invoke("get-session-status"),
   isLoginRunning: () => ipcRenderer.invoke("is-login-running"),
   startLogin: (options) => ipcRenderer.invoke("start-login", options),
   onLoginResult: (callback) => {

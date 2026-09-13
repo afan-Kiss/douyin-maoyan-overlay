@@ -425,6 +425,13 @@ export class SigManager {
     return Date.now() / 1000 - entry.refreshedAt < ttl;
   }
 
+  hasFreshSignature() {
+    for (const entry of this.cache.values()) {
+      if (this.isFresh(entry)) return true;
+    }
+    return false;
+  }
+
   cacheKey(movieId, boxLevel) {
     return `${movieId}:${boxLevel}`;
   }
