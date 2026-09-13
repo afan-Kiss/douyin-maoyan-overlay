@@ -124,7 +124,7 @@ const mockMovies = [
   },
 ];
 
-for (let i = 4; i <= 10; i++) {
+for (let i = 4; i <= 5; i++) {
   mockMovies.push({
     movieId: i,
     rank: i,
@@ -237,7 +237,7 @@ async function main() {
 
     await page.addInitScript(() => {
       window.overlay = {
-        getConfig: async () => ({ apiBase: "http://127.0.0.1:8765", pollIntervalMs: 60000, topCount: 10 }),
+        getConfig: async () => ({ apiBase: "http://127.0.0.1:8765", pollIntervalMs: 60000, topCount: 5 }),
         getOverlaySettings: async () => null,
         onSettingsChanged: () => () => {},
         getApiStatus: async () => ({ ready: false }),

@@ -88,7 +88,7 @@ async function main() {
 
     await page.addInitScript(() => {
       window.overlay = {
-        getConfig: async () => ({ apiBase: "http://127.0.0.1:8765", pollIntervalMs: 60000, topCount: 10 }),
+        getConfig: async () => ({ apiBase: "http://127.0.0.1:8765", pollIntervalMs: 60000, topCount: 5 }),
         getOverlaySettings: async () => null,
         onSettingsChanged: () => () => {},
         getApiStatus: async () => ({ ready: false }),
@@ -106,12 +106,9 @@ async function main() {
       async ({ movies, nation, parsed }) => {
         const { renderDashboard } = await import("./dashboard-view.js");
         const { applyMediaToMovies, loadMovieMedia } = await import("./data/movie-media.js");
-        const { initTrailerPlayer, syncTrailerWithRanking } = await import("./trailer-player.js");
         const catalog = await loadMovieMedia();
-        initTrailerPlayer();
         const enriched = applyMediaToMovies(movies, catalog);
         renderDashboard(enriched, nation, parsed);
-        syncTrailerWithRanking(enriched);
       },
       { movies: mockMovies, nation: mockNation, parsed: mockParsed }
     );

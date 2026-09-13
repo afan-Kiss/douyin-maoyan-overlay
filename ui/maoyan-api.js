@@ -733,7 +733,7 @@ function mapDashboardItem(item, index) {
   };
 }
 
-export function parseDashboard(raw, topCount = 10) {
+export function parseDashboard(raw, topCount = 5) {
   const list = raw?.movieList?.list ?? [];
   const nation = raw?.movieList?.nationBoxInfo ?? {};
   const updateInfo = raw?.movieList?.updateInfo ?? {};
@@ -1060,7 +1060,7 @@ export async function enrichMovies(apiBase, movies, options = {}) {
   const concurrency = options.concurrency || 2;
   const enableExtraApis = options.enableExtraApis !== false;
   const todayStr = options.todayStr || "";
-  // TOP1～前 trendLimit 名走详细 enrich；TOP4～10 仅展示大盘基础字段（实时/占比/排片/上座）
+  // 显示的前 trendLimit 名均走详细 enrich（默认与 TOP5 榜单一致）
   const trendLimit = options.trendLimit ?? 5;
 
   lastEnrichErrors = [];

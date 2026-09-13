@@ -53,7 +53,7 @@ async function main() {
     const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height } });
     await page.addInitScript(() => {
       window.overlay = {
-        getConfig: async () => ({ apiBase: "", pollIntervalMs: 60000, topCount: 10 }),
+        getConfig: async () => ({ apiBase: "", pollIntervalMs: 60000, topCount: 5 }),
         getOverlaySettings: async () => null,
         onSettingsChanged: () => () => {},
         getApiStatus: async () => ({ ready: false }),
@@ -78,10 +78,11 @@ async function main() {
     const metrics = await page.evaluate(() => {
       const canvas = document.getElementById("viewport");
       const canvasRect = canvas.getBoundingClientRect();
-      const trailer = document.getElementById("trailer-section");
-      const trailerRect = trailer?.getBoundingClientRect();
+      const footer = document.querySelector(".live-footer");
+      const footerRect = footer?.getBoundingClientRect();
       const scale = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--viewport-scale")) || 1;
       const podiumR1 = document.querySelector(".podium-card--r1");
+      const rankScroll = document.getElementById("ranking-track")?.classList.contains("ranking-section__track--scroll");
       return {
         scrollHeight: document.documentElement.scrollHeight,
         clientHeight: document.documentElement.clientHeight,
@@ -93,8 +94,9 @@ async function main() {
         scale,
         podiumR1Height: podiumR1?.offsetHeight,
         rankRows: document.querySelectorAll(".rank-row").length,
-        trailerVisible: trailerRect ? trailerRect.bottom <= window.innerHeight && trailerRect.top >= 0 : false,
-        trailerInCanvas: trailer ? trailer.offsetTop + trailer.offsetHeight <= 1920 : false,
+        rankScroll,
+        footerVisible: footerRect ? footerRect.bottom <= window.innerHeight && footerRect.top >= 0 : false,
+        footerInCanvas: footer ? footer.offsetTop + footer.offsetHeight <= 1920 : false,
         hasPreviewStage: !!document.querySelector(".preview-stage"),
       };
     });

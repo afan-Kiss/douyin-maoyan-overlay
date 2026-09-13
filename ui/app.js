@@ -673,102 +673,56 @@ function dailyTableHtml(rows) {
   return `<table class="race-card__table"><thead>${head}</thead><tbody>${body}</tbody></table>`;
 }
 
-const RACE_TOP_COUNT = 10;
-const PODIUM_COUNT = 3;
-
-function isPodiumRank(rank) {
-  return Number(rank) > 0 && Number(rank) <= PODIUM_COUNT;
-}
+const RACE_TOP_COUNT = 5;
 
 function cardClassName(movie) {
   const rank = Math.min(Number(movie.rank) || 99, RACE_TOP_COUNT);
-  const compact = !isPodiumRank(rank) ? " race-card--compact race-row" : "";
-  return `race-card race-card--rank${rank}${compact}`;
+  return `race-card race-card--rank${rank}`;
 }
 
-function formatCompactBox(movie) {
+function formatDisplayBox(movie) {
   const amount = getMovieBoxAmount(movie);
   if (amount > 0) return `${formatBoxAmount(amount)}${movie.todayUnit || "万"}`;
   if (!isEmptyField(movie.todayBoxText)) return `${movie.todayBoxText}${movie.todayUnit || "万"}`;
   return "--";
 }
 
-function raceRowTemplate(movie) {
-  const boxText = formatCompactBox(movie);
-  return `
-    <div class="race-row__inner">
-      <span class="race-card__rank">NO.${movie.rank}</span>
-      <h2 class="race-card__title race-row__title">《${escapeHtml(movie.name)}》</h2>
-      <div class="race-row__metrics">
-        <span class="race-row__metric"><em>实时</em><strong class="js-day-box">${escapeHtml(boxText)}</strong></span>
-        <span class="race-row__metric"><em>占比</em><strong>${escapeHtml(movie.boxRate || "--")}</strong></span>
-        <span class="race-row__metric"><em>排片</em><strong>${escapeHtml(movie.showCountRate || "--")}</strong></span>
-        <span class="race-row__metric"><em>上座</em><strong>${escapeHtml(movie.avgSeatView || "--")}</strong></span>
-      </div>
-    </div>
-  `;
-}
-
-function buildRaceRow(movie) {
-  const card = document.createElement("article");
-  card.className = cardClassName(movie);
-  card.dataset.movieId = String(movie.movieId);
-  card.dataset.rank = String(movie.rank);
-  card.innerHTML = raceRowTemplate(movie);
-  requestAnimationFrame(() => {
-    fitNowrapEl(card.querySelector(".race-row__title"), { minSize: 26, allowWrap: true });
-  });
-  return card;
-}
-
-function updateRaceRow(card, movie, isNew = false) {
-  const prevRank = Number(card.dataset.rank || 0);
-  card.className = cardClassName(movie);
-  card.dataset.rank = String(movie.rank);
-  if (prevRank && prevRank !== movie.rank) {
-    card.classList.remove("is-flash");
-    void card.offsetWidth;
-    card.classList.add("is-flash");
+function buildRankExtras(movie) {
+  if (Number(movie.rank) !== 1) return "";
+  const parts = [];
+  if (!isEmptyField(movie.dynamicForecast)) {
+    parts.push(
+      `<span class="race-card__extra"><em>动态预测</em><strong>${escapeHtml(movie.dynamicForecast)}${trendArrow(movie.dynamicTrend)}</strong></span>`,
+    );
   }
-  setTextIfChanged(card.querySelector(".race-card__rank"), `NO.${movie.rank}`);
-  if (setTextIfChanged(card.querySelector(".race-card__title"), `《${movie.name}》`)) {
-    fitNowrapEl(card.querySelector(".race-row__title"), { minSize: 26, allowWrap: true });
+  if (!isEmptyField(movie.sumBoxDesc)) {
+    parts.push(
+      `<span class="race-card__extra"><em>累计票房</em><strong>${escapeHtml(movie.sumBoxDesc)}</strong></span>`,
+    );
   }
-  const boxText = formatCompactBox(movie);
-  setTextIfChanged(card.querySelector(".js-day-box"), boxText);
-  const metrics = card.querySelectorAll(".race-row__metric strong");
-  if (metrics[1]) setTextIfChanged(metrics[1], movie.boxRate || "--");
-  if (metrics[2]) setTextIfChanged(metrics[2], movie.showCountRate || "--");
-  if (metrics[3]) setTextIfChanged(metrics[3], movie.avgSeatView || "--");
-  updateRaceCardDelta(card, movie, isNew);
-  trackBoxDelta(card, movie, isNew);
+  return parts.length ? `<div class="race-card__extras">${parts.join("")}</div>` : "";
 }
 
 function raceCardTemplate(movie) {
-  const mainland = mainlandValue(movie);
-  const regions = buildRegionsHtml(movie);
-  const metrics = buildMetricsHtml(movie);
-  const dailyTable = ensureDailyTable(movie);
-  const table = dailyTableHtml(dailyTable);
-  const mainlandText = isEmptyField(mainland) ? "--" : String(mainland);
-
+  const boxText = formatDisplayBox(movie);
   return `
-    <div class="race-card__head">
+    <div class="race-card__top">
       <span class="race-card__rank">NO.${movie.rank}</span>
-      <div class="race-card__title-wrap">
-        <h2 class="race-card__title">《${escapeHtml(movie.name)}》</h2>
-      </div>
-      <div class="race-card__mainland${isEmptyField(mainland) ? " is-empty" : ""}">
-        <span class="race-card__delta"></span>
-        <div class="race-card__mainland-row">
-          <em>中国内地：</em>
-          <strong class="js-mainland">${isEmptyField(mainland) ? "--" : escapeHtml(mainlandText)}</strong>
-        </div>
+      <h2 class="race-card__title">《${escapeHtml(movie.name)}》</h2>
+    </div>
+    <div class="race-card__boxline">
+      <span class="race-card__delta"></span>
+      <div class="race-card__box">
+        <em>实时票房</em>
+        <strong class="js-day-box">${escapeHtml(boxText)}</strong>
       </div>
     </div>
-    <div class="race-card__regions${regions ? "" : " is-empty"}">${regions}</div>
-    <div class="race-card__metrics${metrics ? "" : " is-empty"}">${metrics}</div>
-    <div class="race-card__table-wrap${table ? "" : " is-empty"}" data-table-sig="">${table}</div>
+    <div class="race-card__stats">
+      <div class="race-stat"><em>票房占比</em><strong class="js-box-rate">${escapeHtml(movie.boxRate || "--")}</strong></div>
+      <div class="race-stat"><em>排片占比</em><strong class="js-show-rate">${escapeHtml(movie.showCountRate || "--")}</strong></div>
+      <div class="race-stat"><em>实时上座</em><strong class="js-seat-view">${escapeHtml(movie.avgSeatView || "--")}</strong></div>
+    </div>
+    ${buildRankExtras(movie)}
   `;
 }
 
@@ -778,13 +732,9 @@ function buildRaceCard(movie) {
   card.dataset.movieId = String(movie.movieId);
   card.dataset.rank = String(movie.rank);
   card.innerHTML = raceCardTemplate(movie);
-  const wrap = card.querySelector(".race-card__table-wrap");
-  if (wrap && !wrap.classList.contains("is-empty")) {
-    wrap.dataset.tableSig = dailyTableSignature(ensureDailyTable(movie));
-  }
+  const minTitle = Number(movie.rank) === 1 ? 42 : 30;
   requestAnimationFrame(() => {
-    fitNowrapEl(card.querySelector(".race-card__title"), { minSize: 30, allowWrap: true });
-    fitNowrapEl(card.querySelector(".js-mainland"), { minSize: 26 });
+    fitNowrapEl(card.querySelector(".race-card__title"), { minSize: minTitle, allowWrap: true });
   });
   return card;
 }
@@ -829,18 +779,14 @@ function updateRaceCardDelta(card, movie, isNew) {
 
 function getDeltaBubbleAnchor(card) {
   return (
-    card.querySelector('[data-metric="dailyIncrease"] .metric__value') ||
+    card.querySelector(".js-day-box") ||
     card.querySelector(".race-card__delta") ||
     card.querySelector(".race-card__title")
   );
 }
 
 function getBoxAnchor(card) {
-  return (
-    getDeltaBubbleAnchor(card) ||
-    card.querySelector(".js-mainland") ||
-    card.querySelector(".js-day-box")
-  );
+  return getDeltaBubbleAnchor(card);
 }
 
 function trackBoxDelta(card, movie, isNew) {
@@ -872,8 +818,8 @@ function updateRaceCard(card, movie, isNew = false) {
     card.classList.add("is-flash");
   }
 
-  const head = card.querySelector(".race-card__head");
-  if (!head) {
+  const top = card.querySelector(".race-card__top");
+  if (!top) {
     card.innerHTML = raceCardTemplate(movie);
     updateRaceCardDelta(card, movie, isNew);
     trackBoxDelta(card, movie, isNew);
@@ -882,44 +828,26 @@ function updateRaceCard(card, movie, isNew = false) {
 
   setTextIfChanged(card.querySelector(".race-card__rank"), `NO.${movie.rank}`);
   if (setTextIfChanged(card.querySelector(".race-card__title"), `《${movie.name}》`)) {
-    fitNowrapEl(card.querySelector(".race-card__title"), { minSize: 30, allowWrap: true });
+    const minTitle = Number(movie.rank) === 1 ? 42 : 30;
+    fitNowrapEl(card.querySelector(".race-card__title"), { minSize: minTitle, allowWrap: true });
   }
 
-  const mainland = mainlandValue(movie);
-  const mainlandWrap = card.querySelector(".race-card__mainland");
-  const mainlandEl = card.querySelector(".js-mainland");
-  if (mainlandWrap && mainlandEl) {
-    mainlandWrap.classList.toggle("is-empty", isEmptyField(mainland));
-    if (!isEmptyField(mainland)) {
-      setTextIfChanged(mainlandEl, mainland);
-      fitNowrapEl(mainlandEl, { minSize: 26 });
+  setTextIfChanged(card.querySelector(".js-day-box"), formatDisplayBox(movie));
+  setTextIfChanged(card.querySelector(".js-box-rate"), movie.boxRate || "--");
+  setTextIfChanged(card.querySelector(".js-show-rate"), movie.showCountRate || "--");
+  setTextIfChanged(card.querySelector(".js-seat-view"), movie.avgSeatView || "--");
+
+  const extrasHtml = buildRankExtras(movie);
+  const existingExtras = card.querySelector(".race-card__extras");
+  if (extrasHtml) {
+    if (!existingExtras) {
+      card.insertAdjacentHTML("beforeend", extrasHtml);
+    } else {
+      const next = extrasHtml.replace(/^<div class="race-card__extras">|<\/div>$/g, "");
+      setHtmlIfChanged(existingExtras, next);
     }
-  }
-
-  const regionsHtml = buildRegionsHtml(movie);
-  const regionsEl = card.querySelector(".race-card__regions");
-  if (regionsEl) {
-    regionsEl.classList.toggle("is-empty", !regionsHtml);
-    if (regionsHtml) setHtmlIfChanged(regionsEl, regionsHtml);
-  }
-
-  const metricsHtml = buildMetricsHtml(movie);
-  const metricsEl = card.querySelector(".race-card__metrics");
-  if (metricsEl) {
-    metricsEl.classList.toggle("is-empty", !metricsHtml);
-    if (metricsHtml) setHtmlIfChanged(metricsEl, metricsHtml);
-  }
-
-  const dailyTable = ensureDailyTable(movie);
-  const tableHtml = dailyTableHtml(dailyTable);
-  const tableWrap = card.querySelector(".race-card__table-wrap");
-  if (tableWrap) {
-    const sig = dailyTableSignature(dailyTable);
-    tableWrap.classList.toggle("is-empty", !tableHtml);
-    if (tableHtml && tableWrap.dataset.tableSig !== sig) {
-      tableWrap.innerHTML = tableHtml;
-      tableWrap.dataset.tableSig = sig;
-    }
+  } else if (existingExtras) {
+    existingExtras.remove();
   }
 
   updateRaceCardDelta(card, movie, isNew);
@@ -934,22 +862,15 @@ function isFirstSeen(movieId) {
 function ensureRaceCard(movie) {
   const key = String(movie.movieId);
   let card = cardPool.get(key);
-  const podium = isPodiumRank(movie.rank);
-  const isRow = card?.classList.contains("race-row");
-  if (!card || !card.classList.contains("race-card") || (podium && isRow) || (!podium && !isRow)) {
+  if (!card || !card.classList.contains("race-card") || !card.querySelector(".race-card__top")) {
     card?.remove();
-    card = podium ? buildRaceCard(movie) : buildRaceRow(movie);
+    card = buildRaceCard(movie);
     cardPool.set(key, card);
-    if (podium) {
-      updateRaceCardDelta(card, movie, isFirstSeen(key));
-      trackBoxDelta(card, movie, isFirstSeen(key));
-    } else {
-      updateRaceRow(card, movie, isFirstSeen(key));
-    }
+    updateRaceCardDelta(card, movie, isFirstSeen(key));
+    trackBoxDelta(card, movie, isFirstSeen(key));
     return card;
   }
-  if (podium) updateRaceCard(card, movie, isFirstSeen(key));
-  else updateRaceRow(card, movie, isFirstSeen(key));
+  updateRaceCard(card, movie, isFirstSeen(key));
   return card;
 }
 
@@ -959,17 +880,14 @@ function renderLoadingSkeleton() {
     const rank = i + 1;
     return `
       <article class="race-card race-card--skeleton race-card--rank${rank}" aria-hidden="true">
-        <div class="race-card__head">
+        <div class="race-card__top">
           <span class="race-card__rank skeleton-block">NO.${rank}</span>
-          <div class="race-card__title-wrap">
-            <h2 class="race-card__title skeleton-block">加载中</h2>
-          </div>
-          <div class="race-card__mainland skeleton-block"></div>
+          <h2 class="race-card__title skeleton-block">加载中</h2>
         </div>
-        <div class="race-card__metrics">
-          ${Array.from({ length: 9 }, () => '<div class="metric skeleton-block"></div>').join("")}
+        <div class="race-card__boxline skeleton-block"></div>
+        <div class="race-card__stats">
+          ${Array.from({ length: 3 }, () => '<div class="race-stat skeleton-block"></div>').join("")}
         </div>
-        <div class="race-card__table-wrap skeleton-block"></div>
       </article>
     `;
   }).join("");
@@ -1154,6 +1072,17 @@ function updateNation(nation, parsed) {
 
   if (heroDateEl) {
     setTextIfChanged(heroDateEl, resolveDisplayDate(parsed));
+  }
+
+  const footerEl = $("footer-update");
+  if (footerEl && parsed) {
+    const timeText = parsed.updateTimeText || "";
+    setTextIfChanged(
+      footerEl,
+      timeText
+        ? `数据来源：猫眼专业版 · 更新 ${timeText}`
+        : "数据来源：猫眼专业版",
+    );
   }
 }
 
