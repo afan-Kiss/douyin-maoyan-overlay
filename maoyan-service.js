@@ -393,7 +393,6 @@ function warmDashboardCache(apiBase) {
     sVersion: "2",
     signKey: "",
     WuKongReady: "h5",
-    displayLimit: "5",
   });
   const url = `${base}/i/api/dashboard-ajax/movie?${qs}`;
   const req = http.get(url, { timeout: 90000 }, (res) => {
@@ -630,7 +629,7 @@ async function ensureMaoyanServiceInner(config) {
     Object.assign(apiStatus, getMaoyanSessionStatus());
     warmDashboardCache(apiBase);
     // 延后验签，先让首屏大盘出来（避免启动瞬间再起无头 Chrome）
-    setTimeout(() => scheduleBackgroundVerify(apiBase, getDataDir()), 12000);
+    setTimeout(() => scheduleBackgroundVerify(apiBase, getDataDir(), { startup: true }), 12000);
     return apiStatus;
   }
 
@@ -639,7 +638,7 @@ async function ensureMaoyanServiceInner(config) {
     apiStatus.ready = true;
     Object.assign(apiStatus, getMaoyanSessionStatus());
     warmDashboardCache(apiBase);
-    setTimeout(() => scheduleBackgroundVerify(apiBase, getDataDir()), 12000);
+    setTimeout(() => scheduleBackgroundVerify(apiBase, getDataDir(), { startup: true }), 12000);
     return apiStatus;
   }
 
@@ -671,7 +670,7 @@ async function ensureMaoyanServiceInner(config) {
     apiStatus.error = "";
     Object.assign(apiStatus, getMaoyanSessionStatus());
     warmDashboardCache(apiBase);
-    setTimeout(() => scheduleBackgroundVerify(apiBase, getDataDir()), 12000);
+    setTimeout(() => scheduleBackgroundVerify(apiBase, getDataDir(), { startup: true }), 12000);
   } else {
     const crash = summarizeChildCrash(child);
     if (!maoyanProcess) {

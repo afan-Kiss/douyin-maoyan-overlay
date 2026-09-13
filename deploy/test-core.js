@@ -15,6 +15,7 @@ const TESTS = [
   { name: "module-load", script: "deploy/test-module-load.js", needsChrome: false },
   { name: "browser-state", script: "deploy/test-browser-state-immutable.js", needsChrome: false },
   { name: "stability", script: "deploy/test-stability-round4.js", needsChrome: false },
+  { name: "session-persist", script: "deploy/test-session-persist.js", needsChrome: false },
   { name: "session-capability", script: "deploy/test-session-capability.js", needsChrome: false },
   { name: "layout-top5", script: "deploy/test-layout-top5.js", needsChrome: true },
   { name: "data-consistency", script: "deploy/test-data-consistency.js", needsChrome: false },

@@ -32,14 +32,14 @@ export function applyOverlaySettings(settings) {
   const metricValueRank1 = clampFont(f.metricValueRank1 ?? f.metricValue, 28, 16, 32);
   const tableFont = clampFont(f.table, 24, 12, 26);
 
-  root.style.setProperty("--bubble-color", b.color || "#52e878");
+  root.style.setProperty("--bubble-color", b.color || "#ff4d4d");
   root.style.setProperty(
     "--bubble-bg",
-    `linear-gradient(135deg, ${b.bgStart || "rgba(12,40,22,0.94)"} 0%, ${b.bgEnd || "rgba(18,56,30,0.9)"} 100%)`
+    `linear-gradient(135deg, ${b.bgStart || "rgba(48,8,14,0.94)"} 0%, ${b.bgEnd || "rgba(72,12,20,0.9)"} 100%)`
   );
-  root.style.setProperty("--bubble-border", b.borderColor || "rgba(82,232,120,0.65)");
-  root.style.setProperty("--bubble-shadow", b.shadowColor || "rgba(82,232,120,0.35)");
-  root.style.setProperty("--bubble-glow", b.glowColor || "rgba(82,232,120,0.45)");
+  root.style.setProperty("--bubble-border", b.borderColor || "rgba(255,90,90,0.65)");
+  root.style.setProperty("--bubble-shadow", b.shadowColor || "rgba(255,60,80,0.35)");
+  root.style.setProperty("--bubble-glow", b.glowColor || "rgba(255,77,109,0.45)");
   root.style.setProperty("--bubble-font-size", `${b.fontSize || 34}px`);
   root.style.setProperty("--bubble-duration", `${b.durationMs || 3000}ms`);
   root.style.setProperty("--bubble-float", `${b.floatHeight || 52}px`);

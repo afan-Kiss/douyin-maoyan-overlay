@@ -358,19 +358,25 @@ function registerIpcHandlers() {
     if (result?.ok && (result?.detailApiReady || result?.loginCookieReady)) {
       try {
         const { mergeSessionStatus } = require("./lib/session-status");
-        mergeSessionStatus({
-          storageStateExists: true,
-          identityCookieExists: true,
-          loginCookieReady: true,
-          detailApiReady: Boolean(result.detailApiReady),
-          browserSessionVerified: Boolean(result.detailApiReady),
-          signatureReady: Boolean(result.detailApiReady),
-          accountLoggedIn: result.accountLoggedIn !== false,
-          sessionUsable: Boolean(result.detailApiReady),
-          loginRequired: false,
-          lastVerifyError: result.detailApiReady ? null : "mtgsig_deferred",
-          lastVerifyAt: new Date().toISOString(),
-        });
+        const { getDataDir } = require("./maoyan-service");
+        mergeSessionStatus(
+          {
+            storageStateExists: true,
+            identityCookieExists: true,
+            loginCookieReady: true,
+            detailApiReady: Boolean(result.detailApiReady),
+            browserSessionVerified: Boolean(result.detailApiReady),
+            signatureReady: Boolean(result.detailApiReady),
+            signatureCaptured: Boolean(result.detailApiReady),
+            detailPayloadValid: Boolean(result.detailApiReady),
+            accountLoggedIn: result.accountLoggedIn !== false,
+            sessionUsable: Boolean(result.detailApiReady),
+            loginRequired: false,
+            lastVerifyError: result.detailApiReady ? null : "mtgsig_deferred",
+            lastVerifyAt: new Date().toISOString(),
+          },
+          getDataDir(),
+        );
       } catch {
         /* ignore */
       }

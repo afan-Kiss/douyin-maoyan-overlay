@@ -1,10 +1,25 @@
 import fs from "fs";
 import path from "path";
 import { createRequire } from "module";
-import { STORAGE_STATE, SIG_TTL_SECONDS, DETAIL_API_SUCCESS_TTL_MS } from "./config.js";
+import {
+  DATA_DIR,
+  SESSION_CACHE_DIR,
+  STORAGE_STATE,
+  SIG_TTL_SECONDS,
+  DETAIL_API_SUCCESS_TTL_MS,
+} from "./config.js";
 
 const require = createRequire(import.meta.url);
 const { storageFileExists, storageFileLooksLoggedIn } = require("../../lib/storage-auth.js");
+const {
+  saveSessionCapability,
+  loadSessionCapability,
+  isPersistedSessionUsable,
+  newestSignatureTimestamp,
+  clearSessionCapability,
+  fingerprintMatches,
+  SESSION_PERSIST_TTL_MS,
+} = require("../../lib/session-persist.js");
 
 const EMPTY_VERIFY = {
   storageStateExists: false,
@@ -36,6 +51,7 @@ let lastSignatureError = null;
 let lastDashboardSuccessAt = null;
 let lastDetailApiSuccessAt = null;
 let verifyGeneration = 0;
+let diskHydrated = false;
 
 function readFileFlags() {
   const identityCookieExists = storageFileLooksLoggedIn(STORAGE_STATE);
@@ -63,7 +79,72 @@ function deriveSessionFields(result, flags) {
   };
 }
 
+function persistCapabilitySnapshot() {
+  const status = getLastCapabilityVerify();
+  if (!status.storageStateExists) return;
+  if (status.loginRequired) {
+    clearSessionCapability(DATA_DIR);
+    return;
+  }
+  if (!status.detailApiReady && !status.signatureReady) {
+    clearSessionCapability(DATA_DIR);
+    return;
+  }
+  saveSessionCapability(DATA_DIR, {
+    capability: status,
+    lastSignatureSuccessAt,
+    lastDetailApiSuccessAt,
+    lastDashboardSuccessAt,
+    savedAt: status.lastVerifyAt || new Date().toISOString(),
+  });
+}
+
+export function hydrateCapabilityFromDisk(dataDir = DATA_DIR) {
+  if (!dataDir || diskHydrated) return getLastCapabilityVerify();
+  diskHydrated = true;
+
+  const snapshot = loadSessionCapability(dataDir);
+  if (snapshot && fingerprintMatches(dataDir, snapshot)) {
+    if (snapshot.lastSignatureSuccessAt) {
+      lastSignatureSuccessAt = snapshot.lastSignatureSuccessAt;
+    }
+    if (snapshot.lastDetailApiSuccessAt) {
+      lastDetailApiSuccessAt = snapshot.lastDetailApiSuccessAt;
+    }
+    if (snapshot.lastDashboardSuccessAt) {
+      lastDashboardSuccessAt = snapshot.lastDashboardSuccessAt;
+    }
+    const cap = snapshot.capability || {};
+    if (
+      cap.detailApiReady &&
+      cap.detailPayloadValid &&
+      cap.signatureReady &&
+      !cap.loginRequired
+    ) {
+      lastVerifyResult = {
+        ...EMPTY_VERIFY,
+        ...cap,
+        lastVerifyAt: snapshot.savedAt || cap.lastVerifyAt || null,
+      };
+    }
+  }
+
+  if (!lastSignatureSuccessAt) {
+    const fromCache = newestSignatureTimestamp(
+      path.join(dataDir, "session_cache"),
+    );
+    if (fromCache) lastSignatureSuccessAt = fromCache;
+  }
+  if (!lastSignatureSuccessAt && SESSION_CACHE_DIR) {
+    const fromCache = newestSignatureTimestamp(SESSION_CACHE_DIR);
+    if (fromCache) lastSignatureSuccessAt = fromCache;
+  }
+
+  return getLastCapabilityVerify();
+}
+
 export function getLastCapabilityVerify() {
+  if (!diskHydrated) hydrateCapabilityFromDisk();
   const flags = readFileFlags();
   const derived = deriveSessionFields(lastVerifyResult, flags);
   return {
@@ -84,6 +165,7 @@ export function setLastCapabilityVerify(result) {
     lastVerifyAt: result.lastVerifyAt || new Date().toISOString(),
     _generation: verifyGeneration,
   };
+  persistCapabilitySnapshot();
   return getLastCapabilityVerify();
 }
 
@@ -105,7 +187,7 @@ export function applyCapabilitySuccess(patch = {}) {
 export function markSignatureSuccess(detail = "") {
   lastSignatureSuccessAt = new Date().toISOString();
   lastSignatureError = null;
-  applyCapabilitySuccess({ signatureReady: true });
+  applyCapabilitySuccess({ signatureReady: true, signatureCaptured: true });
 }
 
 export function markDetailApiSuccess(patch = {}) {
@@ -131,18 +213,25 @@ export function isRecentDetailApiSuccess(maxAgeMs = DETAIL_API_SUCCESS_TTL_MS) {
   return age >= 0 && age < maxAgeMs;
 }
 
+export function isPersistedDetailSuccess(maxAgeMs = SESSION_PERSIST_TTL_MS) {
+  return isPersistedSessionUsable(DATA_DIR, maxAgeMs);
+}
+
 export function markSignatureFailure(detail = "") {
   lastSignatureError = detail || "签名更新失败";
+  clearSessionCapability(DATA_DIR);
   const current = getLastCapabilityVerify();
   setLastCapabilityVerify({
     ...current,
     signatureReady: false,
+    detailPayloadValid: false,
     lastVerifyError: detail || current.lastVerifyError,
   });
 }
 
 export function markDashboardSuccess() {
   lastDashboardSuccessAt = new Date().toISOString();
+  persistCapabilitySnapshot();
 }
 
 export function getLastSignatureSuccessAt() {
@@ -200,16 +289,29 @@ export function applyApiErrorToCapability(code) {
     patch.signatureReady = false;
     patch.sessionUsable = false;
     patch.lastVerifyError = normalized;
+    clearSessionCapability(DATA_DIR);
   } else if (SIGNATURE_ERROR_CODES.has(normalized)) {
     patch.loginRequired = false;
     patch.signatureReady = false;
     patch.detailApiReady = false;
     patch.productionDetailReady = false;
+    patch.detailPayloadValid = false;
     patch.sessionUsable = false;
     patch.lastVerifyError = normalized;
+    clearSessionCapability(DATA_DIR);
   } else {
     return current;
   }
 
   return setLastCapabilityVerify({ ...current, ...patch });
+}
+
+export function _resetCapabilityStateForTest() {
+  diskHydrated = false;
+  lastVerifyResult = { ...EMPTY_VERIFY };
+  lastSignatureSuccessAt = null;
+  lastSignatureError = null;
+  lastDashboardSuccessAt = null;
+  lastDetailApiSuccessAt = null;
+  verifyGeneration = 0;
 }

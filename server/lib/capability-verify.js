@@ -8,6 +8,8 @@ import {
   setLastCapabilityVerify,
   getSignatureTTLStatus,
   isRecentDetailApiSuccess,
+  isPersistedDetailSuccess,
+  hydrateCapabilityFromDisk,
 } from "./capability-state.js";
 
 const require = createRequire(import.meta.url);
@@ -27,6 +29,7 @@ export function getLastCapabilityVerifyResult() {
 
 async function executeCapabilityVerify(options = {}) {
   const force = Boolean(options.force);
+  hydrateCapabilityFromDisk(DATA_DIR);
   const base = getLastCapabilityVerify();
   const sigStatus = getSignatureTTLStatus(manager.hasFreshSignature());
   const result = {
@@ -69,13 +72,17 @@ async function executeCapabilityVerify(options = {}) {
     verifyPick = null;
   }
 
-  // 仅当 cookie + 新鲜 mtgsig + 近期 detail API 成功时跳过浏览器验签
+  const persistedDetailOk = isPersistedDetailSuccess();
+  const detailSuccessFresh =
+    isRecentDetailApiSuccess() || persistedDetailOk;
+
+  // cookie + 磁盘新鲜 mtgsig +（内存或本地持久化的）detail 成功 → 跳过浏览器验签
   if (
     !force &&
     base.identityCookieExists &&
     manager.hasFreshSignature() &&
-    isRecentDetailApiSuccess() &&
-    base.detailPayloadValid
+    detailSuccessFresh &&
+    (base.detailPayloadValid || persistedDetailOk)
   ) {
     result.signatureReady = true;
     result.detailApiReady = true;

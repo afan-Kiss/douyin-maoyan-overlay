@@ -1,5 +1,16 @@
 /** 内置票房服务 API */
 
+import {
+  DECODE_STATUS,
+  resolveDecodeStatus,
+  resolveMaoyanSumBoxWan,
+  sortDashboardMovies,
+  pickOfficialDashboardMovies,
+  rerankMoviesByTodayBox,
+} from "./dashboard-rank.js";
+
+export { DECODE_STATUS, rerankMoviesByTodayBox, resolveMaoyanSumBoxWan, pickOfficialDashboardMovies };
+
 export class MaoyanApiError extends Error {
   constructor(message, { code = "api_error", detail = "", action = null, retryable = false } = {}) {
     super(message || detail || code);
@@ -62,31 +73,19 @@ export function resolveDisplayMovieCount(count) {
   return Math.min(Math.floor(n), 20);
 }
 
-/** 大盘列表只保留 UI 需要的前 N 部，避免解析/传递整榜数据 */
-export function trimDashboardRaw(raw, topCount) {
-  const limit = resolveDisplayMovieCount(topCount);
-  const list = raw?.movieList?.list;
-  if (!raw || !Array.isArray(list) || list.length <= limit) return raw;
-  return {
-    ...raw,
-    movieList: {
-      ...raw.movieList,
-      list: list.slice(0, limit),
-    },
-  };
+/** 保留完整猫眼列表，排名与 TOP N 截取在 parseDashboard 内完成 */
+export function trimDashboardRaw(raw, _topCount) {
+  return raw;
 }
 
 export async function fetchDashboard(apiBase, movieId = "", options = {}) {
-  const topCount = !movieId ? resolveDisplayMovieCount(options.topCount) : 0;
   const params = { ...DASHBOARD_PARAMS, movieId: String(movieId || "") };
-  if (topCount > 0) params.displayLimit = String(topCount);
   const url = `${apiBase}/i/api/dashboard-ajax/movie?` + new URLSearchParams(params);
   const dedupeKey = url;
   return runClientInflight(dashboardInflight, dedupeKey, async () => {
     const resp = await fetch(url, { signal: mergeFetchSignal(options.signal, 25000) });
     if (!resp.ok) throw await readApiError(resp);
-    const raw = await resp.json();
-    return topCount > 0 ? trimDashboardRaw(raw, topCount) : raw;
+    return resp.json();
   });
 }
 
@@ -360,9 +359,17 @@ async function waitForMtsiFont(retries = 5) {
   return false;
 }
 
+export function isMaoyanFontReady() {
+  return fontReady === true;
+}
+
 export async function injectFontStyle(fontStyle) {
   const remoteCss = normalizeFontCss(fontStyle);
-  if (remoteCss && remoteCss === lastFontStyle && fontReady) return;
+  // CSS 未变：绝不重置 fontReady / 重写 style，避免每轮轮询闪空白
+  if (remoteCss && remoteCss === lastFontStyle) {
+    if (!fontReady) await waitForMtsiFont();
+    return;
+  }
   if (remoteCss) {
     let el = document.getElementById("maoyan-font-style");
     if (!el) {
@@ -370,9 +377,7 @@ export async function injectFontStyle(fontStyle) {
       el.id = "maoyan-font-style";
       document.head.appendChild(el);
     }
-    if (remoteCss !== lastFontStyle) {
-      puaDigitMap.clear();
-    }
+    puaDigitMap.clear();
     el.textContent = remoteCss;
     lastFontStyle = remoteCss;
     fontReady = false;
@@ -522,34 +527,47 @@ export function refreshMovieBoxFields(movie) {
   if (!movie) return movie;
   const todayBoxHtml = movie.todayBoxHtml || "";
   const todayUnit = normalizeUnit(movie.todayUnit);
-  const todayRaw = decodeFontNum(todayBoxHtml);
+  const encodedBox = isEncodedBoxHtml(todayBoxHtml);
+  const todayRaw = encodedBox && !fontReady ? "" : decodeFontNum(todayBoxHtml);
   const prevText = String(movie.todayBoxText || "").trim();
   const prevBox = movie.todayBox;
   const prevTrusted =
-    prevBox > 0 && !isUntrustedBoxDecode(prevText || String(prevBox));
+    prevBox > 0 &&
+    prevText !== "--" &&
+    !isUntrustedBoxDecode(prevText || String(prevBox));
 
   if (!todayRaw) {
     if (prevTrusted) {
-      return { ...movie, todayUnit };
+      return {
+        ...movie,
+        todayUnit,
+        decodeStatus: DECODE_STATUS.OK,
+      };
     }
     return {
       ...movie,
       todayBoxText: "--",
       todayBox: 0,
       todayUnit,
+      decodeStatus: encodedBox ? DECODE_STATUS.ENCODED : DECODE_STATUS.FAILED,
     };
   }
 
   const todayBox = resolveTodayBox(todayRaw, todayUnit);
   if (todayBox <= 0) {
     if (prevTrusted) {
-      return { ...movie, todayUnit };
+      return {
+        ...movie,
+        todayUnit,
+        decodeStatus: DECODE_STATUS.OK,
+      };
     }
     return {
       ...movie,
       todayBoxText: "--",
       todayBox: 0,
       todayUnit,
+      decodeStatus: encodedBox ? DECODE_STATUS.ENCODED : DECODE_STATUS.FAILED,
     };
   }
 
@@ -558,6 +576,7 @@ export function refreshMovieBoxFields(movie) {
     todayBoxText: todayRaw,
     todayBox,
     todayUnit,
+    decodeStatus: DECODE_STATUS.OK,
   };
 }
 
@@ -1111,26 +1130,53 @@ function parseTechMetrics(raw) {
   return { endDate: endDateStr, remainingDays };
 }
 
+function formatTodayBoxDebugText(movie) {
+  if (movie.todayBoxText === "--") return "--";
+  if (!movie.todayBoxText) return "--";
+  const unit = movie.todayUnit || "万";
+  const text = String(movie.todayBoxText);
+  if (text.includes("万") || text.includes("亿")) return text;
+  return `${text}${unit}`;
+}
+
+/** @deprecated 使用 sortDashboardMovies */
+export function sortMoviesByTodayBox(movies) {
+  return sortDashboardMovies(movies);
+}
+
+function logDashboardRankDebug(movies) {
+  if (!movies?.length) return;
+  for (const movie of movies) {
+    console.log(
+      `[box-rank] rank=${movie.rank} originalRank=${movie.originalRank} name=${movie.name} totalBox=${movie.sumBoxDesc} todayBox=${formatTodayBoxDebugText(movie)} boxRate=${movie.boxRate} decodeStatus=${movie.decodeStatus}`,
+    );
+  }
+}
+
 function mapDashboardItem(item, index) {
   const info = item.movieInfo || {};
   const todayBoxHtml = item.boxSplitUnit?.num || "";
   const todayUnit = normalizeUnit(item.boxSplitUnit?.unit);
   const encodedBox = isEncodedBoxHtml(todayBoxHtml);
-  const todayRaw = encodedBox ? "" : decodeFontNum(todayBoxHtml);
-  const todayBox = encodedBox ? 0 : resolveTodayBox(todayRaw, todayUnit);
+  const todayRaw = decodeFontNum(todayBoxHtml);
+  const decodeStatus = resolveDecodeStatus(todayBoxHtml, todayRaw, encodedBox);
+  const todayBox =
+    decodeStatus === DECODE_STATUS.OK ? resolveTodayBox(todayRaw, todayUnit) : 0;
   const splitHtml = item.splitBoxSplitUnit?.num || "";
   const splitUnit = normalizeUnit(item.splitBoxSplitUnit?.unit);
   const splitRaw = decodeFontNum(splitHtml);
 
   return {
-    rank: index + 1,
+    _apiIndex: index,
+    originalRank: index + 1,
+    decodeStatus,
     movieId: info.movieId ?? `unknown-${index}`,
     name: info.movieName || "未知",
     releaseInfo: info.releaseInfo || "",
     todayBox,
     todayBoxHtml,
     todayUnit,
-    todayBoxText: todayRaw || "--",
+    todayBoxText: decodeStatus === DECODE_STATUS.OK ? todayRaw : "--",
     boxRate: item.boxRate || "--",
     boxRateNum: parseRate(item.boxRate),
     splitBoxRate: item.splitBoxRate || "--",
@@ -1144,18 +1190,20 @@ function mapDashboardItem(item, index) {
     avgSeatView: item.avgSeatView || "--",
     sumBoxDesc: item.sumBoxDesc || "--",
     sumSplitBoxDesc: item.sumSplitBoxDesc || "--",
+    sumBoxNum: resolveMaoyanSumBoxWan(item),
   };
 }
 
 export function parseDashboard(raw, topCount = 5) {
-  const trimmed = trimDashboardRaw(raw, topCount);
   const limit = resolveDisplayMovieCount(topCount);
-  const list = trimmed?.movieList?.list ?? [];
-  const nation = trimmed?.movieList?.nationBoxInfo ?? {};
-  const updateInfo = trimmed?.movieList?.updateInfo ?? {};
-  const calendar = trimmed?.calendar ?? {};
-  // 排名严格跟随猫眼大盘 API 顺序（当日票房占比），禁止客户端二次排序
-  const movies = list.slice(0, limit).map(mapDashboardItem);
+  const list = raw?.movieList?.list ?? [];
+  const nation = raw?.movieList?.nationBoxInfo ?? {};
+  const updateInfo = raw?.movieList?.updateInfo ?? {};
+  const calendar = raw?.calendar ?? {};
+  const mapped = list.map((item, index) => mapDashboardItem(item, index));
+  // 猫眼官方：先取当日榜 TOP N，再按累计总票房排显示顺序
+  const movies = pickOfficialDashboardMovies(mapped, limit);
+  logDashboardRankDebug(movies);
 
   const nationBoxHtml = nation.nationBoxSplitUnit?.num || "";
   const nationUnit = normalizeUnit(nation.nationBoxSplitUnit?.unit);
@@ -1166,7 +1214,7 @@ export function parseDashboard(raw, topCount = 5) {
   const nationSplitUnit = normalizeUnit(nation.nationSplitBoxSplitUnit?.unit);
   const nationSplitRaw = decodeFontNum(nationSplitHtml);
 
-  const globalTrends = parseTrends(trimmed?.movieInfo?.boxTrends, calendar.today);
+  const globalTrends = parseTrends(raw?.movieInfo?.boxTrends, calendar.today);
   const seatMetric = resolveNationSeatMetric(nation);
 
   return {
@@ -1193,7 +1241,7 @@ export function parseDashboard(raw, topCount = 5) {
     updateGapSecond: updateInfo.updateGapSecond || 5,
     updateTimestamp: updateInfo.updateTimestamp || Date.now(),
     updateTimeText: formatTimestamp(updateInfo.updateTimestamp) || "",
-    fontStyle: trimmed?.fontStyle || "",
+    fontStyle: raw?.fontStyle || "",
     updatedAt: Date.now(),
     globalTrends,
   };

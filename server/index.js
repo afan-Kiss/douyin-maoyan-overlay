@@ -15,6 +15,7 @@ import { runCapabilityVerify } from "./lib/capability-verify.js";
 import { applyApiErrorToCapability, getLastCapabilityVerify } from "./lib/capability-state.js";
 import { isPortListening } from "./lib/port.js";
 import { UpstreamError, manager } from "./lib/sigManager.js";
+import { buildRankSnapshotFromRawList } from "../ui/dashboard-rank.js";
 
 ensureConfigTemplate();
 
@@ -57,9 +58,11 @@ function saveDashboardSnapshot(data, meta = {}) {
   try {
     const dir = path.join(DATA_DIR, "logs");
     fs.mkdirSync(dir, { recursive: true });
+    const { rankings, ...restMeta } = meta;
     const payload = {
       savedAt: new Date().toISOString(),
-      ...meta,
+      rankings: Array.isArray(rankings) ? rankings : [],
+      ...restMeta,
       data,
     };
     fs.writeFileSync(
@@ -269,11 +272,15 @@ async function handleDashboardMovie(req, res) {
       { ...req.query },
       { forceRefresh, signal: controller.signal },
     );
-    const displayLimit = parseDisplayLimit(req.query);
-    const payload = displayLimit ? trimDashboardPayload(data, displayLimit) : data;
+    // 大盘列表必须完整来自猫眼，禁止服务端先截断再排序（否则累计高但当日占比低的片会丢）
+    const payload = data;
+    const rankings = buildRankSnapshotFromRawList(data?.movieList?.list || [], 5);
     saveDashboardSnapshot(payload, {
-      displayLimit: displayLimit || 0,
+      displayLimit: 0,
       movieCount: payload?.movieList?.list?.length || 0,
+      rankingCount: rankings.length,
+      rankings,
+      dataSource: "maoyan-dashboard-ajax",
       query: { ...req.query },
     });
     res.json(payload);

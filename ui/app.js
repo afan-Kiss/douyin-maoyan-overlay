@@ -17,6 +17,9 @@ import {
   isEncodedBoxHtml,
   boxHtmlUsesAntiScrapeFont,
   refreshMovieBoxFields,
+  rerankMoviesByTodayBox,
+  isMaoyanFontReady,
+  DECODE_STATUS,
   traceDashboardData,
   getExtraMetrics,
   getExtraMetricsGridClass,
@@ -153,6 +156,17 @@ function formatMoneyMetric(val) {
 
 function shouldPreferEncodedBox(movie) {
   if (!movie?.todayBoxHtml) return false;
+  // 已有可信明文（含 lastGood 回填）：直播必须用数字，禁止改画乱码导致闪空白
+  const text = String(movie.todayBoxText || "").trim();
+  const amount = Number(movie.todayBox) || 0;
+  if (amount > 0 && text && text !== "--" && !isUntrustedBoxDecode(text)) {
+    return false;
+  }
+  if (amount > 0 && !isUntrustedBoxDecode(String(amount))) {
+    return false;
+  }
+  // 字体未就绪时禁止塞乱码点，统一走缓存/“--”
+  if (!isMaoyanFontReady()) return false;
   if (isEncodedBoxHtml(movie.todayBoxHtml)) return true;
   const raw = String(movie.todayBoxText || "").trim();
   return raw && raw !== "--" && isUntrustedBoxDecode(raw);
@@ -170,7 +184,7 @@ function formatDailyBoxDisplay(movie) {
   }
   const amount = getMovieBoxAmount(movie);
   if (amount > 0) return `¥${formatWanDisplayText(amount)}`;
-  return "";
+  return "--";
 }
 
 const SUMMARY_COLUMN_DEFS = [
@@ -565,8 +579,8 @@ function isReasonableBoxDelta(prevAmount, nextAmount, delta) {
   if (isUntrustedBoxDecode(String(nextAmount)) || isUntrustedBoxDecode(String(prevAmount))) {
     return false;
   }
-  // 单次轮询涨幅不应超过当前票房的 35%（解码失败时常出现 1111 级跳变）
-  if (prevAmount >= 1 && delta > prevAmount * 0.35) return false;
+  // 可信数字已过滤垃圾解码；放宽跳变阈值，避免解码中断恢复后多部片涨幅被误杀
+  if (prevAmount >= 1 && delta > prevAmount * 3 && delta > 200) return false;
   return true;
 }
 
@@ -654,8 +668,17 @@ function stabilizeMovie(movie) {
   stable.name = movie.name;
   stable.movieId = movie.movieId;
 
-  if (stable.todayBox > 0 && isUntrustedBoxDecode(String(stable.todayBoxText || stable.todayBox))) {
-    stable.todayBox = 0;
+  // 仅当本轮明文本身是垃圾解码时才清零；"--"/空文本不能否掉已有数字
+  {
+    const boxText = String(stable.todayBoxText || "").trim();
+    if (
+      stable.todayBox > 0 &&
+      boxText &&
+      boxText !== "--" &&
+      isUntrustedBoxDecode(boxText)
+    ) {
+      stable.todayBox = 0;
+    }
   }
   const prevBoxTrusted =
     prev.todayBox > 0 && !isUntrustedBoxDecode(String(prev.todayBoxText || prev.todayBox));
@@ -663,9 +686,26 @@ function stabilizeMovie(movie) {
   if (stable.todayBox <= 0 && stable.todayBoxHtml) {
     const decoded = safeDecodeBox(stable.todayBoxHtml, stable.todayUnit);
     if (decoded > 0) stable.todayBox = decoded;
-    else if (prevBoxTrusted) stable.todayBox = prev.todayBox;
+    else if (prevBoxTrusted) {
+      stable.todayBox = prev.todayBox;
+      if (isEmptyField(stable.todayBoxText) && !isEmptyField(prev.todayBoxText)) {
+        stable.todayBoxText = prev.todayBoxText;
+      }
+    }
   } else if (stable.todayBox <= 0 && prevBoxTrusted) {
     stable.todayBox = prev.todayBox;
+    if (isEmptyField(stable.todayBoxText) && !isEmptyField(prev.todayBoxText)) {
+      stable.todayBoxText = prev.todayBoxText;
+    }
+  }
+
+  // 回填可信票房后同步解码态，避免 UI 仍按 FAILED/ENCODED 走乱码字形
+  if (
+    stable.todayBox > 0 &&
+    !isEmptyField(stable.todayBoxText) &&
+    !isUntrustedBoxDecode(String(stable.todayBoxText))
+  ) {
+    stable.decodeStatus = DECODE_STATUS.OK;
   }
 
   updateMovieCache(key, stable);
@@ -704,6 +744,7 @@ function stabilizeNation(nation) {
   for (const field of [
     "todayBoxHtml",
     "todayUnit",
+    "todayBoxText",
     "showCountDesc",
     "viewCountDesc",
     "seatLabel",
@@ -725,13 +766,26 @@ function stabilizeNation(nation) {
     !isUntrustedBoxDecode(String(lastGoodNation.todayBoxText || lastGoodNation.todayBox))
   ) {
     stable.todayBox = lastGoodNation.todayBox;
+    if (isEmptyField(stable.todayBoxText) && !isEmptyField(lastGoodNation.todayBoxText)) {
+      stable.todayBoxText = lastGoodNation.todayBoxText;
+    }
   }
-  if (stable.todayBox > 0 && isUntrustedBoxDecode(String(stable.todayBoxText || stable.todayBox))) {
-    stable.todayBox = 0;
+  // "--"/空文本不能把已回填的大盘数字再次清零
+  {
+    const boxText = String(stable.todayBoxText || "").trim();
+    if (
+      stable.todayBox > 0 &&
+      boxText &&
+      boxText !== "--" &&
+      isUntrustedBoxDecode(boxText)
+    ) {
+      stable.todayBox = 0;
+    }
   }
   for (const field of [
     "todayBoxHtml",
     "todayUnit",
+    "todayBoxText",
     "showCountDesc",
     "viewCountDesc",
     "seatLabel",
@@ -750,7 +804,7 @@ function purgeMovieState(id) {
   prevBoxHtml.delete(id);
   prevRankMap.delete(id);
   speedSnapshots.delete(id);
-  lastGoodMovies.delete(id);
+  // 保留 lastGoodMovies：影片进出 TOP N 时仍可回退实时票房，避免闪成 --
 }
 
 function getMovieBoxAmount(movie) {
@@ -1037,7 +1091,11 @@ function mainlandValue(movie) {
 }
 
 function buildSummaryMetricHtml(def, movie) {
-  return `<div class="metric" data-metric="${def.key}"><span class="metric__label">${def.label}</span><span class="metric__value">${buildSummaryMetricValueHtml(def, movie)}</span></div>`;
+  const bubble =
+    def.key === "dailyBox"
+      ? `<span class="race-card__delta-bubble race-card__delta-float" aria-hidden="true"></span>`
+      : "";
+  return `<div class="metric" data-metric="${def.key}"><span class="metric__label">${def.label}</span>${bubble}<span class="metric__value">${buildSummaryMetricValueHtml(def, movie)}</span></div>`;
 }
 
 function getSummaryMetricsByColumn(movie) {
@@ -1073,16 +1131,24 @@ function getSummaryMetricsByColumn(movie) {
 }
 
 function buildSummaryMetricValueHtml(def, movie, previousHtml = "") {
+  const prevText = String(previousHtml || "")
+    .replace(/<[^>]+>/g, "")
+    .trim();
+  const prevLooksPlain =
+    Boolean(previousHtml) &&
+    prevText &&
+    prevText !== "--" &&
+    !String(previousHtml).includes("metric__box-encoded");
+
+  // 本轮只能画乱码时：若上一帧已有明文数字，继续保留，避免字体未绑定时闪空白
   if (def.key === "dailyBox" && shouldPreferEncodedBox(movie)) {
+    if (prevLooksPlain) return previousHtml;
     const unit = escapeHtml(movie.todayUnit || "万");
     return `<span class="mtsi-font metric__box-encoded">${movie.todayBoxHtml}</span><span class="unit">${unit}</span>`;
   }
   const raw = resolveMetricRaw(def, movie);
   const trend = def.trend && !isEmptyField(raw) ? trendArrow(def.trend(movie)) : "";
   if (isEmptyField(raw)) {
-    const prevText = String(previousHtml || "")
-      .replace(/<[^>]+>/g, "")
-      .trim();
     if (prevText && prevText !== "--") {
       return previousHtml;
     }
@@ -1176,14 +1242,8 @@ function dailyTableSignature(rows) {
 }
 
 function resolveTodayTableBox(movie) {
-  if (shouldPreferEncodedBox(movie)) {
-    return {
-      box: "--",
-      boxHtml: movie.todayBoxHtml,
-      boxUnit: movie.todayUnit || "万",
-    };
-  }
   const amount = getMovieBoxAmount(movie);
+  // 有可信数字时一律明文，禁止因 decodeStatus 抖动改走乱码
   if (amount > 0) {
     return {
       box: formatWanDisplayText(amount),
@@ -1191,7 +1251,8 @@ function resolveTodayTableBox(movie) {
       boxUnit: movie.todayUnit || "万",
     };
   }
-  if (movie.todayBoxHtml) {
+  // 无可信数字：仅在确认要走编码路径时才塞乱码 HTML
+  if (shouldPreferEncodedBox(movie)) {
     return {
       box: "--",
       boxHtml: movie.todayBoxHtml,
@@ -1370,7 +1431,6 @@ function raceCardTemplate(movie) {
         <h2 class="race-card__title">《${escapeHtml(movie.name)}》</h2>
       </div>
       <div class="race-card__mainland-wrap">
-        <span class="race-card__delta-bubble race-card__delta-float" aria-hidden="true"></span>
         <div class="race-card__mainland${isEmptyField(mainland) || mainland === "--" ? " is-empty" : ""}">
           <em class="js-mainland-label">${mainlandLabel()}：</em>
           <strong class="js-mainland">${escapeHtml(mainland)}</strong>
@@ -1437,7 +1497,18 @@ function computeMovieDelta(movie, isNew) {
 }
 
 function updateRaceCardDelta(card, movie, isNew) {
-  const bubbleEl = card.querySelector(".race-card__delta-bubble");
+  let bubbleEl = card.querySelector(".race-card__delta-bubble");
+  const dailyBoxMetric = card.querySelector('[data-metric="dailyBox"]');
+  // 摘要结构重建后确保气泡挂在「实时票房」上
+  if (dailyBoxMetric && (!bubbleEl || bubbleEl.parentElement !== dailyBoxMetric)) {
+    if (bubbleEl) bubbleEl.remove();
+    bubbleEl = document.createElement("span");
+    bubbleEl.className = "race-card__delta-bubble race-card__delta-float";
+    bubbleEl.setAttribute("aria-hidden", "true");
+    const valueEl = dailyBoxMetric.querySelector(".metric__value");
+    if (valueEl) dailyBoxMetric.insertBefore(bubbleEl, valueEl);
+    else dailyBoxMetric.appendChild(bubbleEl);
+  }
   if (!bubbleEl) return;
   const delta = computeMovieDelta(movie, isNew);
   if (delta > 0) {
@@ -1626,9 +1697,7 @@ function renderList(movies) {
 
   if (cards.length) {
     syncRaceListChildren(cards);
-    requestAnimationFrame(() => {
-      refitAllRaceCards();
-    });
+    // 不再每次轮询全表 refit：字号抖动是界面闪烁主因；结构变化时 updateRaceCard 会局部 fit
   }
 
   updateChampion(list);
@@ -1739,14 +1808,20 @@ function updateChampion(movies) {
 
   const preferEncoded = shouldPreferEncodedBox(top);
   const amount = preferEncoded ? 0 : resolveChampionBoxWan(top);
-  if (top.todayBoxHtml && (preferEncoded || amount <= 0)) {
+  if (preferEncoded && top.todayBoxHtml) {
     champBoxPillEl?.classList.remove("is-hidden");
     setEncodedBoxValue(champBoxEl, top.todayBoxHtml);
   } else if (amount > 0) {
     champBoxPillEl?.classList.remove("is-hidden");
     setPlainBoxValue(champBoxEl, amount, champBoxUnitEl);
+    prevValues.set("__champ__", amount);
   } else {
-    champBoxPillEl?.classList.add("is-hidden");
+    // 本轮解码失败：保留上次冠军票房，禁止闪成 --
+    champBoxPillEl?.classList.remove("is-hidden");
+    const prevAmount = prevValues.get("__champ__");
+    if (!(prevAmount > 0)) {
+      setPlainBoxValue(champBoxEl, null, champBoxUnitEl);
+    }
   }
 }
 
@@ -1755,26 +1830,15 @@ function updateNation(nation, parsed) {
   const unitEl = document.querySelector(".js-nation-unit");
   const unit = nation.todayUnit || "万";
   const prevNation = prevValues.get("__nation__");
-  const preferEncoded =
-    nation.todayBoxHtml &&
-    (boxHtmlUsesAntiScrapeFont(nation.todayBoxHtml) ||
-      isUntrustedBoxDecode(String(nation.todayBoxText || "")));
-  const nationAmount = preferEncoded
-    ? 0
-    : resolveDisplayBoxAmount(
-        nation.todayBoxHtml,
-        unit,
-        nation.todayBox,
-        nation.todayBoxText
-      );
+  const nationAmount = resolveDisplayBoxAmount(
+    nation.todayBoxHtml,
+    unit,
+    nation.todayBox,
+    nation.todayBoxText,
+  );
 
-  if (nation.todayBoxHtml && (preferEncoded || nationAmount <= 0)) {
-    setEncodedBoxValue(nationBoxEl, nation.todayBoxHtml);
-    if (nationAmount > 0) {
-      prevValues.set("__nation__", nationAmount);
-    }
-    if (nation.todayBoxHtml) prevBoxHtml.set("__nation__", nation.todayBoxHtml);
-  } else if (nationAmount > 0) {
+  // 今日大盘只展示解码后的真实数字；解码失败保留上次数字，禁止闪成 -- / 乱码
+  if (nationAmount > 0) {
     if (
       prevNation != null &&
       isReasonableBoxDelta(prevNation, nationAmount, nationAmount - prevNation)
@@ -1784,8 +1848,8 @@ function updateNation(nation, parsed) {
     setPlainBoxValue(nationBoxEl, nationAmount, unitEl);
     prevValues.set("__nation__", nationAmount);
     if (nation.todayBoxHtml) prevBoxHtml.set("__nation__", nation.todayBoxHtml);
-  } else {
-    setPlainBoxValue(nationBoxEl, 0, unitEl);
+  } else if (!(prevNation > 0)) {
+    setPlainBoxValue(nationBoxEl, null, unitEl);
   }
 
   setTextIfChanged(nationShowsEl, nation.showCountDesc || "--");
@@ -1915,11 +1979,15 @@ function scheduleDecodeRetry() {
       (m) => m.todayBoxHtml && getMovieBoxAmount(stabilizeMovie(m)) <= 0
     );
     if (!needsRetry) {
-      // still refresh champion plain numbers if possible
-      renderList(latestMovies.map(stabilizeMovie));
+      // 解码已成功：禁止二次 renderList，避免约每轮多闪一次
+      updateChampion(latestMovies.map(stabilizeMovie));
       return;
     }
-    const movies = enrichMoviesQuick(latestMovies, latestSpeedMap).map(stabilizeMovie);
+    const refreshed = rerankMoviesByTodayBox(
+      latestMovies.map((movie) => refreshMovieBoxFields(movie)),
+    );
+    latestMovies = refreshed;
+    const movies = enrichMoviesQuick(refreshed, latestSpeedMap).map(stabilizeMovie);
     renderList(movies);
   }, 800);
 }
@@ -1942,6 +2010,14 @@ async function refreshData() {
 
     const displayCount = getDisplayMovieCount();
     const raw = await fetchDashboard(config.apiBase, "", { topCount: displayCount });
+    // 必须先注入反爬字体再 parse/decode，否则 todayBox 全失败 → 排名冻成猫眼原始序
+    if (raw.fontStyle) {
+      try {
+        await injectFontStyle(raw.fontStyle);
+      } catch (err) {
+        console.warn("字体加载失败", err);
+      }
+    }
     const parsed = parseDashboard(raw, displayCount);
     resetLastGoodIfDayChanged(parsed.calendar?.today);
     traceDashboardData(parsed, raw, { enabled: isDataTraceEnabled() });
@@ -1950,16 +2026,10 @@ async function refreshData() {
       return;
     }
 
-    if (raw.fontStyle) {
-      try {
-        await injectFontStyle(raw.fontStyle);
-      } catch (err) {
-        console.warn("字体加载失败", err);
-      }
-    }
-
     pollGeneration += 1;
-    latestMovies = parsed.movies.map(refreshMovieBoxFields);
+    latestMovies = rerankMoviesByTodayBox(
+      parsed.movies.map((movie) => refreshMovieBoxFields(movie)),
+    );
     latestNation = parsed.nation
       ? refreshMovieBoxFields({ ...parsed.nation, todayBoxHtml: parsed.nation.todayBoxHtml || "" })
       : parsed.nation;
@@ -2123,41 +2193,47 @@ function isLoginRequiredStatus(status) {
 function isSignatureIssueStatus(status) {
   if (isLoginRequiredStatus(status)) return false;
   const err = String(status?.lastVerifyError || "");
-  return (
+  if (
     /^(detail_http_403|upstream_403|403|mtgsig_not_captured|getboxshow_request_not_seen|sig_capture_failed)$/.test(
       err,
     ) || /mtgsig/i.test(err)
-  );
+  ) {
+    return true;
+  }
+  // 已有登录 Cookie 但签名明确不可用
+  if (
+    status?.identityCookieExists &&
+    status?.signatureReady === false &&
+    status?.sessionUsable === false
+  ) {
+    return true;
+  }
+  return false;
 }
 
 async function updateLoginButton(forceShow = false) {
   const btn = $("btn-login");
   if (!btn) return;
   const status = (await window.overlay?.getSessionStatus?.()) || {};
-  btn.classList.remove("is-hidden");
 
-  if (forceShow || isLoginRequiredStatus(status)) {
+  const needLogin = forceShow || isLoginRequiredStatus(status);
+  const needSig = !needLogin && isSignatureIssueStatus(status);
+  // 签名/会话可用：右上角不显示任何按钮
+  if (!needLogin && !needSig) {
+    btn.classList.add("is-hidden");
+    btn.classList.remove("is-highlight");
+    return;
+  }
+
+  btn.classList.remove("is-hidden");
+  if (needLogin) {
     btn.textContent = "登录";
     btn.title = "登录猫眼账号";
     return;
   }
 
-  if (isSignatureIssueStatus(status)) {
-    btn.textContent = "刷新签名";
-    btn.title = "猫眼签名失效，可尝试刷新签名或重新登录";
-    return;
-  }
-
-  if (status.identityCookieExists) {
-    btn.textContent = "重新登录";
-    btn.title = status.productionDetailReady
-      ? "详细数据已就绪，可重新登录猫眼账号"
-      : "重新登录猫眼账号";
-    return;
-  }
-
   btn.textContent = "登录";
-  btn.title = "登录猫眼账号";
+  btn.title = "猫眼签名不可用，点击登录或刷新签名";
 }
 
 function handleLoginFailure(result) {
