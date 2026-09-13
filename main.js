@@ -115,7 +115,7 @@ function applyWindowSettings(win) {
     liveOutput: w.liveOutput === true,
   });
   win.setContentSize(size.width, size.height);
-  win.setAlwaysOnTop(false);
+  win.setAlwaysOnTop(w.alwaysOnTop === true);
   win.webContents.send("window-mode-changed", {
     liveOutput: size.liveOutput === true,
     contentWidth: size.width,
@@ -153,7 +153,7 @@ function createWindow({ onReadyToShow } = {}) {
     minHeight: 400,
     frame: false,
     transparent: winCfg.transparent === true,
-    alwaysOnTop: false,
+    alwaysOnTop: winCfg.alwaysOnTop === true,
     resizable: true,
     hasShadow: true,
     useContentSize: true,
@@ -168,6 +168,7 @@ function createWindow({ onReadyToShow } = {}) {
   });
 
   mainWindow.setContentSize(size.width, size.height);
+  mainWindow.setAlwaysOnTop(winCfg.alwaysOnTop === true);
   mainWindow.loadFile(path.join(__dirname, "ui", "index.html"));
   mainWindow.setMenuBarVisibility(false);
 

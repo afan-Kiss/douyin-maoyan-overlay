@@ -14,7 +14,6 @@ import {
   markSignatureFailure,
   markDashboardSuccess as recordDashboardSuccess,
 } from "./capability-state.js";
-import { manager } from "./sigManager.js";
 
 const require = createRequire(import.meta.url);
 const { storageFileExists, storageFileLooksLoggedIn } = require("../../lib/storage-auth.js");
@@ -478,7 +477,7 @@ function isLoginInProgress() {
   }
 }
 
-export function buildDiagnostics() {
+export function buildDiagnostics(hasFreshSignature = false) {
   const chromePath = getChromeExecutable();
   const chromeFound = Boolean(chromePath);
   const chromePathValid = chromeFound && fs.existsSync(chromePath);
@@ -486,7 +485,7 @@ export function buildDiagnostics() {
   const identityCookieExists = storageFileLooksLoggedIn(STORAGE_STATE);
   const loginInProgress = isLoginInProgress();
   const verify = getLastCapabilityVerify();
-  const sigStatus = getSignatureTTLStatus(manager.hasFreshSignature());
+  const sigStatus = getSignatureTTLStatus(hasFreshSignature);
 
   return {
     serviceReady: true,
@@ -495,7 +494,11 @@ export function buildDiagnostics() {
     chromePath: chromePathValid ? chromePath : "",
     storageStateExists,
     identityCookieExists,
-    accountLoggedIn: Boolean(identityCookieExists && verify.detailApiReady),
+    loginCookieReady: identityCookieExists,
+    productionDetailReady: verify.productionDetailReady,
+    loginRequired: verify.loginRequired,
+    sessionUsable: verify.sessionUsable,
+    accountLoggedIn: identityCookieExists,
     browserSessionVerified: verify.browserSessionVerified,
     signatureAvailable: sigStatus.signatureReady,
     signatureReady: sigStatus.signatureReady,

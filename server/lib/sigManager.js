@@ -23,10 +23,14 @@ import {
 } from "./config.js";
 import { log, explainError, isNonRetryableSigError } from "./logger.js";
 import { createRequire } from "module";
-import { applyApiErrorToCapability } from "./capability-state.js";
+import {
+  applyApiErrorToCapability,
+  applyCapabilitySuccess,
+  markDetailApiSuccess,
+} from "./capability-state.js";
 
 const require = createRequire(import.meta.url);
-const { matchesGetBoxShowRequest } = require("../../lib/session-capability.js");
+const { matchesGetBoxShowRequest, validateDetailApiPayload } = require("../../lib/session-capability.js");
 import {
   buildMygsig,
   generateSignKey,
@@ -646,11 +650,6 @@ export class SigManager {
           await page.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: 90000 });
           await page.waitForTimeout(800);
           const result = await fn(page);
-          try {
-            await context.storageState({ path: STORAGE_STATE });
-          } catch {
-            /* noop */
-          }
           return result;
         } finally {
           await page.close().catch(() => {});
@@ -743,11 +742,6 @@ export class SigManager {
             log.sigStep(`已缓存 ${this.countWuKongSigs(movieId)}/${WUKONG_API_PATHS.length} 个扩展接口签名`);
           }
 
-          try {
-            await context.storageState({ path: STORAGE_STATE });
-          } catch {
-            /* noop */
-          }
         } finally {
           await page.close().catch(() => {});
         }
@@ -809,6 +803,22 @@ export class SigManager {
       log.sigStep("签名抓到了，但保存到本地失败");
     }
     log.sigStep(`日期票房签名已抓到，维度${boxLevel}`);
+    applyCapabilitySuccess({ signatureReady: true, signatureCaptured: true });
+    try {
+      const resp = await this.requestUpstream(movieId, boxLevel, entry);
+      if (resp.ok) {
+        const data = await resp.json();
+        if (validateDetailApiPayload(data)) {
+          markDetailApiSuccess({
+            detailHttpStatus: resp.status,
+            detailPayloadValid: true,
+            browserSessionVerified: true,
+          });
+        }
+      }
+    } catch {
+      /* signature captured; detail verify deferred */
+    }
     log.sigEnd(true, "已保存到本地");
     return entry;
   }
@@ -944,6 +954,15 @@ export class SigManager {
 
       log.reqData("fresh");
       log.reqMode("proto");
+      if (validateDetailApiPayload(data)) {
+        markDetailApiSuccess({
+          detailHttpStatus: resp.status,
+          detailPayloadValid: true,
+          browserSessionVerified: true,
+          signatureReady: true,
+          signatureCaptured: true,
+        });
+      }
       return data;
     });
   }
@@ -1091,11 +1110,6 @@ export class SigManager {
           }
 
           this.pruneCache();
-          try {
-            await context.storageState({ path: STORAGE_STATE });
-          } catch {
-            /* noop */
-          }
         } finally {
           await page.close().catch(() => {});
         }
@@ -1273,6 +1287,15 @@ export class SigManager {
       const data = await resp.json();
       log.reqData("fresh");
       log.reqMode("proto");
+      if (validateDetailApiPayload(data)) {
+        markDetailApiSuccess({
+          detailHttpStatus: resp.status,
+          detailPayloadValid: true,
+          browserSessionVerified: true,
+          signatureReady: true,
+          signatureCaptured: true,
+        });
+      }
       return data;
     } catch {
       throw new UpstreamError(502, "bad_json");

@@ -1386,15 +1386,42 @@ async function waitForApiReady() {
   });
 }
 
+function isSignatureIssueStatus(status) {
+  const err = String(status?.lastVerifyError || "");
+  return (
+    /403|signature|sig_|mtgsig/i.test(err) ||
+    (status?.identityCookieExists && !status?.detailApiReady && !status?.loginRequired)
+  );
+}
+
 async function updateLoginButton(forceShow = false) {
   const btn = $("btn-login");
   if (!btn) return;
   const status = (await window.overlay?.getSessionStatus?.()) || {};
-  const verified =
-    !forceShow && status.detailApiReady && status.identityCookieExists;
   btn.classList.remove("is-hidden");
-  btn.textContent = verified ? "重新登录" : "登录";
-  btn.title = verified ? "重新登录猫眼账号" : "登录猫眼账号";
+
+  if (forceShow || status.loginRequired) {
+    btn.textContent = "登录";
+    btn.title = "登录猫眼账号";
+    return;
+  }
+
+  if (isSignatureIssueStatus(status)) {
+    btn.textContent = "刷新签名";
+    btn.title = "猫眼签名失效，可尝试刷新签名或重新登录";
+    return;
+  }
+
+  if (status.identityCookieExists) {
+    btn.textContent = "重新登录";
+    btn.title = status.productionDetailReady
+      ? "详细数据已就绪，可重新登录猫眼账号"
+      : "重新登录猫眼账号";
+    return;
+  }
+
+  btn.textContent = "登录";
+  btn.title = "登录猫眼账号";
 }
 
 async function finishLoginSuccess() {
@@ -1423,13 +1450,46 @@ function handleLoginFailure(result) {
   }
 }
 
+async function handleSignatureRefresh() {
+  setStatus("loading", "正在刷新猫眼签名…");
+  const apiStatus = await window.overlay?.ensureApi?.();
+  if (!apiStatus?.apiBase) {
+    setStatus("error", "票房服务未就绪，无法刷新签名");
+    return;
+  }
+  config.apiBase = apiStatus.apiBase;
+  const movieId = String(latestMovies[0]?.movieId || "1462628");
+  try {
+    const resp = await fetch(
+      `${apiStatus.apiBase}/api/refresh?movieId=${encodeURIComponent(movieId)}&boxLevel=1`,
+      { signal: AbortSignal.timeout(120000) },
+    );
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      throw new MaoyanApiError(body.detail || "刷新签名失败", body);
+    }
+    resetApiSigWarm();
+    await updateLoginButton(false);
+    setStatus("loading", "签名已刷新，正在重新拉取数据…");
+    refreshData();
+  } catch (error) {
+    setStatus("error", formatUserFacingError(error));
+  }
+}
+
 async function handleLoginClick() {
+  const sessionStatus = (await window.overlay?.getSessionStatus?.()) || {};
+  if (isSignatureIssueStatus(sessionStatus) && !sessionStatus.loginRequired) {
+    await handleSignatureRefresh();
+    return;
+  }
+
   if (loginWatchTimer) {
     clearInterval(loginWatchTimer);
     loginWatchTimer = null;
   }
   $("btn-login")?.classList.remove("is-highlight");
-  const relogin = (await window.overlay?.getSessionStatus?.())?.identityCookieExists;
+  const relogin = sessionStatus.identityCookieExists;
   setStatus("loading", relogin ? "正在打开登录窗口，请重新完成登录…" : "正在打开登录窗口，请在浏览器中完成登录…");
 
   let offResult = null;

@@ -1,7 +1,11 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { createRequire } from "module";
 import { getIniValue, parseIni } from "./ini.js";
+
+const require = createRequire(import.meta.url);
+const { loadCookieHeaderFromFile } = require("../../lib/storage-auth.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(__dirname, "..");
@@ -11,6 +15,8 @@ export const DIR = ROOT;
 export const CONFIG_FILE = path.join(DATA_DIR, "config.ini");
 export const COOKIE_FILE = path.join(DATA_DIR, "cookies.txt");
 export const STORAGE_STATE = path.join(DATA_DIR, "browser_state.json");
+/** sigManager 运行时 cookie 暂存；不得直接覆盖正式 browser_state.json */
+export const STORAGE_RUNTIME_PENDING = path.join(DATA_DIR, "browser_state.runtime.pending.json");
 export const SESSION_CACHE_DIR = path.join(DATA_DIR, "session_cache");
 
 export const API_HOST = "0.0.0.0";
@@ -77,10 +83,7 @@ function autoDetectChrome() {
 export function getChromeExecutable() {
   const cfg = loadConfig();
   const manual = (cfg.chromePath || "").trim();
-  if (manual) {
-    if (fs.existsSync(manual)) return manual;
-    return "";
-  }
+  if (manual && fs.existsSync(manual)) return manual;
 
   const env = (process.env.MAOYAN_CHROME || "").trim();
   if (env && fs.existsSync(env)) return env;
@@ -138,16 +141,7 @@ export function randomTraceId() {
 }
 
 export function loadCookieHeader() {
-  if (!fs.existsSync(STORAGE_STATE)) return "";
-  try {
-    const state = JSON.parse(fs.readFileSync(STORAGE_STATE, "utf-8"));
-    const cookies = (state.cookies || []).filter((c) =>
-      String(c.domain || "").includes("maoyan.com")
-    );
-    return cookies.map((c) => `${c.name}=${c.value}`).join("; ");
-  } catch {
-    return "";
-  }
+  return loadCookieHeaderFromFile(STORAGE_STATE);
 }
 
 export function ensureConfigTemplate() {

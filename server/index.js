@@ -350,7 +350,7 @@ async function main() {
   });
 
   app.get("/health/ready", (_req, res) => {
-    const diagnostics = buildDiagnostics();
+    const diagnostics = buildDiagnostics(manager.hasFreshSignature());
     res.json({
       ok: diagnostics.serviceReady && diagnostics.chromePathValid,
       ...diagnostics,
@@ -358,7 +358,7 @@ async function main() {
   });
 
   app.get("/api/diagnostics", (_req, res) => {
-    res.json(buildDiagnostics());
+    res.json(buildDiagnostics(manager.hasFreshSignature()));
   });
 
   app.get("/api/capability-status", (_req, res) => {

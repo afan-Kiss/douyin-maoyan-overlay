@@ -9,7 +9,11 @@ const { storageFileExists, storageFileLooksLoggedIn } = require("../../lib/stora
 const EMPTY_VERIFY = {
   storageStateExists: false,
   identityCookieExists: false,
+  loginCookieReady: false,
+  productionDetailReady: false,
+  loginRequired: false,
   accountLoggedIn: false,
+  sessionUsable: false,
   browserSessionReady: false,
   browserSessionVerified: false,
   signatureReady: false,
@@ -30,42 +34,88 @@ let lastVerifyResult = { ...EMPTY_VERIFY };
 let lastSignatureSuccessAt = null;
 let lastSignatureError = null;
 let lastDashboardSuccessAt = null;
+let verifyGeneration = 0;
 
 function readFileFlags() {
+  const identityCookieExists = storageFileLooksLoggedIn(STORAGE_STATE);
   return {
     storageStateExists: storageFileExists(STORAGE_STATE),
-    identityCookieExists: storageFileLooksLoggedIn(STORAGE_STATE),
+    identityCookieExists,
+    loginCookieReady: identityCookieExists,
+    accountLoggedIn: identityCookieExists,
+  };
+}
+
+function deriveSessionFields(result, flags) {
+  const identityCookieExists = Boolean(
+    result.identityCookieExists ?? flags.identityCookieExists,
+  );
+  const detailApiReady = Boolean(result.detailApiReady);
+  const loginRequired = Boolean(result.loginRequired);
+  return {
+    identityCookieExists,
+    loginCookieReady: identityCookieExists,
+    productionDetailReady: detailApiReady,
+    loginRequired,
+    accountLoggedIn: identityCookieExists,
+    sessionUsable: identityCookieExists && detailApiReady && !loginRequired,
   };
 }
 
 export function getLastCapabilityVerify() {
   const flags = readFileFlags();
+  const derived = deriveSessionFields(lastVerifyResult, flags);
   return {
     ...lastVerifyResult,
     ...flags,
-    accountLoggedIn: Boolean(flags.identityCookieExists && lastVerifyResult.detailApiReady),
+    ...derived,
   };
 }
 
 export function setLastCapabilityVerify(result) {
   const flags = readFileFlags();
+  verifyGeneration += 1;
   lastVerifyResult = {
     ...EMPTY_VERIFY,
     ...result,
     ...flags,
-    accountLoggedIn: Boolean(flags.identityCookieExists && result.detailApiReady),
+    ...deriveSessionFields(result, flags),
     lastVerifyAt: result.lastVerifyAt || new Date().toISOString(),
+    _generation: verifyGeneration,
   };
   return getLastCapabilityVerify();
+}
+
+export function getCapabilityVerifyGeneration() {
+  return verifyGeneration;
+}
+
+export function applyCapabilitySuccess(patch = {}) {
+  const current = getLastCapabilityVerify();
+  return setLastCapabilityVerify({
+    ...current,
+    ...patch,
+    loginRequired: false,
+    lastVerifyError: null,
+    lastVerifyAt: new Date().toISOString(),
+  });
 }
 
 export function markSignatureSuccess(detail = "") {
   lastSignatureSuccessAt = new Date().toISOString();
   lastSignatureError = null;
-  const current = getLastCapabilityVerify();
-  if (current.detailApiReady) {
-    setLastCapabilityVerify({ ...current, signatureReady: true });
-  }
+  applyCapabilitySuccess({ signatureReady: true });
+}
+
+export function markDetailApiSuccess(patch = {}) {
+  applyCapabilitySuccess({
+    signatureReady: true,
+    detailApiReady: true,
+    browserSessionVerified: true,
+    signatureCaptured: true,
+    productionDetailReady: true,
+    ...patch,
+  });
 }
 
 export function markSignatureFailure(detail = "") {
@@ -130,14 +180,19 @@ export function applyApiErrorToCapability(code) {
   const patch = { lastVerifyAt: new Date().toISOString() };
 
   if (LOGIN_ERROR_CODES.has(normalized)) {
+    patch.loginRequired = true;
     patch.detailApiReady = false;
+    patch.productionDetailReady = false;
     patch.browserSessionVerified = false;
     patch.signatureReady = false;
-    patch.accountLoggedIn = false;
+    patch.sessionUsable = false;
     patch.lastVerifyError = normalized;
   } else if (SIGNATURE_ERROR_CODES.has(normalized)) {
+    patch.loginRequired = false;
     patch.signatureReady = false;
     patch.detailApiReady = false;
+    patch.productionDetailReady = false;
+    patch.sessionUsable = false;
     patch.lastVerifyError = normalized;
   } else {
     return current;

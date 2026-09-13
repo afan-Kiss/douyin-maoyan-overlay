@@ -189,7 +189,9 @@ function updateOutputStatus(settings) {
   const w = live ? 1080 : Number(settings?.window?.width) || 540;
   const h = live ? 1920 : Number(settings?.window?.height) || 960;
   const mode = live ? "直播输出 1080×1920" : `桌面预览 ${w}×${h}`;
-  const scale = live ? "1.0（原生）" : "0.5（CSS 缩放）";
+  const scale = live
+    ? "1.0（原生）"
+    : `${Math.min(w / 1080, h / 1920).toFixed(3)}（CSS 缩放）`;
   el.textContent = `输出模式：${mode} · contentSize ${w}×${h} · viewport scale ${scale}`;
 }
 

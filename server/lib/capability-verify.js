@@ -16,7 +16,8 @@ const {
   pickVerifyMovieFromDashboard,
 } = require("../../lib/session-capability.js");
 
-let verifyInflight = null;
+let activeRun = null;
+let chainPromise = null;
 let forceRerunRequested = false;
 
 export function getLastCapabilityVerifyResult() {
@@ -28,7 +29,11 @@ async function executeCapabilityVerify() {
   const sigStatus = getSignatureTTLStatus(manager.hasFreshSignature());
   const result = {
     ...base,
-    accountLoggedIn: false,
+    loginCookieReady: base.identityCookieExists,
+    productionDetailReady: false,
+    loginRequired: false,
+    accountLoggedIn: base.identityCookieExists,
+    sessionUsable: false,
     browserSessionReady: base.identityCookieExists,
     browserSessionVerified: false,
     signatureReady: sigStatus.signatureReady,
@@ -79,8 +84,10 @@ async function executeCapabilityVerify() {
     }
   } catch (error) {
     result.detailApiReady = false;
+    result.productionDetailReady = false;
     result.browserSessionVerified = false;
     result.signatureReady = false;
+    result.sessionUsable = false;
     result.lastVerifyError = String(error?.message || error || "verify_failed");
   } finally {
     if (browser || context) {
@@ -88,7 +95,10 @@ async function executeCapabilityVerify() {
     }
   }
 
-  result.accountLoggedIn = Boolean(result.identityCookieExists && result.detailApiReady);
+  result.loginCookieReady = Boolean(result.identityCookieExists);
+  result.productionDetailReady = Boolean(result.detailApiReady);
+  result.accountLoggedIn = Boolean(result.identityCookieExists);
+  result.sessionUsable = Boolean(result.identityCookieExists && result.detailApiReady && !result.loginRequired);
   if (!result.detailApiReady && !result.lastVerifyError) {
     result.lastVerifyError = "detail_api_unavailable";
   }
@@ -96,21 +106,35 @@ async function executeCapabilityVerify() {
   return setLastCapabilityVerify(result);
 }
 
-export function runCapabilityVerify(options = {}) {
-  if (verifyInflight) {
-    if (options.force) forceRerunRequested = true;
-    return verifyInflight;
-  }
-
-  verifyInflight = executeCapabilityVerify().finally(() => {
-    verifyInflight = null;
-    if (forceRerunRequested) {
+function startVerifyChain() {
+  chainPromise = (async () => {
+    let result;
+    do {
       forceRerunRequested = false;
-      void runCapabilityVerify({ force: true });
-    }
+      activeRun = executeCapabilityVerify();
+      result = await activeRun;
+    } while (forceRerunRequested);
+    return result;
+  })().finally(() => {
+    activeRun = null;
+    chainPromise = null;
   });
 
-  return verifyInflight;
+  return chainPromise;
+}
+
+export function runCapabilityVerify(options = {}) {
+  const force = Boolean(options.force);
+
+  if (chainPromise) {
+    if (force) {
+      forceRerunRequested = true;
+      return chainPromise;
+    }
+    return activeRun || chainPromise;
+  }
+
+  return startVerifyChain();
 }
 
 export function isLoginInProgress() {
@@ -122,10 +146,11 @@ export function isLoginInProgress() {
 }
 
 export function _resetVerifyInflight() {
-  verifyInflight = null;
+  activeRun = null;
+  chainPromise = null;
   forceRerunRequested = false;
 }
 
 export function _getVerifyInflightState() {
-  return { verifyInflight, forceRerunRequested };
+  return { verifyInflight: chainPromise, forceRerunRequested };
 }
