@@ -134,7 +134,7 @@ async function renderAndInspect(page, movies, nation) {
       setStatus("ok", "");
       for (const movie of movies) {
         const card = document.querySelector(`.race-card[data-movie-id="${movie.movieId}"]`);
-        const bubble = card?.querySelector(".race-card__delta-bubble");
+        const bubble = card?.querySelector(".race-card__delta-float");
         if (bubble) pulseInlineDelta(bubble, 10 + movie.rank, `test-${movie.movieId}`);
       }
       const nationBubble = document.getElementById("nation-delta");
@@ -222,13 +222,13 @@ async function renderAndInspect(page, movies, nation) {
           issues.push(`第 ${rank} 名表格应为 3 行，实际 ${rows.length}`);
         }
         const headers = [...table.querySelectorAll("thead th")].map((th) => th.textContent.trim());
-        const expected = ["日期", "票房(含预售)", "预测", "票房%", "排片%", "上座率"];
+        const expected = ["日期", "票房(含分账)", "预测", "票房%", "排片%", "上座率"];
         if (headers.join("|") !== expected.join("|")) {
           issues.push(`第 ${rank} 名表头不匹配: ${headers.join("|")}`);
         }
       }
 
-      const bubble = item.querySelector(".race-card__delta-bubble");
+      const bubble = item.querySelector(".race-card__delta-float");
       if (bubble?.classList.contains("is-visible")) {
         if (!rectContains(rect, bubble.getBoundingClientRect(), 2)) {
           issues.push(`第 ${rank} 名涨幅气泡漂出卡片`);
@@ -239,6 +239,7 @@ async function renderAndInspect(page, movies, nation) {
       const rankBadge = item.querySelector(".race-card__rank");
       const mainland = item.querySelector(".js-mainland");
       const summary = item.querySelector(".race-card__summary");
+      const metrics = item.querySelectorAll(".race-card__summary .metric");
 
       if (!title?.textContent?.trim()) {
         issues.push(`第 ${rank} 名缺少电影名`);
@@ -252,10 +253,27 @@ async function renderAndInspect(page, movies, nation) {
       if (!summary) {
         issues.push(`第 ${rank} 名缺少摘要区`);
       }
+      if (metrics.length !== 8) {
+        issues.push(`第 ${rank} 名摘要指标应为 8 项，实际 ${metrics.length}`);
+      }
+
+      const metricLabels = [...metrics].map((el) => el.querySelector(".metric__label")?.textContent?.trim());
+      const expectedLabels = ["动态预测", "总预测", "实时上座", "日排", "票房占比", "中国内地", "时速", "排片占比"];
+      if (metricLabels.join("|") !== expectedLabels.join("|")) {
+        issues.push(`第 ${rank} 名摘要字段顺序不匹配: ${metricLabels.join("|")}`);
+      }
 
       if (item.scrollHeight > item.clientHeight + 2) {
         issues.push(`第 ${rank} 名卡片内容溢出`);
       }
+    }
+
+    const tableBoxTexts = items.map((item) => {
+      const cell = item.querySelector(".race-card__table tbody tr:first-child td:nth-child(2)");
+      return cell?.textContent?.trim() || "";
+    }).filter(Boolean);
+    if (tableBoxTexts.length >= 2 && new Set(tableBoxTexts).size < tableBoxTexts.length) {
+      issues.push(`表格今日票房重复: ${tableBoxTexts.join(" | ")}`);
     }
 
     const last = items[items.length - 1];

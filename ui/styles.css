@@ -44,8 +44,8 @@
   --font-metric-value: 28px;
   --font-metric-value-rank1: 30px;
   --font-table: 19px;
-  --hero-block-h: 348px;
-  --card-gap: 8px;
+  --hero-block-h: 320px;
+  --card-gap: 4px;
 }
 
 * {
@@ -334,7 +334,7 @@ body {
   position: relative;
   flex: 0 0 auto;
   max-height: var(--hero-block-h);
-  padding: 10px 18px 8px;
+  padding: 8px 16px 6px;
   text-align: center;
   -webkit-app-region: drag;
 }
@@ -647,8 +647,8 @@ body {
 }
 
 .hero__title-row {
-  margin: 0 0 6px;
-  gap: 10px;
+  margin: 0 0 4px;
+  gap: 8px;
 }
 
 .hero__title {
@@ -662,17 +662,19 @@ body {
 }
 
 .hero__meta {
-  margin: 0 0 10px;
+  margin: 0 0 8px;
 }
 
 .nation-strip {
   flex-wrap: nowrap;
-  gap: 8px;
-  padding: 0 2px;
+  gap: 6px;
+  padding: 0;
 }
 
 .nation-pill {
-  min-height: 88px;
+  min-height: 78px;
+  padding: 10px 6px 8px;
+  border-radius: 12px;
 }
 
 .nation-pill__unit {
@@ -691,21 +693,21 @@ body {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  padding: 2px 20px 6px;
+  gap: var(--card-gap);
+  padding: 0 22px 4px;
   -webkit-app-region: no-drag;
 }
 
 .race-card {
   position: relative;
-  flex: 1.08 1 0;
+  flex: 1 1 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
   justify-content: flex-start;
-  gap: 3px;
-  padding: 7px 11px 6px;
-  border-radius: 10px;
+  gap: 2px;
+  padding: 6px 10px 5px;
+  border-radius: 9px;
   background:
     linear-gradient(180deg, rgba(100, 20, 28, 0.62) 0%, rgba(24, 4, 8, 0.88) 100%);
   border: 1.5px solid rgba(235, 190, 85, 0.58);
@@ -717,7 +719,7 @@ body {
 }
 
 .race-card--rank1 {
-  flex: 1.18 1 0;
+  flex: 1.04 1 0;
   background:
     linear-gradient(180deg, rgba(255, 220, 130, 0.32) 0%, rgba(180, 50, 35, 0.58) 24%, rgba(70, 14, 18, 0.9) 100%);
   border-color: rgba(255, 220, 120, 0.9);
@@ -726,14 +728,14 @@ body {
     inset 0 1px 0 rgba(255, 245, 190, 0.4),
     0 0 24px rgba(255, 180, 60, 0.32),
     0 4px 14px rgba(0, 0, 0, 0.35);
-  padding-left: 13px;
+  padding-left: 12px;
 }
 
 .race-card--rank2,
 .race-card--rank3,
 .race-card--rank4,
 .race-card--rank5 {
-  flex: 1.02 1 0;
+  flex: 1 1 0;
 }
 
 .race-card.is-flash {
@@ -854,24 +856,21 @@ body {
 .race-card__summary-wrap {
   flex: 0 0 auto;
   min-width: 0;
-}
-
-.race-card__summary-wrap.is-empty {
-  display: none;
+  min-height: 58px;
 }
 
 .race-card__summary {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0 10px;
-  padding: 2px 0 1px;
+  gap: 0 8px;
+  padding: 1px 0;
   min-width: 0;
 }
 
 .race-card__summary-col {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
   min-width: 0;
 }
 
@@ -881,32 +880,32 @@ body {
   display: flex;
   flex-direction: row;
   align-items: baseline;
-  gap: 4px;
+  gap: 3px;
 }
 
 .metric__label {
   flex: 0 0 auto;
-  font-size: max(13px, calc(var(--font-metric-label) * 0.62));
+  font-size: max(11px, calc(var(--font-metric-label) * 0.52));
   color: var(--text-mute);
   font-weight: 600;
-  line-height: 1.15;
+  line-height: 1.1;
   white-space: nowrap;
 }
 
 .metric__value {
   min-width: 0;
-  font-size: max(14px, calc(var(--font-metric-value) * 0.52));
+  font-size: max(12px, calc(var(--font-metric-value) * 0.44));
   color: rgba(255, 240, 220, 0.96);
   font-weight: 750;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  line-height: 1.15;
+  line-height: 1.1;
 }
 
 .race-card--rank1 .metric__value {
-  font-size: max(15px, calc(var(--font-metric-value-rank1) * 0.48));
+  font-size: max(12px, calc(var(--font-metric-value-rank1) * 0.42));
 }
 
 .metric__value .trend--up {
@@ -926,8 +925,7 @@ body {
   border: 1px solid rgba(200, 140, 50, 0.35);
   background: rgba(12, 2, 4, 0.72);
   align-self: stretch;
-  flex: 1 1 auto;
-  min-height: 0;
+  flex: 0 0 auto;
 }
 
 .race-card__table {
@@ -951,7 +949,7 @@ body {
 }
 
 .race-card__table tbody td {
-  padding: 3px 2px;
+  padding: 2px 2px;
   text-align: center;
   color: rgba(255, 242, 220, 0.94);
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
@@ -959,6 +957,42 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   font-weight: 650;
+}
+
+.race-card__delta-float {
+  position: absolute;
+  top: 3px;
+  right: 8px;
+  z-index: 6;
+  pointer-events: none;
+}
+
+.race-card__delta-float.race-card__delta-bubble.is-visible {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 800;
+  padding: 2px 10px;
+  border-radius: 999px;
+  line-height: 1.1;
+  min-height: 0;
+  background: rgba(80, 12, 18, 0.92);
+  border: 1px solid rgba(255, 196, 110, 0.55);
+  box-shadow: 0 0 8px rgba(255, 170, 60, 0.28);
+  transform: none;
+  opacity: 1;
+}
+
+.race-card__delta-float.race-card__delta-bubble.is-animating {
+  animation: deltaFloatPulse var(--bubble-duration, 3s) ease forwards;
+}
+
+@keyframes deltaFloatPulse {
+  0% { opacity: 0; transform: translateY(4px); }
+  12% { opacity: 1; transform: translateY(0); }
+  72% { opacity: 1; transform: translateY(-2px); }
+  100% { opacity: 0; transform: translateY(-6px); }
 }
 
 .race-card__table tbody tr:last-child td {
@@ -982,8 +1016,7 @@ body {
 }
 
 .race-card__mainland .race-card__delta-bubble {
-  flex: 0 0 auto;
-  margin-left: 4px;
+  display: none;
 }
 
 /* ========== 内联涨幅气泡 ========== */

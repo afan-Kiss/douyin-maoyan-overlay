@@ -125,28 +125,44 @@ function formatMainlandDisplay(movie) {
   return `¥${text}`;
 }
 
+function formatMoneyMetric(val) {
+  if (isEmptyField(val)) return "";
+  const text = String(val).trim();
+  if (text.startsWith("¥")) return text;
+  if (text.includes("亿") || text.includes("万") || text.includes("%")) return text.includes("亿") || text.includes("万") ? `¥${text}` : text;
+  return `¥${text}`;
+}
+
+function formatDailyBoxDisplay(movie) {
+  const amount = getMovieBoxAmount(movie);
+  if (amount > 0) return `¥${formatWanDisplayText(amount)}`;
+  if (!isEmptyField(movie.dailyIncrease)) return formatMoneyMetric(movie.dailyIncrease);
+  return "";
+}
+
 const SUMMARY_COLUMN_DEFS = [
   [
     {
       key: "dynamicForecast",
       label: "动态预测",
-      get: (m) => m.dynamicForecast,
+      get: (m) => formatMoneyMetric(m.dynamicForecast),
       trend: (m) => m.dynamicTrend,
     },
     {
       key: "totalForecast",
       label: "总预测",
-      get: (m) => m.totalForecast,
+      get: (m) => formatMoneyMetric(m.totalForecast),
       trend: (m) => m.totalTrend,
     },
     { key: "avgSeatView", label: "实时上座", get: (m) => m.avgSeatView },
   ],
   [
-    { key: "dailyIncrease", label: "日增", get: (m) => m.dailyIncrease },
+    { key: "dailyBox", label: "日排", get: (m) => formatDailyBoxDisplay(m) },
     { key: "boxRate", label: "票房占比", get: (m) => m.boxRate },
   ],
   [
-    { key: "hourSpeed", label: "时速", get: (m) => formatHourSpeedDisplay(m.hourSpeedText) },
+    { key: "mainlandBox", label: "中国内地", get: (m) => formatMainlandDisplay(m) },
+    { key: "hourSpeed", label: "时速", get: (m) => formatMoneyMetric(formatHourSpeedDisplay(m.hourSpeedText)) },
     { key: "showCountRate", label: "排片占比", get: (m) => m.showCountRate },
   ],
 ];
@@ -551,21 +567,34 @@ function mainlandValue(movie) {
 
 function buildSummaryMetricHtml(def, movie) {
   const raw = def.get(movie);
-  if (isEmptyField(raw)) return "";
-  const trend = def.trend ? trendArrow(def.trend(movie)) : "";
-  return `<div class="metric" data-metric="${def.key}"><span class="metric__label">${def.label}</span><span class="metric__value">${escapeHtml(raw)}${trend}</span></div>`;
+  const trend = def.trend && !isEmptyField(raw) ? trendArrow(def.trend(movie)) : "";
+  const value = isEmptyField(raw) ? "--" : String(raw);
+  return `<div class="metric" data-metric="${def.key}"><span class="metric__label">${def.label}</span><span class="metric__value">${escapeHtml(value)}${trend}</span></div>`;
 }
 
 function buildSummaryHtml(movie) {
   const columns = SUMMARY_COLUMN_DEFS.map((defs) => {
-    const items = defs.map((def) => buildSummaryMetricHtml(def, movie)).filter(Boolean);
-    if (!items.length) return "";
-    return `<div class="race-card__summary-col">${items.join("")}</div>`;
-  }).filter(Boolean);
+    const items = defs.map((def) => buildSummaryMetricHtml(def, movie)).join("");
+    return `<div class="race-card__summary-col">${items}</div>`;
+  }).join("");
+  return `<div class="race-card__summary">${columns}</div>`;
+}
 
-  return columns.length
-    ? `<div class="race-card__summary">${columns.join("")}</div>`
-    : "";
+function isRenderTraceEnabled() {
+  if (typeof process !== "undefined" && process?.env?.RENDER_TRACE === "1") return true;
+  return new URLSearchParams(location.search).has("renderTrace");
+}
+
+function traceMovieRender(movie) {
+  if (!isRenderTraceEnabled()) return;
+  console.log("[RENDER_MOVIE_TRACE]", {
+    rank: movie.rank,
+    movieId: movie.movieId,
+    name: movie.name,
+    todayBoxRaw: movie.todayBox,
+    todayBoxText: movie.todayBoxText,
+    renderedTodayBox: formatDisplayBox(movie),
+  });
 }
 
 function buildRegionsHtml(movie) {
@@ -598,35 +627,44 @@ function dailyTableSignature(rows) {
   );
 }
 
+function resolveTodayTableBox(movie) {
+  const amount = getMovieBoxAmount(movie);
+  if (amount > 0) {
+    return {
+      box: formatWanDisplayText(amount),
+      boxHtml: "",
+      boxUnit: movie.todayUnit || "万",
+    };
+  }
+  if (movie.todayBoxHtml) {
+    return {
+      box: "--",
+      boxHtml: movie.todayBoxHtml,
+      boxUnit: movie.todayUnit || "万",
+    };
+  }
+  return { box: "--", boxHtml: "", boxUnit: movie.todayUnit || "万" };
+}
+
 function ensureDailyTable(movie) {
   const labels = ["今日", "明日", "后天"];
   const src = Array.isArray(movie.dailyTable) ? movie.dailyTable : [];
   const byLabel = new Map(src.map((row) => [String(row.label || "").trim(), row]));
-
-  const todayBoxPlain =
-    movie.todayBox > 0
-      ? formatWanDisplayText(movie.todayBox)
-      : !isEmptyField(movie.todayBoxText)
-        ? `${movie.todayBoxText}${movie.todayUnit || "万"}`
-        : !isEmptyField(movie.dailyIncrease)
-          ? String(movie.dailyIncrease)
-          : "";
+  const todayResolved = resolveTodayTableBox(movie);
 
   return labels.map((label, i) => {
     const prev = byLabel.get(label) || src[i] || {};
     const isToday = i === 0;
-    const box =
-      !isEmptyField(prev.box) && prev.box !== "--"
+    const box = isToday
+      ? todayResolved.box
+      : !isEmptyField(prev.box) && prev.box !== "--"
         ? prev.box
-        : isToday && todayBoxPlain
-          ? todayBoxPlain
-          : "--";
+        : "--";
     return {
       label,
       box,
-      // 优先用明文，避免猫眼加密字体显示成点
-      boxHtml: isToday && isEmptyField(box) ? prev.boxHtml || movie.todayBoxHtml || "" : "",
-      boxUnit: prev.boxUnit || movie.todayUnit || "万",
+      boxHtml: isToday ? todayResolved.boxHtml : prev.boxHtml || "",
+      boxUnit: isToday ? todayResolved.boxUnit : prev.boxUnit || movie.todayUnit || "万",
       forecast:
         !isEmptyField(prev.forecast) && prev.forecast !== "--"
           ? prev.forecast
@@ -664,7 +702,7 @@ function dailyTableHtml(rows) {
   const columns = [
     {
       key: "box",
-      label: "票房(含预售)",
+      label: "票房(含分账)",
       render: (row) => {
         if (!isEmptyField(row.box) && row.box !== "--") {
           return `<span class="num--hot">${escapeHtml(row.box)}</span>`;
@@ -729,6 +767,7 @@ function raceCardTemplate(movie) {
   const table = dailyTableHtml(tableRows);
 
   return `
+    <span class="race-card__delta-bubble race-card__delta-float" aria-hidden="true"></span>
     <div class="race-card__head">
       <span class="race-card__rank">NO.${movie.rank}</span>
       <div class="race-card__title-wrap">
@@ -737,10 +776,9 @@ function raceCardTemplate(movie) {
       <div class="race-card__mainland${isEmptyField(mainland) || mainland === "--" ? " is-empty" : ""}">
         <em>中国内地：</em>
         <strong class="js-mainland">${escapeHtml(mainland)}</strong>
-        <span class="race-card__delta-bubble" aria-hidden="true"></span>
       </div>
     </div>
-    <div class="race-card__summary-wrap${summary ? "" : " is-empty"}">${summary}</div>
+    <div class="race-card__summary-wrap">${summary}</div>
     <div class="race-card__table-wrap" data-table-sig="">${table}</div>
   `;
 }
@@ -851,14 +889,9 @@ function updateRaceCard(card, movie, isNew = false) {
   const summaryHtml = buildSummaryHtml(movie);
   const summaryWrap = card.querySelector(".race-card__summary-wrap");
   if (summaryWrap) {
-    summaryWrap.classList.toggle("is-empty", !summaryHtml);
-    if (summaryHtml) {
-      const current = summaryWrap.firstElementChild;
-      if (!current || current.outerHTML !== summaryHtml) {
-        summaryWrap.innerHTML = summaryHtml;
-      }
-    } else {
-      summaryWrap.innerHTML = "";
+    const current = summaryWrap.firstElementChild;
+    if (!current || current.outerHTML !== summaryHtml) {
+      summaryWrap.innerHTML = summaryHtml;
     }
   }
 
@@ -938,6 +971,7 @@ function renderList(movies) {
   }
 
   const cards = list.map((movie) => {
+    traceMovieRender(movie);
     const card = ensureRaceCard(movie);
     prevRankMap.set(String(movie.movieId), movie.rank);
     return card;
