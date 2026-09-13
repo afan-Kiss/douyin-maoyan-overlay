@@ -60,6 +60,8 @@ export function createEnrichScheduleState() {
   return {
     lastFullEnrich: 0,
     lastFullEnrichAttempt: 0,
+    lastFullEnrichSuccessAt: 0,
+    lastFullEnrichFailureAt: 0,
     enrichFailureCount: 0,
     enrichingBackground: false,
     pollCount: 0,
@@ -78,15 +80,17 @@ export function shouldScheduleFullEnrich(now, state, fullIntervalMs = 60000) {
   if (state.enrichingBackground) return false;
   if (state.pollCount === 1) return true;
 
-  const lastAttempt = state.lastFullEnrichAttempt || 0;
-  const sinceAttempt = now - lastAttempt;
-  if (sinceAttempt < 0) return false;
-
   if (state.enrichFailureCount > 0) {
-    return sinceAttempt >= getFullEnrichRetryDelayMs(state.enrichFailureCount);
+    const lastFailure = state.lastFullEnrichFailureAt || 0;
+    const sinceFailure = now - lastFailure;
+    if (sinceFailure < 0) return false;
+    return sinceFailure >= getFullEnrichRetryDelayMs(state.enrichFailureCount);
   }
 
-  return sinceAttempt >= fullIntervalMs;
+  const lastSuccess = state.lastFullEnrichSuccessAt || 0;
+  const sinceSuccess = now - lastSuccess;
+  if (sinceSuccess < 0) return false;
+  return sinceSuccess >= fullIntervalMs;
 }
 
 export function markFullEnrichAttempt(state, now = Date.now()) {
@@ -95,16 +99,21 @@ export function markFullEnrichAttempt(state, now = Date.now()) {
 
 export function markFullEnrichSuccess(state, now = Date.now()) {
   state.lastFullEnrich = now;
+  state.lastFullEnrichSuccessAt = now;
   state.enrichFailureCount = 0;
+  state.lastFullEnrichFailureAt = 0;
 }
 
-export function markFullEnrichFailure(state) {
+export function markFullEnrichFailure(state, now = Date.now()) {
   state.enrichFailureCount = (state.enrichFailureCount || 0) + 1;
+  state.lastFullEnrichFailureAt = now;
 }
 
 export function resetEnrichScheduleState(state, options = {}) {
   state.lastFullEnrich = 0;
   state.lastFullEnrichAttempt = 0;
+  state.lastFullEnrichSuccessAt = 0;
+  state.lastFullEnrichFailureAt = 0;
   state.enrichFailureCount = 0;
   if (options.clearInflight) {
     state.enrichingBackground = false;
@@ -117,12 +126,15 @@ export function resetEnrichScheduleState(state, options = {}) {
 export function createEnrichScheduleSimulator(options = {}) {
   const state = createEnrichScheduleState();
   const fullIntervalMs = options.fullIntervalMs ?? 60000;
+  let lastPollNow = 0;
+  const nowFn = options.nowFn ?? (() => lastPollNow);
   let fullEnrichCount = 0;
   let maxConcurrentFullEnrich = 0;
   let concurrentFullEnrich = 0;
   const inflight = [];
 
   async function onPoll(now) {
+    lastPollNow = now;
     state.pollCount += 1;
     if (!shouldScheduleFullEnrich(now, state, fullIntervalMs)) {
       return null;
@@ -141,14 +153,15 @@ export function createEnrichScheduleSimulator(options = {}) {
     const task = (async () => {
       try {
         const result = await options.runEnrich?.({ state, now, signal: controller.signal });
+        const settledAt = nowFn();
         const errors = result?.errors || [];
         if (result?.failed || shouldMarkFullEnrichFailure(errors, options.topCount ?? 5)) {
-          markFullEnrichFailure(state);
+          markFullEnrichFailure(state, settledAt);
         } else {
-          markFullEnrichSuccess(state, now);
+          markFullEnrichSuccess(state, settledAt);
         }
       } catch {
-        markFullEnrichFailure(state);
+        markFullEnrichFailure(state, nowFn());
       } finally {
         clearTimeout(timeoutId);
         concurrentFullEnrich -= 1;

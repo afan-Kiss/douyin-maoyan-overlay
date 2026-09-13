@@ -84,10 +84,10 @@ async function testEnrich403Backoff() {
 
   const backoffState = createEnrichScheduleState();
   backoffState.enrichFailureCount = 0;
-  backoffState.lastFullEnrichAttempt = 0;
+  backoffState.lastFullEnrichFailureAt = 0;
   for (let i = 0; i < FULL_ENRICH_FAILURE_BACKOFF_MS.length; i++) {
     backoffState.enrichFailureCount = i + 1;
-    backoffState.lastFullEnrichAttempt = 1000;
+    backoffState.lastFullEnrichFailureAt = 1000;
     const delay = getFullEnrichRetryDelayMs(backoffState.enrichFailureCount);
     assert.strictEqual(delay, FULL_ENRICH_FAILURE_BACKOFF_MS[i]);
     assert.ok(!shouldScheduleFullEnrich(1000 + delay - 1, backoffState, FULL_INTERVAL_MS));
@@ -247,7 +247,8 @@ async function testEnrichTimeoutSingleflight() {
   assert.strictEqual(sim.state.enrichingBackground, false, "旧任务 settle 后 enrichingBackground 应为 false");
 
   sim.state.enrichFailureCount = 0;
-  sim.state.lastFullEnrichAttempt = 0;
+  sim.state.lastFullEnrichFailureAt = 0;
+  sim.state.lastFullEnrichSuccessAt = 0;
 
   await sim.onPoll(60000);
   await sim.waitSettled();
@@ -257,6 +258,162 @@ async function testEnrichTimeoutSingleflight() {
   console.log("PASS enrich timeout singleflight");
   console.log(`  maxConcurrentFullEnrich=${sim.getStats().maxConcurrentFullEnrich}`);
   console.log(`  globalTimeoutMs=${FULL_ENRICH_GLOBAL_TIMEOUT_MS}`);
+}
+
+async function testLongFailureBackoff() {
+  const schedulerPath = pathToFileURL(path.join(ROOT, "ui", "enrich-scheduler.js")).href;
+  const {
+    createEnrichScheduleSimulator,
+    shouldScheduleFullEnrich,
+    FULL_ENRICH_GLOBAL_TIMEOUT_MS,
+  } = await import(schedulerPath);
+
+  let currentTime = 0;
+  let releaseEnrich;
+  const FULL_INTERVAL_MS = 60000;
+
+  const sim = createEnrichScheduleSimulator({
+    fullIntervalMs: FULL_INTERVAL_MS,
+    nowFn: () => currentTime,
+    runEnrich: async () => {
+      await new Promise((resolve) => {
+        releaseEnrich = resolve;
+      });
+      return { failed: true };
+    },
+  });
+
+  currentTime = 0;
+  const firstTask = sim.onPoll(0);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.strictEqual(sim.getStats().fullEnrichCount, 1, "0s 应启动首次 full enrich");
+
+  currentTime = 120000;
+  releaseEnrich();
+  await firstTask;
+  await sim.waitSettled();
+
+  assert.strictEqual(sim.state.enrichFailureCount, 1, "120s 失败后 failureCount=1");
+  sim.state.pollCount = 5;
+  assert.ok(
+    !shouldScheduleFullEnrich(125000, sim.state, FULL_INTERVAL_MS),
+    "125s 不得重新执行（失败于120s + 退避30s = 150s）",
+  );
+  assert.ok(
+    !shouldScheduleFullEnrich(149999, sim.state, FULL_INTERVAL_MS),
+    "149.999s 不得重新执行",
+  );
+  assert.ok(
+    shouldScheduleFullEnrich(150000, sim.state, FULL_INTERVAL_MS),
+    "150s 才允许第二次 full enrich",
+  );
+
+  console.log("PASS long failure backoff from settled time");
+  console.log(`  failureAt=120s retryAt=150s failureCount=${sim.state.enrichFailureCount}`);
+}
+
+async function testLongSuccessInterval() {
+  const schedulerPath = pathToFileURL(path.join(ROOT, "ui", "enrich-scheduler.js")).href;
+  const {
+    createEnrichScheduleSimulator,
+    shouldScheduleFullEnrich,
+  } = await import(schedulerPath);
+
+  let currentTime = 0;
+  let releaseEnrich;
+  const FULL_INTERVAL_MS = 60000;
+
+  const sim = createEnrichScheduleSimulator({
+    fullIntervalMs: FULL_INTERVAL_MS,
+    nowFn: () => currentTime,
+    runEnrich: async () => {
+      await new Promise((resolve) => {
+        releaseEnrich = resolve;
+      });
+      return { failed: false };
+    },
+  });
+
+  currentTime = 0;
+  const firstTask = sim.onPoll(0);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  currentTime = 40000;
+  releaseEnrich();
+  await firstTask;
+  await sim.waitSettled();
+
+  sim.state.pollCount = 5;
+  assert.ok(
+    !shouldScheduleFullEnrich(99999, sim.state, FULL_INTERVAL_MS),
+    "99.999s 不得重新执行（成功于40s + 间隔60s = 100s）",
+  );
+  assert.ok(
+    shouldScheduleFullEnrich(100000, sim.state, FULL_INTERVAL_MS),
+    "100s 才允许下一轮",
+  );
+
+  console.log("PASS long success interval from settled time");
+  console.log(`  successAt=40s nextAt=100s`);
+}
+
+async function testGlobalTimeout120sBackoff() {
+  const schedulerPath = pathToFileURL(path.join(ROOT, "ui", "enrich-scheduler.js")).href;
+  const {
+    createEnrichScheduleSimulator,
+    shouldScheduleFullEnrich,
+    FULL_ENRICH_GLOBAL_TIMEOUT_MS,
+  } = await import(schedulerPath);
+
+  let currentTime = 0;
+  const POLL_INTERVAL_MS = 5000;
+  const FULL_INTERVAL_MS = 60000;
+
+  const sim = createEnrichScheduleSimulator({
+    fullIntervalMs: FULL_INTERVAL_MS,
+    globalTimeoutMs: 50,
+    nowFn: () => currentTime,
+    runEnrich: async ({ signal }) =>
+      new Promise((_, reject) => {
+        signal.addEventListener("abort", () => {
+          currentTime = FULL_ENRICH_GLOBAL_TIMEOUT_MS;
+          reject(new DOMException("Aborted", "AbortError"));
+        });
+      }),
+  });
+
+  currentTime = 0;
+  const firstTask = sim.onPoll(0);
+  assert.ok(sim.state.enrichingBackground, "0s 启动 full enrich");
+
+  await firstTask;
+  await sim.waitSettled();
+
+  assert.strictEqual(sim.state.enrichFailureCount, 1, "120s global timeout 应记失败");
+  assert.strictEqual(sim.getStats().fullEnrichCount, 1, "timeout 前仅 1 次 full enrich");
+
+  currentTime = 125000;
+  await sim.onPoll(125000);
+  await sim.waitSettled();
+  assert.strictEqual(
+    sim.getStats().fullEnrichCount,
+    1,
+    "失败后 5s dashboard poll 不得立即再次 full enrich",
+  );
+  sim.state.pollCount = 5;
+  assert.ok(
+    !shouldScheduleFullEnrich(125000, sim.state, FULL_INTERVAL_MS),
+    "125s 仍须等待失败退避 30s（至 150s）",
+  );
+
+  currentTime = 150000;
+  await sim.onPoll(150000);
+  await sim.waitSettled();
+  assert.strictEqual(sim.getStats().fullEnrichCount, 2, "150s 才允许第二次 full enrich");
+
+  console.log("PASS global timeout 120s backoff from failure settled time");
+  console.log(`  globalTimeoutMs=${FULL_ENRICH_GLOBAL_TIMEOUT_MS}`);
+  console.log(`  failureAt=120s retryAt=150s fullEnrichCount=${sim.getStats().fullEnrichCount}`);
 }
 
 function testBubbleDurationCss() {
@@ -283,6 +440,9 @@ async function main() {
   await testEnrichIntervalWithScheduler();
   await testSettingsResetSingleflight();
   await testEnrichTimeoutSingleflight();
+  await testLongFailureBackoff();
+  await testLongSuccessInterval();
+  await testGlobalTimeout120sBackoff();
   testBubbleDurationCss();
   console.log("\nALL PASSED (round5 fixes)");
 }

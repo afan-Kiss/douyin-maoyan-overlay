@@ -1130,13 +1130,13 @@ function scheduleBackgroundEnrich(requestPollGen, parsed, speed) {
       updatePartialDataWarning(errors);
       setStatus("ok", "");
       if (shouldMarkFullEnrichFailure(errors, RACE_TOP_COUNT)) {
-        markFullEnrichFailure(enrichSchedule);
+        markFullEnrichFailure(enrichSchedule, Date.now());
       } else {
-        markFullEnrichSuccess(enrichSchedule);
+        markFullEnrichSuccess(enrichSchedule, Date.now());
       }
     } catch (err) {
       console.warn("后台补充字段失败", err);
-      if (gen === enrichGeneration) markFullEnrichFailure(enrichSchedule);
+      if (gen === enrichGeneration) markFullEnrichFailure(enrichSchedule, Date.now());
       if (isLoginRelatedError(err)) {
         await updateLoginButton(true);
         partialDataWarning = `部分详细数据获取失败：${formatUserFacingError(err)}`;
