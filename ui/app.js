@@ -110,45 +110,45 @@ const PRESERVE_MOVIE_FIELDS = [
   "releaseInfo",
 ];
 
-const METRIC_DEFS = [
-  {
-    key: "endDate",
-    label: "下映日期",
-    get: (m) => {
-      if (isEmptyField(m.endDate) && isEmptyField(m.remainingDays)) return "";
-      const days = isEmptyField(m.remainingDays) ? "" : ` 剩余${m.remainingDays}天`;
-      return `${m.endDate || "--"}${days}`;
+function formatHourSpeedDisplay(text) {
+  if (isEmptyField(text)) return "";
+  const raw = String(text).trim().replace(/^¥/, "");
+  return raw.includes("/h") ? raw : `${raw}/h`;
+}
+
+function formatMainlandDisplay(movie) {
+  const raw = mainlandValue(movie);
+  if (isEmptyField(raw)) return "--";
+  const text = String(raw).trim();
+  if (text.startsWith("¥")) return text;
+  if (text.includes("亿") || text.includes("万")) return `¥${text}`;
+  return `¥${text}`;
+}
+
+const SUMMARY_COLUMN_DEFS = [
+  [
+    {
+      key: "dynamicForecast",
+      label: "动态预测",
+      get: (m) => m.dynamicForecast,
+      trend: (m) => m.dynamicTrend,
     },
-  },
-  {
-    key: "dynamicForecast",
-    label: "动态预测",
-    get: (m) => m.dynamicForecast,
-    trend: (m) => m.dynamicTrend,
-  },
-  { key: "dailyIncrease", label: "日增", get: (m) => m.dailyIncrease },
-  { key: "hourSpeed", label: "时速", get: (m) => m.hourSpeedText },
-  { key: "yesterdayTotal", label: "昨日", get: (m) => m.yesterdayTotal },
-  {
-    key: "yesterdaySamePeriod",
-    label: "昨日同期",
-    get: (m) => m.yesterdaySamePeriodText,
-  },
-  {
-    key: "yesterdayHourSpeed",
-    label: "昨日时速",
-    get: (m) => m.yesterdayHourSpeedText,
-  },
-  { key: "totalViews", label: "总人次", get: (m) => m.totalViews },
-  {
-    key: "totalForecast",
-    label: "总预测",
-    get: (m) => m.totalForecast,
-    trend: (m) => m.totalTrend,
-  },
-  { key: "boxRate", label: "票房占比", get: (m) => m.boxRate },
-  { key: "showCountRate", label: "排片占比", get: (m) => m.showCountRate },
-  { key: "avgSeatView", label: "实时上座", get: (m) => m.avgSeatView },
+    {
+      key: "totalForecast",
+      label: "总预测",
+      get: (m) => m.totalForecast,
+      trend: (m) => m.totalTrend,
+    },
+    { key: "avgSeatView", label: "实时上座", get: (m) => m.avgSeatView },
+  ],
+  [
+    { key: "dailyIncrease", label: "日增", get: (m) => m.dailyIncrease },
+    { key: "boxRate", label: "票房占比", get: (m) => m.boxRate },
+  ],
+  [
+    { key: "hourSpeed", label: "时速", get: (m) => formatHourSpeedDisplay(m.hourSpeedText) },
+    { key: "showCountRate", label: "排片占比", get: (m) => m.showCountRate },
+  ],
 ];
 
 function updateMovieCache(key, movie) {
@@ -521,10 +521,17 @@ function fitNowrapEl(el, { minSize = 20, allowWrap = false } = {}) {
     el.style.webkitLineClamp = "2";
     el.style.webkitBoxOrient = "vertical";
     el.style.overflow = "hidden";
+    el.style.textOverflow = "";
     const computed = parseFloat(getComputedStyle(el).fontSize) || minSize;
     if (computed < minSize) el.style.fontSize = `${minSize}px`;
     return;
   }
+  el.style.display = "";
+  el.style.webkitLineClamp = "";
+  el.style.webkitBoxOrient = "";
+  el.style.whiteSpace = "nowrap";
+  el.style.overflow = "hidden";
+  el.style.textOverflow = "ellipsis";
   const parent = el.parentElement;
   const limit = parent?.clientWidth || el.clientWidth;
   if (!limit) return;
@@ -542,26 +549,23 @@ function mainlandValue(movie) {
   return movie.mainlandBox || movie.sumBoxDesc || "";
 }
 
-function buildMetricsHtml(movie) {
-  const items = METRIC_DEFS.map((def) => {
-    const raw = def.get(movie);
-    if (isEmptyField(raw)) return null;
-    const trend = def.trend ? trendArrow(def.trend(movie)) : "";
-    return {
-      key: def.key,
-      label: def.label,
-      value: `${escapeHtml(raw)}${trend}`,
-    };
+function buildSummaryMetricHtml(def, movie) {
+  const raw = def.get(movie);
+  if (isEmptyField(raw)) return "";
+  const trend = def.trend ? trendArrow(def.trend(movie)) : "";
+  return `<div class="metric" data-metric="${def.key}"><span class="metric__label">${def.label}</span><span class="metric__value">${escapeHtml(raw)}${trend}</span></div>`;
+}
+
+function buildSummaryHtml(movie) {
+  const columns = SUMMARY_COLUMN_DEFS.map((defs) => {
+    const items = defs.map((def) => buildSummaryMetricHtml(def, movie)).filter(Boolean);
+    if (!items.length) return "";
+    return `<div class="race-card__summary-col">${items.join("")}</div>`;
   }).filter(Boolean);
 
-  if (!items.length) return "";
-
-  return items
-    .map(
-      (item) =>
-        `<div class="metric" data-metric="${item.key}"><span class="metric__label">${item.label}：</span><span class="metric__value">${item.value}</span></div>`
-    )
-    .join("");
+  return columns.length
+    ? `<div class="race-card__summary">${columns.join("")}</div>`
+    : "";
 }
 
 function buildRegionsHtml(movie) {
@@ -652,8 +656,10 @@ function ensureDailyTable(movie) {
 }
 
 function dailyTableHtml(rows) {
-  const list = Array.isArray(rows) && rows.length ? rows : [];
-  if (!list.length) return "";
+  const labels = ["今日", "明日", "后天"];
+  const src = Array.isArray(rows) ? rows : [];
+  const byLabel = new Map(src.map((row) => [String(row.label || "").trim(), row]));
+  const list = labels.map((label, i) => byLabel.get(label) || src[i] || { label });
 
   const columns = [
     {
@@ -693,9 +699,9 @@ function dailyTableHtml(rows) {
 
   const head = `<tr><th>日期</th>${columns.map((col) => `<th>${col.label}</th>`).join("")}</tr>`;
   const body = list
-    .map((row) => {
+    .map((row, idx) => {
       const cells = columns.map((col) => `<td class="num">${col.render(row)}</td>`).join("");
-      return `<tr><td>${escapeHtml(row.label)}</td>${cells}</tr>`;
+      return `<tr><td>${escapeHtml(row.label || labels[idx])}</td>${cells}</tr>`;
     })
     .join("");
 
@@ -716,98 +722,26 @@ function formatDisplayBox(movie) {
   return "--";
 }
 
-const CORE_STAT_DEFS = [
-  { label: "票房占比", key: "boxRate", cls: "js-box-rate" },
-  { label: "排片占比", key: "showCountRate", cls: "js-show-rate" },
-  { label: "实时上座", key: "avgSeatView", cls: "js-seat-view" },
-];
-
-function buildExtraStatHtml(metric, rank) {
-  const rankCls = rank === 1 ? " race-stat--rank1" : "";
-  return `<div class="race-stat race-stat--extra${rankCls}" data-stat-key="${metric.key}">
-    <em>${metric.label}</em>
-    <strong>${escapeHtml(metric.value)}</strong>
-  </div>`;
-}
-
-function buildExtraGridHtml(movie) {
-  const rank = Number(movie.rank) || 99;
-  const metrics = getExtraMetrics(movie);
-  if (!metrics.length) return "";
-  const gridClass = getExtraMetricsGridClass(metrics.length);
-  return `<div class="race-card__extra-grid ${gridClass}">${metrics.map((m) => buildExtraStatHtml(m, rank)).join("")}</div>`;
-}
-
-function buildDailyTrendHtml(movie) {
-  const items = buildDailyTrendItems(movie);
-  if (items.length < 2) return "";
-  return `<div class="race-card__daily-trend">${items
-    .map(
-      (item) =>
-        `<div class="race-card__trend-item"><em>${escapeHtml(item.label)}</em><strong>${escapeHtml(item.value)}</strong></div>`,
-    )
-    .join("")}</div>`;
-}
-
-function buildReleaseTagHtml(movie) {
-  const tag = formatReleaseTag(movie.releaseInfo);
-  if (!tag) return "";
-  return `<span class="race-card__release-tag">${escapeHtml(tag)}</span>`;
-}
-function statValue(movie, def) {
-  const raw = movie[def.key];
-  if (isEmptyField(raw)) return "--";
-  const trend = def.trend ? trendArrow(movie[def.trend]) : "";
-  return `${escapeHtml(String(raw))}${trend}`;
-}
-
-function medalClassName(rank) {
-  if (rank === 1) return "race-card__medal--gold";
-  if (rank === 2) return "race-card__medal--silver";
-  if (rank === 3) return "race-card__medal--bronze";
-  return "race-card__medal--plain";
-}
-
-function buildStatItemHtml(def, movie, extra = false) {
-  const extraCls = extra ? " race-stat--extra" : "";
-  return `<div class="race-stat${extraCls}" data-stat="${def.cls}">
-    <em>${def.label}</em>
-    <strong class="${def.cls}">${statValue(movie, def)}</strong>
-  </div>`;
-}
-
-function buildCoreStatsHtml(movie) {
-  return CORE_STAT_DEFS.map((def) => buildStatItemHtml(def, movie)).join("");
-}
-
 function raceCardTemplate(movie) {
-  const boxText = formatDisplayBox(movie);
-  const rank = Number(movie.rank) || 1;
+  const mainland = formatMainlandDisplay(movie);
+  const summary = buildSummaryHtml(movie);
+  const tableRows = ensureDailyTable(movie);
+  const table = dailyTableHtml(tableRows);
+
   return `
-    <span class="race-card__corner">NO.${rank}</span>
     <div class="race-card__head">
-      <span class="race-card__medal ${medalClassName(rank)}" aria-hidden="true">
-        <span class="race-card__medal-num">${rank}</span>
-      </span>
+      <span class="race-card__rank">NO.${movie.rank}</span>
       <div class="race-card__title-wrap">
         <h2 class="race-card__title">《${escapeHtml(movie.name)}》</h2>
-        ${buildReleaseTagHtml(movie)}
+      </div>
+      <div class="race-card__mainland${isEmptyField(mainland) || mainland === "--" ? " is-empty" : ""}">
+        <em>中国内地：</em>
+        <strong class="js-mainland">${escapeHtml(mainland)}</strong>
+        <span class="race-card__delta-bubble" aria-hidden="true"></span>
       </div>
     </div>
-    <div class="race-card__content">
-      <div class="race-card__box-row">
-        <span class="race-card__box-label">实时票房</span>
-        <div class="race-card__box-value">
-          <strong class="js-day-box">${escapeHtml(boxText)}</strong>
-          <span class="race-card__delta-bubble" aria-hidden="true"></span>
-        </div>
-      </div>
-      <div class="race-card__core-stats">
-        ${buildCoreStatsHtml(movie)}
-      </div>
-      ${buildExtraGridHtml(movie)}
-      ${buildDailyTrendHtml(movie)}
-    </div>
+    <div class="race-card__summary-wrap${summary ? "" : " is-empty"}">${summary}</div>
+    <div class="race-card__table-wrap" data-table-sig="">${table}</div>
   `;
 }
 
@@ -817,9 +751,13 @@ function buildRaceCard(movie) {
   card.dataset.movieId = String(movie.movieId);
   card.dataset.rank = String(movie.rank);
   card.innerHTML = raceCardTemplate(movie);
-  const minTitle = Number(movie.rank) === 1 ? 42 : 35;
+  const tableWrap = card.querySelector(".race-card__table-wrap");
+  if (tableWrap) {
+    tableWrap.dataset.tableSig = dailyTableSignature(ensureDailyTable(movie));
+  }
   requestAnimationFrame(() => {
-    fitNowrapEl(card.querySelector(".race-card__title"), { minSize: minTitle, allowWrap: true });
+    fitNowrapEl(card.querySelector(".race-card__title"), { minSize: 24, allowWrap: Number(movie.rank) === 1 });
+    fitNowrapEl(card.querySelector(".js-mainland"), { minSize: 18 });
   });
   return card;
 }
@@ -882,73 +820,57 @@ function updateRaceCard(card, movie, isNew = false) {
   const head = card.querySelector(".race-card__head");
   if (!head) {
     card.innerHTML = raceCardTemplate(movie);
+    const tableWrap = card.querySelector(".race-card__table-wrap");
+    if (tableWrap) {
+      tableWrap.dataset.tableSig = dailyTableSignature(ensureDailyTable(movie));
+    }
     updateRaceCardDelta(card, movie, isNew);
     trackBoxDelta(card, movie, isNew);
     return;
   }
 
-  const rank = Number(movie.rank) || 1;
-  setTextIfChanged(card.querySelector(".race-card__corner"), `NO.${rank}`);
-
-  const medal = card.querySelector(".race-card__medal");
-  if (medal) {
-    medal.className = `race-card__medal ${medalClassName(rank)}`;
-    const medalNum = medal.querySelector(".race-card__medal-num");
-    if (medalNum) setTextIfChanged(medalNum, String(rank));
-  }
-
+  setTextIfChanged(card.querySelector(".race-card__rank"), `NO.${movie.rank}`);
   if (setTextIfChanged(card.querySelector(".race-card__title"), `《${movie.name}》`)) {
-    const minTitle = rank === 1 ? 42 : 35;
-    fitNowrapEl(card.querySelector(".race-card__title"), { minSize: minTitle, allowWrap: true });
+    fitNowrapEl(card.querySelector(".race-card__title"), {
+      minSize: 24,
+      allowWrap: Number(movie.rank) === 1,
+    });
   }
 
-  const titleWrap = card.querySelector(".race-card__title-wrap");
-  if (titleWrap) {
-    const tagHtml = buildReleaseTagHtml(movie);
-    const tagEl = titleWrap.querySelector(".race-card__release-tag");
-    if (tagHtml) {
-      if (tagEl) setTextIfChanged(tagEl, formatReleaseTag(movie.releaseInfo));
-      else titleWrap.insertAdjacentHTML("beforeend", tagHtml);
-    } else if (tagEl) {
-      tagEl.remove();
+  const mainland = formatMainlandDisplay(movie);
+  const mainlandWrap = card.querySelector(".race-card__mainland");
+  const mainlandEl = card.querySelector(".js-mainland");
+  if (mainlandWrap && mainlandEl) {
+    mainlandWrap.classList.toggle("is-empty", isEmptyField(mainland) || mainland === "--");
+    if (!isEmptyField(mainland) && mainland !== "--") {
+      setTextIfChanged(mainlandEl, mainland);
+      fitNowrapEl(mainlandEl, { minSize: 18 });
     }
   }
 
-  setTextIfChanged(card.querySelector(".js-day-box"), formatDisplayBox(movie));
-
-  const coreStats = card.querySelector(".race-card__core-stats");
-  const nextCoreStats = buildCoreStatsHtml(movie);
-  if (coreStats && coreStats.innerHTML !== nextCoreStats) {
-    coreStats.innerHTML = nextCoreStats;
+  const summaryHtml = buildSummaryHtml(movie);
+  const summaryWrap = card.querySelector(".race-card__summary-wrap");
+  if (summaryWrap) {
+    summaryWrap.classList.toggle("is-empty", !summaryHtml);
+    if (summaryHtml) {
+      const current = summaryWrap.firstElementChild;
+      if (!current || current.outerHTML !== summaryHtml) {
+        summaryWrap.innerHTML = summaryHtml;
+      }
+    } else {
+      summaryWrap.innerHTML = "";
+    }
   }
 
-  const content = card.querySelector(".race-card__content");
-  const nextExtraGrid = buildExtraGridHtml(movie);
-  const nextTrend = buildDailyTrendHtml(movie);
-  let extraGrid = card.querySelector(".race-card__extra-grid");
-  if (nextExtraGrid) {
-    if (extraGrid) {
-      const tmp = document.createElement("div");
-      tmp.innerHTML = nextExtraGrid;
-      extraGrid.replaceWith(tmp.firstElementChild);
-    } else if (content) {
-      content.insertAdjacentHTML("beforeend", nextExtraGrid);
+  const tableRows = ensureDailyTable(movie);
+  const tableHtml = dailyTableHtml(tableRows);
+  const tableWrap = card.querySelector(".race-card__table-wrap");
+  if (tableWrap) {
+    const sig = dailyTableSignature(tableRows);
+    if (tableWrap.dataset.tableSig !== sig) {
+      tableWrap.innerHTML = tableHtml;
+      tableWrap.dataset.tableSig = sig;
     }
-  } else if (extraGrid) {
-    extraGrid.remove();
-  }
-
-  let trendEl = card.querySelector(".race-card__daily-trend");
-  if (nextTrend) {
-    if (trendEl) {
-      const tmp = document.createElement("div");
-      tmp.innerHTML = nextTrend;
-      trendEl.replaceWith(tmp.firstElementChild);
-    } else if (content) {
-      content.insertAdjacentHTML("beforeend", nextTrend);
-    }
-  } else if (trendEl) {
-    trendEl.remove();
   }
 
   updateRaceCardDelta(card, movie, isNew);
@@ -981,20 +903,17 @@ function renderLoadingSkeleton() {
     const rank = i + 1;
     return `
       <article class="race-card race-card--skeleton race-card--rank${rank}" aria-hidden="true">
-        <span class="race-card__corner skeleton-block">NO.${rank}</span>
         <div class="race-card__head">
-          <span class="race-card__medal skeleton-block"></span>
+          <span class="race-card__rank skeleton-block">NO.${rank}</span>
           <h2 class="race-card__title skeleton-block">加载中</h2>
+          <div class="race-card__mainland skeleton-block"></div>
         </div>
-        <div class="race-card__content">
-          <div class="race-card__box-row skeleton-block"></div>
-          <div class="race-card__core-stats">
-            ${Array.from({ length: 3 }, () => '<div class="race-stat skeleton-block"></div>').join("")}
-          </div>
-          <div class="race-card__extra-grid race-card__extra-grid--3">
-            ${Array.from({ length: 3 }, () => '<div class="race-stat skeleton-block"></div>').join("")}
+        <div class="race-card__summary-wrap">
+          <div class="race-card__summary">
+            ${Array.from({ length: 3 }, () => '<div class="race-card__summary-col skeleton-block"></div>').join("")}
           </div>
         </div>
+        <div class="race-card__table-wrap skeleton-block"></div>
       </article>
     `;
   }).join("");

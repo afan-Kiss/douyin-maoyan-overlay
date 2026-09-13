@@ -28,29 +28,40 @@ const MIME = {
 const LONG_NAME =
   "中华人民共和国北京市朝阳区电影发行放映有限责任公司年度巨制动作冒险科幻史诗";
 
+function dailyTable(rank) {
+  return ["今日", "明日", "后天"].map((label, i) => ({
+    label,
+    box: i === 0 ? `${800 + rank * 20}.00万` : "--",
+    forecast: i === 0 ? `${900 + rank * 15}.00万` : "--",
+    boxRate: i === 0 ? `${(27.4 - rank * 1.2).toFixed(1)}%` : "--",
+    showCountRate: i === 0 ? `${(26.0 - rank * 0.9).toFixed(1)}%` : "--",
+    avgSeatView: i === 0 ? `${(1.2 + rank * 0.3).toFixed(1)}%` : "--",
+  }));
+}
+
 function richMovie(rank, withExtras = true) {
+  const todayBox = rank === 1 ? 852.22 : 312.4 + rank * 41.2;
   const base = {
     movieId: 1000 + rank,
     rank,
     name: rank === 1 ? LONG_NAME : rank === 2 ? `${LONG_NAME}续集` : `测试电影第${rank}名`,
-    todayBox: rank === 1 ? 852.22 : 312.4 + rank * 41.2,
+    todayBox,
     todayUnit: "万",
-    todayBoxText: rank === 1 ? "852.22" : String((312.4 + rank * 41.2).toFixed(2)),
+    todayBoxText: rank === 1 ? "852.22" : todayBox.toFixed(2),
     boxRate: `${(27.4 - rank * 1.2).toFixed(1)}%`,
     showCountRate: `${(26.0 - rank * 0.9).toFixed(1)}%`,
     avgSeatView: `${(1.2 + rank * 0.3).toFixed(1)}%`,
     sumBoxDesc: rank === 1 ? "21.53亿" : `${(8 + rank).toFixed(2)}亿`,
+    mainlandBox: rank === 1 ? "21.53亿" : `${(8 + rank).toFixed(2)}亿`,
+    dailyIncrease: `${todayBox.toFixed(2)}万`,
+    dailyTable: dailyTable(rank),
   };
   if (!withExtras) return base;
   return {
     ...base,
     dynamicForecast: rank === 1 ? "1537.58万" : `${(400 + rank * 50).toFixed(2)}万`,
-    showCountDesc: `${(8 + rank * 0.3).toFixed(1)}万场`,
-    avgShowView: `${(2 + rank * 0.2).toFixed(1)}`,
-    releaseInfo: rank === 1 ? "上映12天" : "",
     hourSpeedText: rank === 1 ? "128.5万/h" : `${(20 + rank * 3).toFixed(1)}万/h`,
-    yesterdayTotal: `${(600 + rank * 40).toFixed(2)}万`,
-    yesterdaySamePeriodText: `${(500 + rank * 30).toFixed(2)}万`,
+    totalForecast: rank === 1 ? "21.53亿" : `${(8 + rank).toFixed(2)}亿`,
   };
 }
 
@@ -137,6 +148,7 @@ async function renderAndInspect(page, movies, nation) {
         todayBoxText: "2092.2",
         viewCountDesc: "999.9万",
         showCountDesc: "99999",
+        seatValue: "5.6%",
       },
     },
   );
@@ -152,14 +164,9 @@ async function renderAndInspect(page, movies, nation) {
 
     const raceList = document.getElementById("race-list");
     const hero = document.querySelector(".hero");
-    const footer = document.getElementById("stage-footer");
     const items = [...(raceList?.querySelectorAll(".race-card") || [])];
     const issues = [];
     const fonts = {};
-
-    if (footer) {
-      issues.push("footer DOM 仍存在");
-    }
 
     if (items.length !== 5) {
       issues.push(`race-list 应有 5 项，实际 ${items.length}`);
@@ -184,43 +191,78 @@ async function renderAndInspect(page, movies, nation) {
     }
 
     for (const item of items) {
+      const rank = Number(item.dataset.rank);
       const rect = item.getBoundingClientRect();
       if (rect.top < -1 || rect.bottom > 1921) {
-        issues.push(`第 ${item.dataset.rank} 名纵向越界: top=${rect.top.toFixed(1)} bottom=${rect.bottom.toFixed(1)}`);
+        issues.push(`第 ${rank} 名纵向越界: top=${rect.top.toFixed(1)} bottom=${rect.bottom.toFixed(1)}`);
       }
       if (rect.right > 1081 || rect.left < -1) {
-        issues.push(`第 ${item.dataset.rank} 名横向越界`);
+        issues.push(`第 ${rank} 名横向越界`);
+      }
+
+      if (item.querySelector(".race-card__medal")) {
+        issues.push(`第 ${rank} 名仍保留左侧排名徽章`);
+      }
+      if (item.querySelector(".race-card__corner")) {
+        issues.push(`第 ${rank} 名仍使用右上角 NO.x 角标`);
+      }
+      if (item.querySelector(".race-card__daily-trend")) {
+        issues.push(`第 ${rank} 名不应显示 daily-trend 区块`);
+      }
+      if (item.querySelector(".race-card__core-stats")) {
+        issues.push(`第 ${rank} 名不应显示 core-stats 区块`);
+      }
+
+      const table = item.querySelector(".race-card__table");
+      if (!table) {
+        issues.push(`第 ${rank} 名缺少日榜表格`);
+      } else {
+        const rows = table.querySelectorAll("tbody tr");
+        if (rows.length !== 3) {
+          issues.push(`第 ${rank} 名表格应为 3 行，实际 ${rows.length}`);
+        }
+        const headers = [...table.querySelectorAll("thead th")].map((th) => th.textContent.trim());
+        const expected = ["日期", "票房(含预售)", "预测", "票房%", "排片%", "上座率"];
+        if (headers.join("|") !== expected.join("|")) {
+          issues.push(`第 ${rank} 名表头不匹配: ${headers.join("|")}`);
+        }
       }
 
       const bubble = item.querySelector(".race-card__delta-bubble");
       if (bubble?.classList.contains("is-visible")) {
         if (!rectContains(rect, bubble.getBoundingClientRect(), 2)) {
-          issues.push(`第 ${item.dataset.rank} 名涨幅气泡漂出卡片`);
+          issues.push(`第 ${rank} 名涨幅气泡漂出卡片`);
         }
       }
 
-      const coreStats = item.querySelectorAll(".race-card__core-stats .race-stat");
-      if (coreStats.length !== 3) {
-        issues.push(`第 ${item.dataset.rank} 名核心指标应为 3 项，实际 ${coreStats.length}`);
+      const title = item.querySelector(".race-card__title");
+      const rankBadge = item.querySelector(".race-card__rank");
+      const mainland = item.querySelector(".js-mainland");
+      const summary = item.querySelector(".race-card__summary");
+
+      if (!title?.textContent?.trim()) {
+        issues.push(`第 ${rank} 名缺少电影名`);
+      }
+      if (!rankBadge?.textContent?.includes("NO.")) {
+        issues.push(`第 ${rank} 名缺少 NO.x 标签`);
+      }
+      if (!mainland?.textContent?.trim()) {
+        issues.push(`第 ${rank} 名缺少中国内地累计`);
+      }
+      if (!summary) {
+        issues.push(`第 ${rank} 名缺少摘要区`);
       }
 
-      const extraStats = item.querySelectorAll(".race-card__extra-grid .race-stat");
-      const minExtra = Number(item.dataset.rank) === 1 ? 5 : 1;
-      if (extraStats.length < minExtra) {
-        issues.push(`第 ${item.dataset.rank} 名补充指标不足: ${extraStats.length} < ${minExtra}`);
-      }
-
-      const extraGrid = item.querySelector(".race-card__extra-grid");
-      if (extraStats.length === 1 && extraGrid && !extraGrid.classList.contains("race-card__extra-grid--1")) {
-        issues.push(`第 ${item.dataset.rank} 名单项补充指标未占满整行`);
+      if (item.scrollHeight > item.clientHeight + 2) {
+        issues.push(`第 ${rank} 名卡片内容溢出`);
       }
     }
 
     const last = items[items.length - 1];
     const lastBottom = last?.getBoundingClientRect().bottom || 0;
     const gapToBottom = 1920 - lastBottom;
-    if (lastBottom < 1880) {
-      issues.push(`TOP5 未铺满底部: lastBottom=${lastBottom.toFixed(1)}px (<1880)`);
+    if (lastBottom < 1860) {
+      issues.push(`TOP5 未铺满底部: lastBottom=${lastBottom.toFixed(1)}px (<1860)`);
     }
     if (lastBottom > 1920.5) {
       issues.push(`第 5 名 bottom=${lastBottom.toFixed(1)} 超出 1920`);
@@ -252,12 +294,11 @@ async function renderAndInspect(page, movies, nation) {
     sample(document.querySelector(".nation-pill__value"), "nationValue");
     sample(document.getElementById("nation-delta"), "nationDelta");
     sample(rank1?.querySelector(".race-card__title"), "rank1Title");
-    sample(rank1?.querySelector(".js-day-box"), "rank1Box");
+    sample(rank1?.querySelector(".js-mainland"), "rank1Mainland");
     sample(follow[0]?.querySelector(".race-card__title"), "followTitle");
-    sample(follow[0]?.querySelector(".js-day-box"), "followBox");
-    sample(follow[0]?.querySelector(".race-card__core-stats .race-stat em"), "label");
-    sample(follow[0]?.querySelector(".race-card__core-stats .race-stat strong"), "value");
-    sample(follow[0]?.querySelector(".race-card__extra-grid .race-stat strong"), "extraValue");
+    sample(follow[0]?.querySelector(".metric__label"), "label");
+    sample(follow[0]?.querySelector(".metric__value"), "value");
+    sample(follow[0]?.querySelector(".race-card__table"), "table");
 
     const bubbleHeights = {};
     for (const item of items) {
@@ -309,6 +350,7 @@ async function main() {
             metricLabel: 23,
             metricValue: 30,
             metricValueRank1: 34,
+            table: 19,
           },
         }),
         onSettingsChanged: () => () => {},
@@ -330,7 +372,7 @@ async function main() {
     const reportSparse = await renderAndInspect(page, mockMoviesSparse());
 
     assert.strictEqual(reportRich.itemCount, 5, "race-list 应有 5 项");
-    assert.ok(reportRich.lastBottom >= 1880, `第 5 名 bottom=${reportRich.lastBottom} (<1880)`);
+    assert.ok(reportRich.lastBottom >= 1860, `第 5 名 bottom=${reportRich.lastBottom} (<1860)`);
     assert.ok(reportRich.lastBottom <= 1920.5, `第 5 名 bottom=${reportRich.lastBottom}`);
     assert.ok(reportRich.scrollWidth <= 1081, `scrollWidth=${reportRich.scrollWidth}`);
     assert.ok(reportRich.gapToBottom <= 50, `bottom gap=${reportRich.gapToBottom}`);
@@ -345,19 +387,12 @@ async function main() {
     assert.ok(f.nationLabel >= 22, `nationLabel=${f.nationLabel}`);
     assert.ok(f.nationValue >= 36, `nationValue=${f.nationValue}`);
     assert.ok((f.nationDelta || 24) >= 22, `nationDelta=${f.nationDelta}`);
-    assert.ok(f.rank1Box >= 50, `rank1Box=${f.rank1Box}`);
-    assert.ok(f.followBox >= 40, `followBox=${f.followBox}`);
-    assert.ok(f.rank1Title >= 44, `rank1Title=${f.rank1Title}`);
-    assert.ok(f.followTitle >= 36, `followTitle=${f.followTitle}`);
-    assert.ok(f.value >= 25, `metricValue=${f.value}`);
-    assert.ok((f.extraValue || 23) >= 23, `extraValue=${f.extraValue}`);
-    assert.ok((f.rank1Bubble || 0) >= 26, `rank1Bubble=${f.rank1Bubble}`);
-    assert.ok((f.followBubble || 0) >= 23, `followBubble=${f.followBubble}`);
-    assert.ok((reportRich.bubbleHeights["1"] || 0) >= 44, `rank1 bubble height=${reportRich.bubbleHeights["1"]}`);
-    for (const rank of ["2", "3", "4", "5"]) {
-      const h = reportRich.bubbleHeights[rank];
-      if (h) assert.ok(h >= 38, `rank${rank} bubble height=${h}`);
-    }
+    assert.ok(f.rank1Mainland >= 18, `rank1Mainland=${f.rank1Mainland}`);
+    assert.ok(f.rank1Title >= 28, `rank1Title=${f.rank1Title}`);
+    assert.ok(f.followTitle >= 24, `followTitle=${f.followTitle}`);
+    assert.ok(f.value >= 13, `metricValue=${f.value}`);
+    assert.ok((f.table || 11) >= 11, `table=${f.table}`);
+    assert.ok((f.rank1Bubble || 0) >= 22, `rank1Bubble=${f.rank1Bubble}`);
 
     const wanDisplay = await page.evaluate(() => {
       const { renderList, updateNation } = window.__racePreview;
@@ -368,6 +403,19 @@ async function main() {
           name: "万亿测试",
           todayBox: 12300,
           todayUnit: "亿",
+          mainlandBox: "1.23亿",
+          dailyTable: [
+            {
+              label: "今日",
+              box: "1.23亿",
+              forecast: "1.30亿",
+              boxRate: "30%",
+              showCountRate: "25%",
+              avgSeatView: "5%",
+            },
+            { label: "明日", box: "--", forecast: "--", boxRate: "--", showCountRate: "--", avgSeatView: "--" },
+            { label: "后天", box: "--", forecast: "--", boxRate: "--", showCountRate: "--", avgSeatView: "--" },
+          ],
         },
       ]);
       updateNation(
@@ -379,17 +427,16 @@ async function main() {
         },
         { updateTimeText: "2026-09-13 12:00:00" },
       );
-      const topBox = document.querySelector('.race-card[data-rank="1"] .js-day-box')?.textContent || "";
+      const mainland = document.querySelector('.race-card[data-rank="1"] .js-mainland')?.textContent || "";
       const nationText =
         `${document.getElementById("nation-box")?.textContent || ""}${document.querySelector(".js-nation-unit")?.textContent || ""}`;
       const champText =
         `${document.getElementById("champ-box")?.textContent || ""}${document.getElementById("champ-box-unit")?.textContent || ""}`;
-      return { topBox, nationText, champText };
+      return { mainland, nationText, champText };
     });
-    assert.strictEqual(wanDisplay.topBox, "1.23亿");
+    assert.strictEqual(wanDisplay.mainland, "¥1.23亿");
     assert.strictEqual(wanDisplay.nationText, "1.23亿");
     assert.strictEqual(wanDisplay.champText, "1.23亿");
-    assert.ok(!wanDisplay.topBox.includes("12300"));
 
     console.log("TOP5 layout OK");
     console.log("Screenshot:", OUT_PNG);

@@ -14,15 +14,10 @@
         <div class="bg-layer" aria-hidden="true">
           <div class="bg-base"></div>
           <div class="bg-curtain bg-curtain--l"></div>
-          <div class="bg-curtain bg-curtain--r"></div>
-          <div class="bg-film bg-film--l"></div>
-          <div class="bg-film bg-film--r"></div>
           <div class="bg-ribbon bg-ribbon--r"></div>
-          <div class="bg-spotlight bg-spotlight--c"></div>
           <div class="bg-spotlight bg-spotlight--l"></div>
           <div class="bg-spotlight bg-spotlight--r"></div>
           <div class="bg-beam bg-beam--l"></div>
-          <div class="bg-beam bg-beam--c"></div>
           <div class="bg-beam bg-beam--r"></div>
           <div class="bg-speedlines"></div>
           <div class="bg-particles"></div>
@@ -96,17 +91,7 @@
               <span class="nation-pill__label">排片</span>
               <span class="nation-pill__value" id="nation-shows">--</span>
             </div>
-            <div class="nation-pill nation-pill--dark nation-pill--champ" id="champ-box-pill">
-              <span class="nation-pill__crown" aria-hidden="true">
-                <svg viewBox="0 0 24 18" width="18" height="14">
-                  <path
-                    fill="#ffd978"
-                    stroke="#8a4a10"
-                    stroke-width="0.8"
-                    d="M2 14 L4 5 L8 10 L12 3 L16 10 L20 5 L22 14 Z"
-                  />
-                </svg>
-              </span>
+            <div class="nation-pill nation-pill--dark" id="champ-box-pill">
               <span class="nation-pill__label">冠军票房</span>
               <span class="nation-pill__row">
                 <span class="nation-pill__value mtsi-font" id="champ-box">--</span>
@@ -118,7 +103,7 @@
               <span class="nation-pill__value" id="nation-views">--</span>
             </div>
             <div class="nation-pill nation-pill--dark" id="nation-seat-pill">
-              <span class="nation-pill__label" id="nation-seat-label">上座率</span>
+              <span class="nation-pill__label">上座率</span>
               <span class="nation-pill__value" id="nation-seat">--</span>
             </div>
           </div>
@@ -126,8 +111,9 @@
 
         <div id="status" class="status status--loading">正在启动票房服务…</div>
 
-        <section class="race-list" id="race-list" aria-label="实时票房前五"></section>
+        <section class="race-list" id="race-list" aria-label="票房榜前十"></section>
 
+        <div class="delta-overlay" id="delta-overlay" aria-hidden="true"></div>
       </div>
     </div>
 
