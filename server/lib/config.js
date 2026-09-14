@@ -72,11 +72,17 @@ export function getApiPort() {
 
 function autoDetectChrome() {
   const local = process.env.LOCALAPPDATA || "";
+  const programFiles = process.env.ProgramFiles || "C:\\Program Files";
+  const programFilesX86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
   const list = [
-    path.join(local, "Google", "Chrome", "Bin", "chrome.exe"),
     path.join(local, "Google", "Chrome", "Application", "chrome.exe"),
-    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+    path.join(local, "Google", "Chrome", "Bin", "chrome.exe"),
+    path.join(programFiles, "Google", "Chrome", "Application", "chrome.exe"),
+    path.join(programFilesX86, "Google", "Chrome", "Application", "chrome.exe"),
+    // 新电脑常只有 Edge：Playwright 可用 msedge 抓签
+    path.join(programFilesX86, "Microsoft", "Edge", "Application", "msedge.exe"),
+    path.join(programFiles, "Microsoft", "Edge", "Application", "msedge.exe"),
+    path.join(local, "Microsoft", "Edge", "Application", "msedge.exe"),
   ];
   for (const p of list) {
     if (p && fs.existsSync(p)) return p;

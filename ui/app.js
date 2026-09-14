@@ -456,9 +456,18 @@ async function finishLoginSuccess(result = {}) {
       await updateLoginButton(true);
       return;
     }
-    if (!status?.apiBase) status = { ...status, apiBase: config.apiBase };
-    if (status?.error) console.warn("登录后票房服务未就绪:", status.error);
+    if (!status?.apiBase) status = { ...(status || {}), apiBase: config.apiBase };
+    if (status?.error) {
+      console.warn("登录后票房服务未就绪:", status.error);
+      // 服务挂了仍尝试拉大盘；同时把真实错误写进状态，避免一直“加载中”
+      if (status?.ready === false) {
+        setStatus("loading", `票房服务异常，正在重试… ${String(status.error).slice(0, 80)}`);
+      }
+    }
   }
+
+  const apiBase = status?.apiBase || config.apiBase;
+  if (apiBase) config.apiBase = apiBase;
 
   // 先拉大盘，避免卡在 refresh/无头抓签
   startPolling();
@@ -466,10 +475,11 @@ async function finishLoginSuccess(result = {}) {
   // 后台 refresh：优先复用登录缓存签名；短超时，失败不阻断界面
   void (async () => {
     try {
+      if (!apiBase) return;
       console.log("登录后开始 refresh 签名");
       const movieId = String(latestMovies[0]?.movieId || "1462628");
       const resp = await fetch(
-        `${status.apiBase}/api/refresh?movieId=${encodeURIComponent(movieId)}&boxLevel=1`,
+        `${apiBase}/api/refresh?movieId=${encodeURIComponent(movieId)}&boxLevel=1`,
         { signal: AbortSignal.timeout(45000) },
       );
       if (!resp.ok) {

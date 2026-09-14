@@ -262,11 +262,32 @@ function resolveMaoyanDir() {
     // runtime 布局：maoyan/server + maoyan/lib；旧 unpacked：server + ../lib
     const siblingLib = path.join(path.dirname(dir), "lib");
     const hasLib = fs.existsSync(libDir) || fs.existsSync(siblingLib);
-    if (fs.existsSync(indexFile) && hasLib) {
+    // 换机必炸点：缺少 dashboard-rank 时进程秒退，界面一直加载中
+    const hasRank =
+      fs.existsSync(path.join(dir, "lib", "dashboard-rank.js")) ||
+      fs.existsSync(path.join(path.dirname(dir), "ui", "dashboard-rank.js")) ||
+      fs.existsSync(path.join(__dirname, "ui", "dashboard-rank.js"));
+    if (fs.existsSync(indexFile) && hasLib && hasRank) {
       return dir;
     }
   }
   return null;
+}
+
+function reportServiceIssue(message) {
+  const text = String(message || "").trim();
+  if (!text) return;
+  try {
+    const { report } = require("./lib/client-logger");
+    report("error", "service", text.slice(0, 500));
+  } catch {
+    /* ignore */
+  }
+  try {
+    console.error(text);
+  } catch {
+    /* ignore */
+  }
 }
 
 function hasServerDeps() {
@@ -500,9 +521,11 @@ function startMaoyanProcess(dir) {
       },
     });
 
+    // 立刻挂日志：换机缺文件时进程会秒退，晚挂会丢 stderr
+    pipeChildLogs(child);
+
     child.on("error", (error) => finish(reject, error));
     child.on("spawn", () => {
-      pipeChildLogs(child);
       maoyanProcess = child;
       startedByUs = true;
       finish(resolve, child);
@@ -637,6 +660,7 @@ async function ensureMaoyanServiceInner(config) {
     apiStatus.error = isElectronPackaged()
       ? "内置依赖缺失，请重新安装或更新软件"
       : "缺少依赖，请在项目目录运行 npm run setup 完成安装";
+    reportServiceIssue(apiStatus.error);
     return apiStatus;
   }
 
@@ -662,13 +686,15 @@ async function ensureMaoyanServiceInner(config) {
     const stopped = await shutdownMaoyanServiceAndWait();
     if (!stopped) {
       apiStatus.error = "旧票房服务进程未能退出，请稍后重试";
+      reportServiceIssue(apiStatus.error);
       return apiStatus;
     }
   }
 
   const maoyanDir = resolveMaoyanDir();
   if (!maoyanDir) {
-    apiStatus.error = "内置票房服务缺失，请重新安装软件";
+    apiStatus.error = "内置票房服务缺失（缺少服务文件），请重新下载最新版软件";
+    reportServiceIssue(apiStatus.error);
     return apiStatus;
   }
 
@@ -677,6 +703,7 @@ async function ensureMaoyanServiceInner(config) {
     child = await startMaoyanProcess(maoyanDir);
   } catch (e) {
     apiStatus.error = `启动票房服务失败: ${e.message}`;
+    reportServiceIssue(apiStatus.error);
     return apiStatus;
   }
 
@@ -693,12 +720,13 @@ async function ensureMaoyanServiceInner(config) {
       apiStatus.error =
         crash ||
         apiStatus.error ||
-        "票房服务进程已退出，请重启软件；若刚换电脑请确认已安装 Google Chrome";
+        "票房服务进程已退出，请重启软件；若刚换电脑请确认已安装 Google Chrome 或 Edge";
     } else if (crash) {
       apiStatus.error = `票房服务未能就绪: ${crash}`;
     } else {
-      apiStatus.error = "票房服务启动超时，请检查端口占用或 Chrome 是否可用";
+      apiStatus.error = "票房服务启动超时，请检查端口占用或浏览器是否可用";
     }
+    reportServiceIssue(apiStatus.error);
     await shutdownMaoyanServiceAndWait();
   }
 

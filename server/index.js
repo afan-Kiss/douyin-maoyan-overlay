@@ -15,7 +15,7 @@ import { runCapabilityVerify } from "./lib/capability-verify.js";
 import { applyApiErrorToCapability, getLastCapabilityVerify } from "./lib/capability-state.js";
 import { isPortListening } from "./lib/port.js";
 import { UpstreamError, manager } from "./lib/sigManager.js";
-import { buildRankSnapshotFromRawList } from "../ui/dashboard-rank.js";
+import { buildRankSnapshotFromRawList } from "./lib/dashboard-rank.js";
 
 ensureConfigTemplate();
 
