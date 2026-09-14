@@ -1109,22 +1109,38 @@ function parseTechMetrics(raw) {
   let endDateStr = "--";
   let remainingDays = "--";
 
-  if (endDate) {
-    if (typeof endDate === "number" && String(endDate).length === 8) {
-      const s = String(endDate);
-      endDateStr = `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+  if (endDate != null && String(endDate).trim() !== "") {
+    const dateRaw = String(endDate).trim();
+    if (/^\d{8}$/.test(dateRaw)) {
+      endDateStr = `${dateRaw.slice(0, 4)}-${dateRaw.slice(4, 6)}-${dateRaw.slice(6, 8)}`;
+    } else if (/^\d{4}-\d{2}-\d{2}/.test(dateRaw)) {
+      endDateStr = dateRaw.slice(0, 10);
     } else {
-      endDateStr = String(endDate).slice(0, 10);
+      endDateStr = dateRaw.slice(0, 16);
     }
-    const end = new Date(endDateStr);
-    const now = new Date();
-    if (!Number.isNaN(end.getTime())) {
-      const diff = Math.ceil((end - now) / 86400000);
-      remainingDays = diff >= 0 ? String(diff) : "0";
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(endDateStr);
+    if (m) {
+      const end = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+      const now = new Date();
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      if (!Number.isNaN(end.getTime())) {
+        const diff = Math.round((end - today) / 86400000);
+        remainingDays = String(Math.max(0, diff));
+      }
     }
-  } else if (inner.remainingDays != null) {
-    remainingDays = String(inner.remainingDays);
-    endDateStr = inner.endDateDesc || "--";
+  } else if (inner.remainingDays != null && String(inner.remainingDays).trim() !== "") {
+    remainingDays = String(inner.remainingDays).trim();
+    const desc = inner.endDateDesc;
+    if (desc != null && String(desc).trim() && String(desc).trim() !== "--") {
+      endDateStr = String(desc).trim();
+    }
+  }
+
+  if (
+    inner.remainingDays != null &&
+    String(inner.remainingDays).trim() !== ""
+  ) {
+    remainingDays = String(inner.remainingDays).trim();
   }
 
   return { endDate: endDateStr, remainingDays };
@@ -1477,6 +1493,16 @@ export const EXTRA_METRIC_FIELD_MAP = [
   { label: "海外票房", key: "overseasBox", source: "getBoxShowna", raw: "overseasBoxDesc" },
 ];
 
+function formatEndDateForExtra(m) {
+  const hasDate = !isEmptyMetricValue(m?.endDate);
+  const hasDays = !isEmptyMetricValue(m?.remainingDays);
+  if (!hasDate && !hasDays) return "";
+  const dateText = hasDate ? String(m.endDate).replace(/^\d{4}-/, "").trim() : "";
+  const days = hasDays ? `剩${String(m.remainingDays).trim()}天` : "";
+  if (dateText && days) return `${dateText} ${days}`;
+  return dateText || days;
+}
+
 const EXTRA_METRIC_CANDIDATES = [
   { key: "dynamicForecast", label: "动态预测", tier: 1, get: (m) => m.dynamicForecast },
   { key: "showCountDesc", label: "排片场次", tier: 1, get: (m) => formatShowCountDesc(m) },
@@ -1486,12 +1512,21 @@ const EXTRA_METRIC_CANDIDATES = [
   { key: "yesterdaySamePeriodText", label: "昨日同期", tier: 1, get: (m) => m.yesterdaySamePeriodText },
   { key: "totalViews", label: "累计观影人次", tier: 1, get: (m) => m.totalViews },
   { key: "totalForecast", label: "总预测", tier: 2, get: (m) => m.totalForecast },
-  { key: "endDate", label: "下映日期", tier: 2, get: (m) => (isEmptyMetricValue(m.endDate) ? "" : m.endDate) },
+  {
+    key: "endDate",
+    label: "下映日期",
+    tier: 2,
+    get: (m) => formatEndDateForExtra(m),
+  },
   {
     key: "remainingDays",
     label: "剩余天数",
     tier: 2,
-    get: (m) => (isEmptyMetricValue(m.remainingDays) ? "" : `${m.remainingDays}天`),
+    // 下映日期已带「剩N天」时不再单独占一格
+    get: (m) =>
+      !isEmptyMetricValue(m.endDate) || isEmptyMetricValue(m.remainingDays)
+        ? ""
+        : `剩${m.remainingDays}天`,
   },
   { key: "sumSplitBoxDesc", label: "分账票房", tier: 2, get: (m) => m.sumSplitBoxDesc },
   { key: "splitBoxRate", label: "分账占比", tier: 2, get: (m) => m.splitBoxRate },
@@ -1925,7 +1960,7 @@ export async function enrichMoviesLight(apiBase, movies, options = {}) {
   return enriched;
 }
 
-export { parsePredictionMetrics, parseBoxShowMetrics };
+export { parsePredictionMetrics, parseBoxShowMetrics, parseTechMetrics };
 
 export async function enrichMovies(apiBase, movies, options = {}) {
   const concurrency = options.concurrency || 2;

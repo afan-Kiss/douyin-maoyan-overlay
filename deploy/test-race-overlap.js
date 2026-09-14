@@ -54,6 +54,8 @@ function richMovie(rank, extra = {}) {
     dynamicForecast: rank === 1 ? "1537.58万" : `${(400 + rank * 50).toFixed(2)}万`,
     hourSpeedText: rank === 1 ? "128.5万/h" : `${(20 + rank * 3).toFixed(1)}万/h`,
     totalForecast: rank === 1 ? "21.53亿" : `${(8 + rank).toFixed(2)}亿`,
+    endDate: rank === 1 ? "2026-10-12" : `2026-10-${String(10 + rank).padStart(2, "0")}`,
+    remainingDays: String(20 + rank),
     yesterdayTotal: "587.90万",
     yesterdaySamePeriodText: "102.45万",
     totalViews: "0.44亿",

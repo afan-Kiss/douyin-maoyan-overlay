@@ -146,6 +146,16 @@ function mainlandLabel() {
   return "中国内地";
 }
 
+function formatEndDateMetric(m) {
+  const hasDate = !isEmptyField(m?.endDate);
+  const hasDays = !isEmptyField(m?.remainingDays);
+  if (!hasDate && !hasDays) return "";
+  const dateText = hasDate ? String(m.endDate).replace(/^\d{4}-/, "").trim() : "";
+  const days = hasDays ? `剩${String(m.remainingDays).trim()}天` : "";
+  if (dateText && days) return `${dateText} ${days}`;
+  return dateText || days;
+}
+
 function formatMoneyMetric(val) {
   if (isEmptyField(val)) return "";
   const text = String(val).trim();
@@ -202,11 +212,9 @@ const SUMMARY_COLUMN_DEFS = [
       ],
     },
     {
-      key: "totalForecast",
-      label: "总预测",
-      get: (m) => formatMoneyMetric(m.totalForecast),
-      trend: (m) => m.totalTrend,
-      // 禁止回落到 sumBoxDesc：累计票房会冒充成「总预测」，和中国内地撞数
+      key: "endDate",
+      label: "下映日期",
+      get: (m) => formatEndDateMetric(m),
       fallbacks: [],
     },
     {
@@ -285,16 +293,7 @@ const EXTRA_SUMMARY_DEFS = [
   { key: "splitBoxRate", label: "分账占比", get: (m) => m.splitBoxRate },
   { key: "hmtBox", label: "港澳台", get: (m) => formatMoneyMetric(m.hmtBox) },
   { key: "overseasBox", label: "海外", get: (m) => formatMoneyMetric(m.overseasBox) },
-  {
-    key: "endDate",
-    label: "下映日期",
-    get: (m) => {
-      if (isEmptyField(m.endDate) && isEmptyField(m.remainingDays)) return "";
-      const dateText = String(m.endDate || "--").replace(/^\d{4}-/, "");
-      const days = isEmptyField(m.remainingDays) ? "" : `剩${m.remainingDays}天`;
-      return days ? `${dateText}${days}` : dateText;
-    },
-  },
+  { key: "endDate", label: "下映日期", get: (m) => formatEndDateMetric(m) },
 ];
 
 const MAX_EXTRA_SUMMARY_METRICS = 0;
