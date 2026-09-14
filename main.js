@@ -405,10 +405,13 @@ function registerIpcHandlers() {
         /* ignore */
       }
       const { getApiStatus } = getMods().maoyan;
-      const { forceBackgroundVerify } = require("./lib/session-status");
-      void getApiStatus().then((status) => {
-        if (status.apiBase) forceBackgroundVerify(status.apiBase, require("./maoyan-service").getDataDir());
-      });
+      // 登录页已完成 detail 验签时，禁止立刻再 force 无头验签（换机易把票房服务打崩）
+      if (!result.detailApiReady) {
+        const { forceBackgroundVerify } = require("./lib/session-status");
+        void getApiStatus().then((status) => {
+          if (status.apiBase) forceBackgroundVerify(status.apiBase, require("./maoyan-service").getDataDir());
+        });
+      }
     }
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("login-result", result);

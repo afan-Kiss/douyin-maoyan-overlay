@@ -921,6 +921,15 @@ export class SigManager {
             detailHttpStatus: resp.status,
             detailPayloadValid: true,
           });
+          // 登录缓存通常只有 getBoxShow：扩展签名不足时补暖，否则预测/下映一直空
+          if (this.countWuKongSigs(movieId) < 2) {
+            log.sigStep("扩展接口签名不足，补暖预测/下映签名");
+            try {
+              await this.captureMtgsig(movieId, boxLevel);
+            } catch (warmError) {
+              log.sigStep(`扩展签名补暖失败：${explainError(warmError)}`);
+            }
+          }
           return;
         } else if (resp.status === 401) {
           applyApiErrorToCapability("login_required");

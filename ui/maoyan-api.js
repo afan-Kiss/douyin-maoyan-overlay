@@ -1892,7 +1892,7 @@ async function fetchMovieExtraDetail(apiBase, movie, todayStr, speed = {}, paren
   }
   let parsedPrediction = predictionRaw ? parsePredictionMetrics(predictionRaw, todayStr) : null;
   if (!parsedPrediction?.dailyForecast?.length) {
-    await sleep(800);
+    await sleep(200);
     if (parentSignal?.aborted) {
       throw new DOMException("Aborted", "AbortError");
     }

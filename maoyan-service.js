@@ -441,6 +441,12 @@ function warmDashboardCache(apiBase) {
   });
 }
 
+let autoRestartTimer = null;
+let autoRestartAttempts = 0;
+const AUTO_RESTART_WINDOW_MS = 60_000;
+const AUTO_RESTART_MAX = 3;
+let autoRestartWindowStartedAt = 0;
+
 function handleMaoyanChildExit(child, code) {
   if (maoyanProcess !== child) return;
   maoyanProcess = null;
@@ -452,8 +458,34 @@ function handleMaoyanChildExit(child, code) {
       apiStatus.error = detail
         ? `票房服务异常退出 (code ${code}): ${detail}`
         : `票房服务异常退出 (code ${code})`;
+      reportServiceIssue(apiStatus.error);
+      scheduleAutoRestartService();
     }
   }
+}
+
+function scheduleAutoRestartService() {
+  const now = Date.now();
+  if (!autoRestartWindowStartedAt || now - autoRestartWindowStartedAt > AUTO_RESTART_WINDOW_MS) {
+    autoRestartWindowStartedAt = now;
+    autoRestartAttempts = 0;
+  }
+  if (autoRestartAttempts >= AUTO_RESTART_MAX) {
+    reportServiceIssue("票房服务反复崩溃，已停止自动重启，请重启软件");
+    return;
+  }
+  if (autoRestartTimer) return;
+  autoRestartAttempts += 1;
+  const delay = 1500 * autoRestartAttempts;
+  reportServiceIssue(`票房服务将在 ${delay}ms 后自动重启（第 ${autoRestartAttempts} 次）`);
+  autoRestartTimer = setTimeout(() => {
+    autoRestartTimer = null;
+    ensureMaoyanService({
+      apiBase: apiStatus.apiBase || "http://127.0.0.1:8765",
+    }).catch((error) => {
+      reportServiceIssue(`票房服务自动重启失败: ${error?.message || error}`);
+    });
+  }, delay);
 }
 
 function getServerLogPath() {
