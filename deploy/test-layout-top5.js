@@ -63,6 +63,7 @@ function richMovie(rank, withExtras = true) {
     dynamicForecast: rank === 1 ? "1537.58万" : `${(400 + rank * 50).toFixed(2)}万`,
     endDate: rank === 1 ? "2026-10-12" : `2026-10-${String(10 + rank).padStart(2, "0")}`,
     remainingDays: String(20 + rank),
+    releaseInfo: `上映${10 + rank}天`,
   };
 }
 
@@ -276,7 +277,7 @@ async function renderAndInspect(page, movies, nation) {
       }
 
       const metricLabels = [...metrics].map((el) => el.querySelector(".metric__label")?.textContent?.trim());
-      const coreLabels = ["动态预测", "下映日期", "实时上座", "实时票房", "票房占比", "场均人次", "排片占比"];
+      const coreLabels = ["动态预测", "下映日期", "上映", "实时票房", "票房占比", "场均人次", "排片占比"];
       for (const label of coreLabels) {
         if (!metricLabels.includes(label)) {
           issues.push(`第 ${rank} 名缺少核心摘要字段: ${label}`);

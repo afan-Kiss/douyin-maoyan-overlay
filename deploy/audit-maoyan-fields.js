@@ -183,7 +183,7 @@ async function main() {
 
   console.log("\n【最终实际显示字段】");
   for (const movie of enriched) {
-    const core = ["实时票房", "票房占比", "排片占比", "实时上座"];
+    const core = ["实时票房", "票房占比", "排片占比", "上映"];
     const extras = getExtraMetrics(movie).map((item) => item.label);
     console.log(`TOP${movie.rank} ${movie.name}: ${[...core, ...extras].join(" | ")}`);
   }

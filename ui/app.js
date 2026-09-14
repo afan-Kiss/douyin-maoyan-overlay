@@ -121,6 +121,7 @@ const PRESERVE_MOVIE_FIELDS = [
   "totalViews",
   "endDate",
   "remainingDays",
+  "releaseDate",
   "dailyTable",
   "releaseInfo",
 ];
@@ -154,6 +155,17 @@ function formatEndDateMetric(m) {
   const days = hasDays ? `剩${String(m.remainingDays).trim()}天` : "";
   if (dateText && days) return `${dateText} ${days}`;
   return dateText || days;
+}
+
+/** 上映：优先日历上映日（tech），否则大盘 releaseInfo（如上映12天） */
+function formatReleaseMetric(m) {
+  if (!isEmptyField(m?.releaseDate)) {
+    return String(m.releaseDate).replace(/^\d{4}-/, "").trim();
+  }
+  const tagged = formatReleaseTag(m?.releaseInfo);
+  if (!isEmptyField(tagged)) return tagged;
+  if (!isEmptyField(m?.releaseInfo)) return String(m.releaseInfo).trim();
+  return "";
 }
 
 function formatMoneyMetric(val) {
@@ -218,10 +230,11 @@ const SUMMARY_COLUMN_DEFS = [
       fallbacks: [],
     },
     {
-      key: "avgSeatView",
-      label: "实时上座",
-      get: (m) => m.avgSeatView,
-      fallbacks: [(m) => m.dailyTable?.[0]?.avgSeatView],
+      key: "releaseInfo",
+      label: "上映",
+      get: (m) => formatReleaseMetric(m),
+      // 大盘自带字段，不依赖 getTechData；比「实时上座」更适合直播展示
+      fallbacks: [],
     },
   ],
   [

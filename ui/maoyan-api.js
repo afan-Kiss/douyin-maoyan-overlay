@@ -1104,20 +1104,44 @@ function parseTechMetrics(raw) {
     inner.offlineDate ||
     inner.lastShowDate ||
     inner.endShowDate ||
-    deepFind(inner, ["endDate", "offlineDate", "lastShowDate"]);
+    inner.showEndDate ||
+    inner.offlineDay ||
+    deepFind(inner, [
+      "endDate",
+      "offlineDate",
+      "lastShowDate",
+      "endShowDate",
+      "showEndDate",
+      "offlineDay",
+    ]);
+
+  const releaseDateRaw =
+    inner.releaseDate ||
+    inner.beginDate ||
+    inner.startDate ||
+    inner.showDate ||
+    inner.releaseTime ||
+    inner.openDay ||
+    deepFind(inner, ["releaseDate", "beginDate", "startDate", "showDate", "releaseTime", "openDay"]);
 
   let endDateStr = "--";
   let remainingDays = "--";
+  let releaseDateStr = "--";
+
+  const formatYmd = (value) => {
+    if (value == null || String(value).trim() === "") return "--";
+    const dateRaw = String(value).trim();
+    if (/^\d{8}$/.test(dateRaw)) {
+      return `${dateRaw.slice(0, 4)}-${dateRaw.slice(4, 6)}-${dateRaw.slice(6, 8)}`;
+    }
+    if (/^\d{4}-\d{2}-\d{2}/.test(dateRaw)) return dateRaw.slice(0, 10);
+    // 纯月日
+    if (/^\d{1,2}-\d{1,2}$/.test(dateRaw)) return dateRaw;
+    return dateRaw.slice(0, 16);
+  };
 
   if (endDate != null && String(endDate).trim() !== "") {
-    const dateRaw = String(endDate).trim();
-    if (/^\d{8}$/.test(dateRaw)) {
-      endDateStr = `${dateRaw.slice(0, 4)}-${dateRaw.slice(4, 6)}-${dateRaw.slice(6, 8)}`;
-    } else if (/^\d{4}-\d{2}-\d{2}/.test(dateRaw)) {
-      endDateStr = dateRaw.slice(0, 10);
-    } else {
-      endDateStr = dateRaw.slice(0, 16);
-    }
+    endDateStr = formatYmd(endDate);
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(endDateStr);
     if (m) {
       const end = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
@@ -1130,7 +1154,7 @@ function parseTechMetrics(raw) {
     }
   } else if (inner.remainingDays != null && String(inner.remainingDays).trim() !== "") {
     remainingDays = String(inner.remainingDays).trim();
-    const desc = inner.endDateDesc;
+    const desc = inner.endDateDesc || inner.offlineDateDesc;
     if (desc != null && String(desc).trim() && String(desc).trim() !== "--") {
       endDateStr = String(desc).trim();
     }
@@ -1143,7 +1167,15 @@ function parseTechMetrics(raw) {
     remainingDays = String(inner.remainingDays).trim();
   }
 
-  return { endDate: endDateStr, remainingDays };
+  releaseDateStr = formatYmd(releaseDateRaw);
+  if (releaseDateStr === "--") {
+    const desc = inner.releaseDateDesc || inner.beginDateDesc || inner.startDateDesc;
+    if (desc != null && String(desc).trim() && String(desc).trim() !== "--") {
+      releaseDateStr = String(desc).trim();
+    }
+  }
+
+  return { endDate: endDateStr, remainingDays, releaseDate: releaseDateStr };
 }
 
 function formatTodayBoxDebugText(movie) {
@@ -1342,6 +1374,7 @@ export function mergeMovieDetail(base, detail = {}) {
 
   mergePreserveField(merged, "endDate", tech.endDate);
   mergePreserveField(merged, "remainingDays", tech.remainingDays);
+  mergePreserveField(merged, "releaseDate", tech.releaseDate);
 
   const hasDetailDaily =
     (Array.isArray(prediction.dailyForecast) && prediction.dailyForecast.length > 0) ||
@@ -1466,7 +1499,7 @@ const PREDICTION_AUDIT_FIELDS = [
 ];
 
 const GLOBAL_AUDIT_FIELDS = ["mainland", "hmt", "overseas"];
-const TECH_AUDIT_FIELDS = ["endDate", "remainingDays"];
+const TECH_AUDIT_FIELDS = ["endDate", "remainingDays", "releaseDate"];
 
 export const EXTRA_METRIC_FIELD_MAP = [
   { label: "实时票房", key: "todayBox", source: "dashboard", raw: "boxSplitUnit" },
@@ -1884,14 +1917,28 @@ async function fetchMovieExtraDetail(apiBase, movie, todayStr, speed = {}, paren
   };
 
   let predictionRaw = null;
+  let techRaw = null;
+  // 预测 + 下映并行，优先出下映/上映日期，避免先卡在预测重试
   try {
-    predictionRaw = await fetchPredictionBox(apiBase, movie.movieId, parentSignal);
+    [predictionRaw, techRaw] = await Promise.all([
+      fetchPredictionBox(apiBase, movie.movieId, parentSignal).catch((error) => {
+        if (parentSignal?.aborted) throw error;
+        captureExtraError("预测票房", error);
+        return null;
+      }),
+      fetchTechData(apiBase, movie.movieId, parentSignal).catch((error) => {
+        if (parentSignal?.aborted) throw error;
+        captureExtraError("下映时间", error);
+        console.warn(`getTechData 失败 movieId=${movie.movieId}:`, error?.message || error);
+        return null;
+      }),
+    ]);
   } catch (error) {
     if (parentSignal?.aborted) throw error;
-    captureExtraError("预测票房", error);
   }
+
   let parsedPrediction = predictionRaw ? parsePredictionMetrics(predictionRaw, todayStr) : null;
-  if (!parsedPrediction?.dailyForecast?.length) {
+  if (!parsedPrediction?.dailyForecast?.length && predictionRaw == null) {
     await sleep(200);
     if (parentSignal?.aborted) {
       throw new DOMException("Aborted", "AbortError");
@@ -1905,8 +1952,13 @@ async function fetchMovieExtraDetail(apiBase, movie, todayStr, speed = {}, paren
     }
   }
   if (parsedPrediction) detail.prediction = parsedPrediction;
+  if (techRaw) {
+    const parsed = parseTechMetrics(techRaw);
+    if (parsed) detail.tech = parsed;
+    else console.warn(`getTechData 解析空 movieId=${movie.movieId}`);
+  }
 
-  const [boxShowRaw, globalRaw, techRaw] = await Promise.all([
+  const [boxShowRaw, globalRaw] = await Promise.all([
     fetchBoxShow(apiBase, movie.movieId, 1, parentSignal).catch((error) => {
       if (parentSignal?.aborted) throw error;
       captureExtraError("日期票房", error);
@@ -1917,21 +1969,12 @@ async function fetchMovieExtraDetail(apiBase, movie, todayStr, speed = {}, paren
       captureExtraError("全球票房", error);
       return null;
     }),
-    fetchTechData(apiBase, movie.movieId, parentSignal).catch((error) => {
-      if (parentSignal?.aborted) throw error;
-      captureExtraError("下映时间", error);
-      return null;
-    }),
   ]);
 
   if (boxShowRaw) detail.boxShow = parseBoxShowMetrics(boxShowRaw, todayStr) || {};
   if (globalRaw) {
     const parsed = parseGlobalMetrics(globalRaw);
     if (parsed) detail.global = parsed;
-  }
-  if (techRaw) {
-    const parsed = parseTechMetrics(techRaw);
-    if (parsed) detail.tech = parsed;
   }
 
   detail.extraErrors = extraErrors;
