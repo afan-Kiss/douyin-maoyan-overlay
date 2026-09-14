@@ -1094,12 +1094,96 @@ function findRegionBox(obj, labels) {
   return undefined;
 }
 
+/** 从技术参数文案抽出 YYYY-MM-DD 列表（中文日期优先，否则 ISO） */
+function extractYmdListFromTechText(text) {
+  const s = String(text || "");
+  const out = [];
+  const cn = /(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/g;
+  let m;
+  while ((m = cn.exec(s))) {
+    out.push(
+      `${m[1]}-${String(m[2]).padStart(2, "0")}-${String(m[3]).padStart(2, "0")}`,
+    );
+  }
+  if (out.length) return out;
+  const iso = /(\d{4})-(\d{1,2})-(\d{1,2})/g;
+  while ((m = iso.exec(s))) {
+    out.push(
+      `${m[1]}-${String(m[2]).padStart(2, "0")}-${String(m[3]).padStart(2, "0")}`,
+    );
+  }
+  return out;
+}
+
+/**
+ * 真实 getTechData 结构是 items:[{title,desc}]，
+ * 下映日在「延期至 / 延期至N / 放映期限」区间的最后一个日期。
+ */
+function pickDatesFromTechItems(items) {
+  if (!Array.isArray(items) || !items.length) return { endDate: null, releaseDate: null };
+
+  const delayItems = items
+    .filter((it) => /^延期至/i.test(String(it?.title || "").trim()))
+    .map((it) => {
+      const n = Number((String(it.title).match(/延期至\s*(\d+)/i) || [])[1] || 0);
+      return { it, n };
+    })
+    .sort((a, b) => a.n - b.n);
+
+  const periodItem = items.find((it) => String(it?.title || "").includes("放映期限"));
+
+  let endDate = null;
+  if (delayItems.length) {
+    const dates = extractYmdListFromTechText(delayItems[delayItems.length - 1].it?.desc);
+    if (dates.length) endDate = dates[dates.length - 1];
+  }
+  if (!endDate && periodItem) {
+    const dates = extractYmdListFromTechText(periodItem.desc);
+    if (dates.length) endDate = dates[dates.length - 1];
+  }
+
+  let releaseDate = null;
+  if (periodItem) {
+    const dates = extractYmdListFromTechText(periodItem.desc);
+    if (dates.length) releaseDate = dates[0];
+  }
+
+  return { endDate, releaseDate };
+}
+
+function formatTechYmd(value) {
+  if (value == null || String(value).trim() === "") return "--";
+  const dateRaw = String(value).trim();
+  if (/^\d{8}$/.test(dateRaw)) {
+    return `${dateRaw.slice(0, 4)}-${dateRaw.slice(4, 6)}-${dateRaw.slice(6, 8)}`;
+  }
+  if (/^\d{4}-\d{2}-\d{2}/.test(dateRaw)) return dateRaw.slice(0, 10);
+  const fromText = extractYmdListFromTechText(dateRaw);
+  if (fromText.length) return fromText[fromText.length - 1];
+  // 纯月日
+  if (/^\d{1,2}-\d{1,2}$/.test(dateRaw)) return dateRaw;
+  return dateRaw.slice(0, 16);
+}
+
+function remainingDaysFromYmd(endDateStr) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(endDateStr || ""));
+  if (!m) return "--";
+  const end = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  if (Number.isNaN(end.getTime())) return "--";
+  return String(Math.max(0, Math.round((end - today) / 86400000)));
+}
+
 function parseTechMetrics(raw) {
   if (isFailedApiPayload(raw)) return null;
   const inner = unwrapPayload(raw);
   if (!inner) return null;
 
+  const fromItems = pickDatesFromTechItems(inner.items);
+
   const endDate =
+    fromItems.endDate ||
     inner.endDate ||
     inner.offlineDate ||
     inner.lastShowDate ||
@@ -1116,6 +1200,7 @@ function parseTechMetrics(raw) {
     ]);
 
   const releaseDateRaw =
+    fromItems.releaseDate ||
     inner.releaseDate ||
     inner.beginDate ||
     inner.startDate ||
@@ -1128,30 +1213,9 @@ function parseTechMetrics(raw) {
   let remainingDays = "--";
   let releaseDateStr = "--";
 
-  const formatYmd = (value) => {
-    if (value == null || String(value).trim() === "") return "--";
-    const dateRaw = String(value).trim();
-    if (/^\d{8}$/.test(dateRaw)) {
-      return `${dateRaw.slice(0, 4)}-${dateRaw.slice(4, 6)}-${dateRaw.slice(6, 8)}`;
-    }
-    if (/^\d{4}-\d{2}-\d{2}/.test(dateRaw)) return dateRaw.slice(0, 10);
-    // 纯月日
-    if (/^\d{1,2}-\d{1,2}$/.test(dateRaw)) return dateRaw;
-    return dateRaw.slice(0, 16);
-  };
-
   if (endDate != null && String(endDate).trim() !== "") {
-    endDateStr = formatYmd(endDate);
-    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(endDateStr);
-    if (m) {
-      const end = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-      const now = new Date();
-      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-      if (!Number.isNaN(end.getTime())) {
-        const diff = Math.round((end - today) / 86400000);
-        remainingDays = String(Math.max(0, diff));
-      }
-    }
+    endDateStr = formatTechYmd(endDate);
+    remainingDays = remainingDaysFromYmd(endDateStr);
   } else if (inner.remainingDays != null && String(inner.remainingDays).trim() !== "") {
     remainingDays = String(inner.remainingDays).trim();
     const desc = inner.endDateDesc || inner.offlineDateDesc;
@@ -1160,19 +1224,26 @@ function parseTechMetrics(raw) {
     }
   }
 
-  if (
-    inner.remainingDays != null &&
-    String(inner.remainingDays).trim() !== ""
-  ) {
+  if (inner.remainingDays != null && String(inner.remainingDays).trim() !== "") {
     remainingDays = String(inner.remainingDays).trim();
   }
 
-  releaseDateStr = formatYmd(releaseDateRaw);
+  releaseDateStr = formatTechYmd(releaseDateRaw);
   if (releaseDateStr === "--") {
     const desc = inner.releaseDateDesc || inner.beginDateDesc || inner.startDateDesc;
     if (desc != null && String(desc).trim() && String(desc).trim() !== "--") {
       releaseDateStr = String(desc).trim();
     }
+  }
+
+  // 有 items 却解析不出日期时，仍返回对象，便于上层保留旧值；全空则视为无效
+  if (
+    endDateStr === "--" &&
+    remainingDays === "--" &&
+    releaseDateStr === "--" &&
+    Array.isArray(inner.items)
+  ) {
+    return { endDate: "--", remainingDays: "--", releaseDate: "--" };
   }
 
   return { endDate: endDateStr, remainingDays, releaseDate: releaseDateStr };
@@ -1517,8 +1588,8 @@ export const EXTRA_METRIC_FIELD_MAP = [
   { label: "总预测", key: "totalForecast", source: "getPredictionBox", raw: "sumPrediction/boxDesc" },
   { label: "昨日时速", key: "yesterdayHourSpeedText", source: "getBoxShow", raw: "timeChartData.time_yesterday delta" },
   { label: "上映信息", key: "releaseInfo", source: "dashboard", raw: "movieInfo.releaseInfo" },
-  { label: "下映日期", key: "endDate", source: "getTechData", raw: "endDate" },
-  { label: "剩余天数", key: "remainingDays", source: "getTechData", raw: "remainingDays" },
+  { label: "下映日期", key: "endDate", source: "getTechData", raw: "items[延期至/放映期限]" },
+  { label: "剩余天数", key: "remainingDays", source: "getTechData", raw: "from endDate" },
   { label: "分账票房", key: "sumSplitBoxDesc", source: "dashboard", raw: "sumSplitBoxDesc" },
   { label: "分账占比", key: "splitBoxRate", source: "dashboard", raw: "splitBoxRate" },
   { label: "内地票房", key: "mainlandBox", source: "getBoxShowna", raw: "chinaBoxDesc" },
@@ -1954,8 +2025,21 @@ async function fetchMovieExtraDetail(apiBase, movie, todayStr, speed = {}, paren
   if (parsedPrediction) detail.prediction = parsedPrediction;
   if (techRaw) {
     const parsed = parseTechMetrics(techRaw);
-    if (parsed) detail.tech = parsed;
-    else console.warn(`getTechData 解析空 movieId=${movie.movieId}`);
+    if (parsed) {
+      detail.tech = parsed;
+      if (parsed.endDate === "--" && parsed.remainingDays === "--") {
+        const titles = Array.isArray(unwrapPayload(techRaw)?.items)
+          ? unwrapPayload(techRaw).items.map((it) => it?.title).filter(Boolean).join(",")
+          : "";
+        console.warn(`getTechData 无下映日期 movieId=${movie.movieId} items=${titles || "-"}`);
+      } else {
+        console.log(
+          `getTechData ok movieId=${movie.movieId} endDate=${parsed.endDate} remain=${parsed.remainingDays}`,
+        );
+      }
+    } else {
+      console.warn(`getTechData 解析空 movieId=${movie.movieId}`);
+    }
   }
 
   const [boxShowRaw, globalRaw] = await Promise.all([

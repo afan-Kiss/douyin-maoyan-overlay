@@ -25,6 +25,50 @@ async function main() {
   assert.strictEqual(daysOnly.endDate, "12-20");
   assert.strictEqual(daysOnly.remainingDays, "7");
 
+  // 真实 getTechData：中文放映期限 + 延期至
+  const liveCn = parseTechMetrics({
+    data: {
+      data: {
+        title: "技术参数",
+        items: [
+          { title: "时长", desc: "2小时20分钟" },
+          {
+            title: "放映期限",
+            desc: "2026年08月11日 00:00:00-2026年09月11日 23:59:59",
+          },
+          { title: "延期至", desc: "2026年9月12日至2026年10月12日" },
+        ],
+      },
+    },
+  });
+  assert.strictEqual(liveCn.endDate, "2026-10-12", "延期至终点为下映日");
+  assert.strictEqual(liveCn.releaseDate, "2026-08-11", "放映期限起点为上映日");
+  assert.ok(liveCn.remainingDays !== "--");
+
+  // ISO 区间 + 多段延期至N，取最后一段终点
+  const liveIso = parseTechMetrics({
+    data: {
+      data: {
+        items: [
+          { title: "放映期限", desc: "2026-07-11 09:00:00 - 2026-08-10 23:59:59" },
+          { title: "延期至", desc: "2026-08-11 00:00:00 - 2026-09-10 23:59:59" },
+          { title: "延期至2", desc: "2026-09-11 00:00:00 - 2026-10-10 23:59:59" },
+        ],
+      },
+    },
+  });
+  assert.strictEqual(liveIso.endDate, "2026-10-10", "延期至2 终点");
+
+  // 仅放映期限（无延期）
+  const periodOnly = parseTechMetrics({
+    data: {
+      data: {
+        items: [{ title: "放映期限", desc: "2026-09-04 09:00:00——2026-10-03 23:59:59" }],
+      },
+    },
+  });
+  assert.strictEqual(periodOnly.endDate, "2026-10-03");
+
   const merged = mergeMovieDetail(
     { movieId: 1, endDate: "2026-09-01", remainingDays: "1" },
     { tech: parseTechMetrics({ data: { endDate: "2026-11-10", remainingDays: "58" } }) },
