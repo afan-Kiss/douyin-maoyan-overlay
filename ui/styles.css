@@ -9,7 +9,7 @@
   --bubble-shadow: rgba(255, 60, 80, 0.35);
   --bubble-glow: rgba(255, 77, 109, 0.45);
   --bubble-font-size: 34px;
-  --bubble-duration: 3000ms;
+  --bubble-duration: 2000ms;
   --bubble-float: 52px;
 
   --font-sans: "HarmonyOS Sans SC", "HarmonyOS Sans", "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -1109,7 +1109,7 @@ body:not(.is-ready) .bg-curtain--r {
 }
 
 .race-card__delta-float.race-card__delta-bubble.is-animating {
-  animation: deltaFloatPulse var(--bubble-duration, 3s) ease forwards;
+  animation: deltaFloatPulse var(--bubble-duration, 2s) ease forwards;
 }
 
 @keyframes deltaFloatPulse {
@@ -1175,11 +1175,11 @@ body:not(.is-ready) .bg-curtain--r {
 }
 
 .nation-pill__delta.is-animating {
-  animation: inlineDeltaFloat var(--bubble-duration, 3s) ease forwards;
+  animation: inlineDeltaFloat var(--bubble-duration, 2s) ease forwards;
 }
 
 .race-card__delta-bubble.is-animating:not(.race-card__delta-float) {
-  animation: inlineDeltaPulse var(--bubble-duration, 3s) ease forwards;
+  animation: inlineDeltaPulse var(--bubble-duration, 2s) ease forwards;
 }
 
 @keyframes inlineDeltaFloat {

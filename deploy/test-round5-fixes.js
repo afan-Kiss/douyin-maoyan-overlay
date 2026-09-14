@@ -421,17 +421,19 @@ function testBubbleDurationCss() {
   const appJs = fs.readFileSync(path.join(ROOT, "ui", "app.js"), "utf-8");
   const { DEFAULT_SETTINGS, sanitizeSettings } = require(path.join(ROOT, "lib", "settings.js"));
 
-  assert.strictEqual(DEFAULT_SETTINGS.bubble.durationMs, 3000);
-  assert.strictEqual(sanitizeSettings({}).bubble.durationMs, 3000);
+  assert.strictEqual(DEFAULT_SETTINGS.bubble.durationMs, 2000);
+  assert.strictEqual(sanitizeSettings({}).bubble.durationMs, 2000);
   assert.strictEqual(sanitizeSettings({ bubble: { durationMs: 1800 } }).bubble.durationMs, 1800);
+  assert.strictEqual(sanitizeSettings({ bubble: { durationMs: 3000 } }).bubble.durationMs, 2000);
+  assert.strictEqual(sanitizeSettings({ pollIntervalMs: 3000 }).pollIntervalMs, 2000);
 
-  assert.match(css, /--bubble-duration:\s*3000ms/);
+  assert.match(css, /--bubble-duration:\s*2000ms/);
   assert.match(css, /animation:\s*inlineDeltaFloat\s+var\(--bubble-duration/);
   assert.doesNotMatch(css, /animation:\s*inlineDeltaFloat\s+3s/);
   assert.match(appJs, /getBubbleDurationMs\(\)/);
   assert.doesNotMatch(appJs, /DELTA_ANIM_MS/);
 
-  console.log("PASS bubble duration default 3000ms + settings timer");
+  console.log("PASS bubble duration default 2000ms + settings timer");
 }
 
 async function main() {

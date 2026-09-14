@@ -41,7 +41,7 @@ export function applyOverlaySettings(settings) {
   root.style.setProperty("--bubble-shadow", b.shadowColor || "rgba(255,60,80,0.35)");
   root.style.setProperty("--bubble-glow", b.glowColor || "rgba(255,77,109,0.45)");
   root.style.setProperty("--bubble-font-size", `${b.fontSize || 34}px`);
-  root.style.setProperty("--bubble-duration", `${b.durationMs || 3000}ms`);
+  root.style.setProperty("--bubble-duration", `${b.durationMs || 2000}ms`);
   root.style.setProperty("--bubble-float", `${b.floatHeight || 52}px`);
 
   root.style.setProperty("--font-sans", '"HarmonyOS Sans SC", "HarmonyOS Sans", "PingFang SC", "Microsoft YaHei", sans-serif');
@@ -94,6 +94,6 @@ export function applyOverlaySettings(settings) {
       75% { opacity: 0.88; transform: translate3d(-50%, -${Math.round(floatPx * 0.64)}px, 0) scale(1); }
       100% { opacity: 0; transform: translate3d(-50%, -${floatPx}px, 0) scale(0.92); }
     }
-    .delta-bubble--pop { animation-duration: ${b.durationMs || 3000}ms; }
+    .delta-bubble--pop { animation-duration: ${b.durationMs || 2000}ms; }
   `;
 }

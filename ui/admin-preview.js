@@ -205,7 +205,7 @@ function showDemoBubble() {
   overlay.appendChild(bubble);
   setTimeout(() => {
     if (bubble.parentNode) bubble.remove();
-  }, currentSettings.bubble.durationMs || 3000);
+  }, currentSettings.bubble.durationMs || 2000);
 }
 
 function applySettings(settings) {

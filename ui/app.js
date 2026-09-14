@@ -585,7 +585,7 @@ function formatDeltaWithArrow(deltaWan) {
 function getBubbleDurationMs() {
   const durationMs = getOverlaySettings()?.bubble?.durationMs;
   if (Number.isFinite(durationMs) && durationMs > 0) return durationMs;
-  return 3000;
+  return 2000;
 }
 
 function pulseInlineDelta(el, deltaWan, timerKey) {
@@ -2141,7 +2141,7 @@ async function refreshData() {
 
 function restartPolling() {
   if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(refreshData, config.pollIntervalMs || 3000);
+  pollTimer = setInterval(refreshData, config.pollIntervalMs || 2000);
 }
 
 function startPolling() {
@@ -2431,7 +2431,7 @@ async function init() {
 
   config = (await window.overlay?.getConfig()) || {
     apiBase: "http://127.0.0.1:8765",
-    pollIntervalMs: 3000,
+    pollIntervalMs: 2000,
     topCount: RACE_TOP_COUNT,
   };
   config.topCount = RACE_TOP_COUNT;

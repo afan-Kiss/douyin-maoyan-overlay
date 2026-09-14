@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "revision": 0,
-  "pollIntervalMs": 3000,
+  "pollIntervalMs": 2000,
   "topCount": 5,
   "bubble": {
     "enabled": true,
@@ -12,7 +12,7 @@
     "shadowColor": "rgba(255, 60, 80, 0.32)",
     "glowColor": "rgba(255, 77, 109, 0.22)",
     "fontSize": 22,
-    "durationMs": 1600,
+    "durationMs": 2000,
     "floatHeight": 44,
     "minDelta": 0.001
   },
