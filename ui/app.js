@@ -428,69 +428,81 @@ async function finishLoginSuccess(result = {}) {
   enrichAllowed = true;
 
   const deferred = Boolean(result?.deferredDetail || result?.detailApiReady === false);
-  setStatus(
-    "loading",
-    deferred
-      ? "登录已保存，正在获取签名并验证明细权限…"
-      : "登录成功，正在刷新签名并拉取票房数据…",
+  setStatus("loading", "登录成功，正在拉取票房数据…");
+
+  let status = null;
+  try {
+    status = await Promise.race([
+      window.overlay?.ensureApi?.() || Promise.resolve(null),
+      new Promise((resolve) =>
+        setTimeout(() => resolve({ ready: false, error: "票房服务启动超时", apiBase: config.apiBase }), 35000),
+      ),
+    ]);
+  } catch (error) {
+    status = { ready: false, error: error?.message || "ensureApi failed", apiBase: config.apiBase };
+  }
+  if (status?.apiBase) config.apiBase = status.apiBase;
+  console.log(
+    "登录后 ensureApi:",
+    `ready=${Boolean(status?.ready)}`,
+    `apiBase=${status?.apiBase || "-"}`,
+    `error=${status?.error || "-"}`,
   );
 
-  const status = await window.overlay?.ensureApi?.();
-  if (status?.apiBase) config.apiBase = status.apiBase;
-
-  if (!status?.apiBase) {
-    setStatus("error", "票房服务未启动，请重启软件后再点登录");
-    await updateLoginButton(true);
-    return;
+  if (!status?.apiBase || status?.ready === false) {
+    // 无 ready 时仍尝试用已有 apiBase 拉大盘；完全没有则提示
+    if (!status?.apiBase && !config.apiBase) {
+      setStatus("error", status?.error || "票房服务未启动，请重启软件后再点登录");
+      await updateLoginButton(true);
+      return;
+    }
+    if (!status?.apiBase) status = { ...status, apiBase: config.apiBase };
+    if (status?.error) console.warn("登录后票房服务未就绪:", status.error);
   }
 
-  // 登录后立刻 refresh：换机场景依赖登录页已缓存的 mtgsig
-  let refreshOk = false;
-  for (let attempt = 0; attempt < 2 && !refreshOk; attempt += 1) {
+  // 先拉大盘，避免卡在 refresh/无头抓签
+  startPolling();
+
+  // 后台 refresh：优先复用登录缓存签名；短超时，失败不阻断界面
+  void (async () => {
     try {
+      console.log("登录后开始 refresh 签名");
       const movieId = String(latestMovies[0]?.movieId || "1462628");
       const resp = await fetch(
         `${status.apiBase}/api/refresh?movieId=${encodeURIComponent(movieId)}&boxLevel=1`,
-        { signal: AbortSignal.timeout(120000) },
+        { signal: AbortSignal.timeout(45000) },
       );
       if (!resp.ok) {
         const body = await resp.json().catch(() => ({}));
         const code = String(body?.code || "");
         const detail = String(body?.detail || resp.status);
+        console.warn("登录后刷新签名失败:", code || detail);
         if (code === "login_required" || /login_required|401/.test(detail)) {
           await window.overlay?.reportSessionApiError?.("login_required");
           await updateLoginButton(true);
           setStatus("error", "登录态未生效，请重新点击右上角登录");
           return;
         }
-        console.warn(`登录后刷新签名失败(attempt=${attempt + 1}):`, detail);
-        if (attempt === 1) {
-          setStatus("error", `登录成功但签名刷新失败：${detail}。请再点一次登录`);
-          await updateLoginButton(true);
-          return;
+        if (deferred) {
+          partialDataWarning = `签名刷新未完成：${detail}`;
         }
-        await new Promise((r) => setTimeout(r, 1500));
-        continue;
-      }
-      refreshOk = true;
-      resetApiSigWarm();
-      await updateLoginButton(false);
-    } catch (error) {
-      console.warn(`登录后刷新签名异常(attempt=${attempt + 1}):`, error?.message || error);
-      if (attempt === 1) {
-        setStatus("error", `登录成功但无法刷新签名：${error?.message || error}。请再点一次登录`);
-        await updateLoginButton(true);
         return;
       }
-      await new Promise((r) => setTimeout(r, 1500));
+      resetApiSigWarm();
+      console.log("登录后 refresh 签名完成");
+      // 签名就绪后再拉一轮明细
+      try {
+        await refreshData();
+      } catch (error) {
+        console.warn("签名就绪后拉取明细失败:", error?.message || error);
+      }
+    } catch (error) {
+      console.warn("登录后刷新签名异常:", error?.message || error);
+      if (deferred) {
+        partialDataWarning = `签名刷新超时，大盘可先显示；明细稍后重试`;
+      }
     }
-  }
-
-  setStatus(
-    "loading",
-    deferred ? "签名处理中，正在拉取明日/后天等明细数据…" : "正在拉取票房数据…",
-  );
-  startPolling();
+  })();
 }
 
 function isLoginRelatedError(error) {

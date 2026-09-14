@@ -899,6 +899,49 @@ export class SigManager {
     movieId = String(movieId);
     boxLevel = String(boxLevel);
 
+    // 登录页刚写入的 session_cache：优先复用，避免换机后再开无头 Chrome 卡住
+    const disk = this.loadPersisted(movieId, boxLevel);
+    if (disk?.headers?.mtgsig && this.isFresh(disk)) {
+      log.sigStep("复用登录已缓存的签名，跳过无头抓签");
+      const entry = {
+        movieId,
+        boxLevel,
+        url: disk.url || buildApiUrl(movieId, boxLevel),
+        headers: disk.headers,
+        refreshedAt: disk.refreshedAt || Date.now() / 1000,
+        source: "browser",
+      };
+      this.cache.set(this.cacheKey(movieId, boxLevel), entry);
+      this.pruneCache();
+      applyCapabilitySuccess({ signatureReady: true, signatureCaptured: true });
+      try {
+        const resp = await this.requestUpstream(movieId, boxLevel, entry);
+        if (resp.ok) {
+          markDetailApiSuccess({
+            detailHttpStatus: resp.status,
+            detailPayloadValid: true,
+          });
+          return;
+        } else if (resp.status === 401) {
+          applyApiErrorToCapability("login_required");
+          const err = new Error("login_required");
+          throw err;
+        } else if (resp.status === 403) {
+          // 缓存签名可能过期，继续走下面无头抓取
+          log.sigStep("缓存签名返回 403，改为重新抓取");
+        } else {
+          markDetailApiSuccess({
+            detailHttpStatus: resp.status,
+            detailPayloadValid: false,
+          });
+          return;
+        }
+      } catch (error) {
+        if (String(error?.message || error) === "login_required") throw error;
+        log.sigStep(`缓存签名校验异常：${explainError(error)}，改为重新抓取`);
+      }
+    }
+
     let captured = null;
     let lastError = null;
     for (let attempt = 1; attempt <= 2; attempt++) {
