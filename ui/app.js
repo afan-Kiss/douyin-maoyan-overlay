@@ -2086,7 +2086,7 @@ async function refreshData() {
 
 function restartPolling() {
   if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(refreshData, config.pollIntervalMs || 5000);
+  pollTimer = setInterval(refreshData, config.pollIntervalMs || 3000);
 }
 
 function startPolling() {
@@ -2379,7 +2379,7 @@ async function init() {
 
   config = (await window.overlay?.getConfig()) || {
     apiBase: "http://127.0.0.1:8765",
-    pollIntervalMs: 5000,
+    pollIntervalMs: 3000,
     topCount: RACE_TOP_COUNT,
   };
   config.topCount = RACE_TOP_COUNT;

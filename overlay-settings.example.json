@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "revision": 0,
-  "pollIntervalMs": 5000,
+  "pollIntervalMs": 3000,
   "topCount": 5,
   "bubble": {
     "enabled": true,
