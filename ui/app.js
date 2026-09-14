@@ -2217,22 +2217,19 @@ async function updateLoginButton(forceShow = false) {
 
   const needLogin = forceShow || isLoginRequiredStatus(status);
   const needSig = !needLogin && isSignatureIssueStatus(status);
-  // 签名/会话可用：右上角不显示任何按钮
-  if (!needLogin && !needSig) {
-    btn.classList.add("is-hidden");
-    btn.classList.remove("is-highlight");
-    return;
-  }
 
+  // 右上角登录按钮常驻显示，方便随时重新登录
   btn.classList.remove("is-hidden");
-  if (needLogin) {
-    btn.textContent = "登录";
+  btn.textContent = "登录";
+  if (needLogin || forceShow) {
     btn.title = "登录猫眼账号";
     return;
   }
-
-  btn.textContent = "登录";
-  btn.title = "猫眼签名不可用，点击登录或刷新签名";
+  if (needSig) {
+    btn.title = "猫眼签名不可用，点击登录或刷新签名";
+    return;
+  }
+  btn.title = "登录猫眼账号";
 }
 
 function handleLoginFailure(result) {
