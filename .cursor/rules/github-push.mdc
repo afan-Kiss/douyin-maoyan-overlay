@@ -1,26 +1,29 @@
 ---
-description: GitHub 推送配置 - 使用项目内保存的 token 推送
+description: GitHub 推送配置 - 使用项目内保存的 token + 本地代理推送
 alwaysApply: true
 ---
 
 # GitHub 推送规则（永久生效，禁止再问用户要 token）
 
-本项目 GitHub Personal Access Token **已保存在本地 `deploy/github.json`**（已 gitignore，不入库），用户明确要求保存在项目中、每次推送自动使用，**永远不要再次向用户索要 GitHub token**。
+本项目 GitHub Personal Access Token **已保存在本地 `deploy/github.json`**（已 gitignore，不入库）。用户明确要求保存在项目中、每次推送自动使用，**永远不要再次向用户索要 GitHub token 或代理地址**。
 
-## 凭证位置
+## 凭证位置（唯一来源）
 
 - 文件：`deploy/github.json`
+- 字段：`token`、`owner`、`repo`、`branch`、`proxy`
 - 仓库：`https://github.com/afan-Kiss/douyin-maoyan-overlay`
 - 分支：`master`
+- 代理（固定）：`http://127.0.0.1:7897`（写入 github.json 的 `proxy`）
 
-## 每次需要 push 时
+## 每次需要 push 时（强制）
 
-1. **直接读取** `deploy/github.json` 获取 `token`、`owner`、`repo`、`branch`
-2. **优先执行** `npm run push:github` 或 `node deploy/push-github.js` 或 `.\push-github.bat`
-3. 脚本会自动 `git remote set-url` 并 `git push -u origin master`
-4. **禁止**要求用户重新提供 token
+1. **直接读取** `deploy/github.json` 获取 `token`、`proxy`、`owner`、`repo`、`branch`
+2. **必须执行** `npm run push:github` 或 `node deploy/push-github.js`（脚本会走代理 + token）
+3. **禁止**要求用户重新提供 token / 代理
+4. **禁止**用裸 `git push`（容易漏代理/凭证）
 5. **禁止** force push 到 master
-6. 输出日志时**不要打印完整 token**（可用 `ghp_***` 脱敏）
+6. 输出日志时**不要打印完整 token**（用 `ghp_***` 脱敏）
+7. 推送前确认本机代理 `127.0.0.1:7897` 可用；若失败先重试脚本，不要问用户要 key
 
 ## 命令
 
@@ -36,4 +39,4 @@ npm run push:github
 
 ## 注意
 
-若推送返回 `Repository not found`，说明 GitHub 上尚未创建该仓库，需先在 GitHub 创建 `afan-Kiss/douyin-maoyan-overlay`，再执行推送脚本（不要用裸 `git push`，必须用上述脚本读取 token）。
+若推送返回 `Repository not found`，说明 GitHub 上尚未创建该仓库，需先在 GitHub 创建 `afan-Kiss/douyin-maoyan-overlay`，再执行推送脚本。
