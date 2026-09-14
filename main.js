@@ -262,39 +262,63 @@ function startClientLogUpload(baseUrl) {
 }
 
 function startBackgroundServices(config) {
-  const { startRemoteSync } = getMods().remoteSync;
-  const { startAdminServer } = getMods().adminServer;
-  const { startUpdatePush } = getMods().updatePush;
-
-  if (!servicePromise) {
-    void startMaoyanService();
+  try {
+    if (!servicePromise) {
+      void startMaoyanService();
+    }
+  } catch (error) {
+    console.error("启动票房服务失败:", error?.message || error);
   }
 
   if (config.remoteAdminUrl) {
-    startRemoteSync(config.remoteAdminUrl, notifySettingsChanged);
-    stopPushUpdate = startUpdatePush(config.remoteAdminUrl, updateManager, {
-      log: (msg) => console.log(msg),
-      intervalMs: 15000,
-    });
-    startClientLogUpload(config.remoteAdminUrl);
-    console.log(`远程后台同步: ${config.remoteAdminUrl}`);
+    try {
+      const { startRemoteSync } = getMods().remoteSync;
+      startRemoteSync(config.remoteAdminUrl, notifySettingsChanged);
+      console.log(`远程后台同步: ${config.remoteAdminUrl}`);
+    } catch (error) {
+      console.error("远程设置同步启动失败:", error?.message || error);
+    }
+    try {
+      const { startUpdatePush } = getMods().updatePush;
+      stopPushUpdate = startUpdatePush(config.remoteAdminUrl, updateManager, {
+        log: (msg) => console.log(msg),
+        intervalMs: 15000,
+      });
+    } catch (error) {
+      console.error("云端更新推送启动失败:", error?.message || error);
+    }
+    try {
+      startClientLogUpload(config.remoteAdminUrl);
+    } catch (error) {
+      console.error("客户端日志上报启动失败:", error?.message || error);
+    }
     return;
   }
 
   // 延后拉起本地后台，避免与首屏抢 CPU
   setTimeout(() => {
-    startAdminServer({ onChange: notifySettingsChanged })
-      .then((admin) => {
-        stopPushUpdate = startUpdatePush(admin.url, updateManager, {
-          log: (msg) => console.log(msg),
-          intervalMs: 15000,
+    try {
+      const { startAdminServer } = getMods().adminServer;
+      startAdminServer({ onChange: notifySettingsChanged })
+        .then((admin) => {
+          try {
+            const { startUpdatePush } = getMods().updatePush;
+            stopPushUpdate = startUpdatePush(admin.url, updateManager, {
+              log: (msg) => console.log(msg),
+              intervalMs: 15000,
+            });
+          } catch (error) {
+            console.error("本地更新推送启动失败:", error?.message || error);
+          }
+          startClientLogUpload(admin.url);
+          console.log(`本地后台控制: ${admin.url}`);
+        })
+        .catch((e) => {
+          console.error("后台服务启动失败", e.message);
         });
-        startClientLogUpload(admin.url);
-        console.log(`本地后台控制: ${admin.url}`);
-      })
-      .catch((e) => {
-        console.error("后台服务启动失败", e.message);
-      });
+    } catch (error) {
+      console.error("后台服务启动失败:", error?.message || error);
+    }
   }, 3000);
 }
 
@@ -483,9 +507,21 @@ if (!ensureSingleInstance({ onSecondInstance: focusMainWindow })) {
       stopLogs().catch(() => {});
     }
     if (mods) {
-      mods.remoteSync.stopRemoteSync();
-      mods.adminServer.stopAdminServer();
-      mods.maoyan.shutdownMaoyanService();
+      try {
+        mods.remoteSync?.stopRemoteSync?.();
+      } catch {
+        /* ignore */
+      }
+      try {
+        mods.adminServer?.stopAdminServer?.();
+      } catch {
+        /* ignore */
+      }
+      try {
+        mods.maoyan?.shutdownMaoyanService?.();
+      } catch {
+        /* ignore */
+      }
     }
   });
 

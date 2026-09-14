@@ -137,12 +137,18 @@ function getPackagedResourceRoots() {
     const { app } = require("electron");
     if (!app?.isPackaged) return null;
     const appPath = app.getAppPath();
+    const resourcesPath =
+      typeof process.resourcesPath === "string" && process.resourcesPath
+        ? process.resourcesPath
+        : path.dirname(appPath);
     const unpackedRoot = appPath.endsWith(".asar")
       ? `${appPath.slice(0, -".asar".length)}.asar.unpacked`
       : appPath;
     return {
       appPath,
+      resourcesPath,
       unpackedRoot,
+      runtimeRoot: path.join(resourcesPath, "maoyan"),
       nodeModules: path.join(appPath, "node_modules"),
     };
   } catch {
@@ -152,6 +158,8 @@ function getPackagedResourceRoots() {
 
 function resolveFsNodeModules(packaged) {
   const candidates = [
+    packaged ? path.join(packaged.runtimeRoot || "", "node_modules") : "",
+    packaged ? path.join(packaged.resourcesPath || "", "app.asar.unpacked", "node_modules") : "",
     packaged ? path.join(packaged.unpackedRoot, "node_modules") : "",
     path.join(__dirname, "node_modules"),
     path.join(SERVER_DIR, "node_modules"),
@@ -240,13 +248,21 @@ function buildApiBase(config) {
 
 function resolveMaoyanDir() {
   const packaged = getPackagedResourceRoots();
-  const candidates = packaged
-    ? [path.join(packaged.unpackedRoot, "server"), SERVER_DIR]
-    : [SERVER_DIR];
+  const candidates = [];
+  if (packaged?.runtimeRoot) {
+    candidates.push(path.join(packaged.runtimeRoot, "server"));
+  }
+  if (packaged?.unpackedRoot) {
+    candidates.push(path.join(packaged.unpackedRoot, "server"));
+  }
+  candidates.push(SERVER_DIR);
   for (const dir of candidates) {
     const indexFile = path.join(dir, "index.js");
     const libDir = path.join(dir, "lib");
-    if (fs.existsSync(indexFile) && fs.existsSync(libDir)) {
+    // runtime 布局：maoyan/server + maoyan/lib；旧 unpacked：server + ../lib
+    const siblingLib = path.join(path.dirname(dir), "lib");
+    const hasLib = fs.existsSync(libDir) || fs.existsSync(siblingLib);
+    if (fs.existsSync(indexFile) && hasLib) {
       return dir;
     }
   }

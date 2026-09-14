@@ -438,8 +438,15 @@ async function finishLoginSuccess(result = {}) {
   const status = await window.overlay?.ensureApi?.();
   if (status?.apiBase) config.apiBase = status.apiBase;
 
-  // 登录后立刻 refresh：避免 deferred 路径只靠轮询，明日/后天长期 --
-  if (status?.apiBase) {
+  if (!status?.apiBase) {
+    setStatus("error", "票房服务未启动，请重启软件后再点登录");
+    await updateLoginButton(true);
+    return;
+  }
+
+  // 登录后立刻 refresh：换机场景依赖登录页已缓存的 mtgsig
+  let refreshOk = false;
+  for (let attempt = 0; attempt < 2 && !refreshOk; attempt += 1) {
     try {
       const movieId = String(latestMovies[0]?.movieId || "1462628");
       const resp = await fetch(
@@ -449,19 +456,33 @@ async function finishLoginSuccess(result = {}) {
       if (!resp.ok) {
         const body = await resp.json().catch(() => ({}));
         const code = String(body?.code || "");
-        if (code === "login_required" || /login_required|401/.test(String(body?.detail || ""))) {
+        const detail = String(body?.detail || resp.status);
+        if (code === "login_required" || /login_required|401/.test(detail)) {
           await window.overlay?.reportSessionApiError?.("login_required");
           await updateLoginButton(true);
           setStatus("error", "登录态未生效，请重新点击右上角登录");
           return;
         }
-        console.warn("登录后刷新签名失败:", body?.detail || resp.status);
-      } else {
-        resetApiSigWarm();
-        await updateLoginButton(false);
+        console.warn(`登录后刷新签名失败(attempt=${attempt + 1}):`, detail);
+        if (attempt === 1) {
+          setStatus("error", `登录成功但签名刷新失败：${detail}。请再点一次登录`);
+          await updateLoginButton(true);
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 1500));
+        continue;
       }
+      refreshOk = true;
+      resetApiSigWarm();
+      await updateLoginButton(false);
     } catch (error) {
-      console.warn("登录后刷新签名异常:", error?.message || error);
+      console.warn(`登录后刷新签名异常(attempt=${attempt + 1}):`, error?.message || error);
+      if (attempt === 1) {
+        setStatus("error", `登录成功但无法刷新签名：${error?.message || error}。请再点一次登录`);
+        await updateLoginButton(true);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 1500));
     }
   }
 
