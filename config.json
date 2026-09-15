@@ -5,8 +5,8 @@
   "pollIntervalMs": 5000,
   "topCount": 5,
   "window": {
-    "width": 525,
-    "height": 1080,
+    "width": 540,
+    "height": 960,
     "alwaysOnTop": false,
     "transparent": false
   }

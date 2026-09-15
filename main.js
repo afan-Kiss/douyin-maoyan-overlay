@@ -126,13 +126,20 @@ function loadConfig() {
 function applyWindowSettings(win) {
   if (!win) return;
   const { loadSettings } = getMods().settings;
-  const { resolveWindowSize } = getMods().windowSize;
+  const { resolveWindowSize, ASPECT_RATIO } = getMods().windowSize;
   const overlay = loadSettings();
   const w = overlay.window || {};
+  const liveOutput = w.liveOutput === true;
   const size = resolveWindowSize(w.width, w.height, screen.getDisplayMatching(win.getBounds()), {
-    liveOutput: w.liveOutput === true,
+    liveOutput,
   });
   win.setContentSize(size.width, size.height);
+  if (!liveOutput) {
+    win.setAspectRatio(ASPECT_RATIO || 9 / 16);
+  } else {
+    // liveOutput 固定 1080×1920，解除手动拉伸比例锁
+    win.setAspectRatio(0);
+  }
   win.setAlwaysOnTop(w.alwaysOnTop === true);
   win.webContents.send("window-mode-changed", {
     liveOutput: size.liveOutput === true,
@@ -156,19 +163,20 @@ function focusMainWindow() {
 }
 
 function createWindow({ onReadyToShow } = {}) {
-  const { resolveWindowSize } = getMods().windowSize;
+  const { resolveWindowSize, ASPECT_RATIO, MIN_WIDTH, MIN_HEIGHT } = getMods().windowSize;
   const { confirmUpdateHealth } = getMods().update;
   const config = loadConfig();
   const winCfg = config.window || {};
+  const liveOutput = winCfg.liveOutput === true;
   const size = resolveWindowSize(winCfg.width, winCfg.height, null, {
-    liveOutput: winCfg.liveOutput === true,
+    liveOutput,
   });
 
   mainWindow = new BrowserWindow({
     width: size.width,
     height: size.height,
-    minWidth: 360,
-    minHeight: 400,
+    minWidth: MIN_WIDTH || 360,
+    minHeight: MIN_HEIGHT || 640,
     frame: false,
     autoHideMenuBar: true,
     title: "",
@@ -189,6 +197,9 @@ function createWindow({ onReadyToShow } = {}) {
   });
 
   mainWindow.setContentSize(size.width, size.height);
+  if (!liveOutput) {
+    mainWindow.setAspectRatio(ASPECT_RATIO || 9 / 16);
+  }
   mainWindow.setAlwaysOnTop(winCfg.alwaysOnTop === true);
   mainWindow.setMenu(null);
   mainWindow.setMenuBarVisibility(false);

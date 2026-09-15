@@ -28,6 +28,10 @@ import {
   sessionFontIdentity,
 } from "./dashboard-session.js";
 import { isMapVerified, normalizeFontIdentity, getMapForKeyLoose } from "./font-registry.js";
+import {
+  parseRate,
+  validateNationCrossCheck,
+} from "./dashboard-rank.js";
 import { boxStore } from "./box-store.js";
 import { formatWanForDisplay } from "./box-display.js";
 
@@ -185,7 +189,9 @@ function buildCandidateFromDecoded(decoded, session, fontKey) {
   const movies = (decoded.movies || []).map((m) => ({
     movieId: String(m.movieId),
     name: m.name || "",
+    // rank 唯一来源：dashboard-rank.js（禁止 V2 按 realtime 再排）
     rank: Number(m.rank) || 0,
+    originalRank: Number(m.originalRank) || Number(m.rank) || 0,
     box: resolveEntityBoxDecode(m, fontKey),
     boxRate: m.boxRate || "",
     showCountRate: m.showCountRate || "",
@@ -218,6 +224,8 @@ function buildCandidateFromDecoded(decoded, session, fontKey) {
     responseId: session.responseId,
     businessDate: session.businessDate || String(decoded.calendar?.today || "").slice(0, 10),
     fontKey,
+    rankSource: "dashboard-rank",
+    mapConfidence: fontKey && isMapVerified(fontKey) ? "verified" : fontKey ? "inferred" : "none",
     movies,
     nation,
     calendar: decoded.calendar,
@@ -229,27 +237,298 @@ function buildCandidateFromDecoded(decoded, session, fontKey) {
 }
 
 /**
- * 仅在全部展示影片票房可信解码后重排；部分失败时绝不改 rank。
+ * @deprecated V2 禁止按 realtime box 二次排序；保留空操作以兼容旧测试引用。
+ * 排名唯一真相来源：dashboard-rank.js
  */
 export function rerankCandidateByTrustedBox(candidate) {
-  const movies = candidate?.movies || [];
-  if (!movies.length || !movies.every((m) => m?.box?.ok && Number(m.box.valueWan) > 0)) {
-    return candidate;
+  return candidate;
+}
+
+/**
+ * INFERRED 单片交叉验证。VERIFIED 不走本函数门槛。
+ *
+ * A. movieWan 不得明显大于 nationWan
+ * B. realtime 不得明显大于累计总票房
+ * C. 与 boxRate × nation 交叉校验
+ */
+export function validateInferredMovieBox({
+  movieWan,
+  nationWan,
+  boxRate,
+  sumBoxNum,
+  originalRank,
+  fontKey,
+} = {}) {
+  const wan = Number(movieWan);
+  const nation = Number(nationWan) || 0;
+  const sum = Number(sumBoxNum) || 0;
+  const rate = parseRate(boxRate);
+  let expectedByRateWan = null;
+
+  if (!Number.isFinite(wan) || wan <= 0) {
+    return {
+      ok: false,
+      reason: "inferred_invalid_value",
+      expectedByRateWan: null,
+      movieWan: wan,
+      nationWan: nation,
+      boxRate: rate,
+      sumBoxNum: sum,
+      originalRank: Number(originalRank) || 0,
+      fontKey: String(fontKey || ""),
+    };
   }
-  const sorted = [...movies].sort((a, b) => {
-    const diff = Number(b.box.valueWan) - Number(a.box.valueWan);
-    if (diff !== 0) return diff;
-    return (Number(a.rank) || 0) - (Number(b.rank) || 0);
-  });
+
+  if (nation > 0 && wan > nation * 1.02) {
+    return {
+      ok: false,
+      reason: "inferred_movie_gt_nation",
+      expectedByRateWan: rate > 0 && nation > 0 ? (nation * rate) / 100 : null,
+      movieWan: wan,
+      nationWan: nation,
+      boxRate: rate,
+      sumBoxNum: sum,
+      originalRank: Number(originalRank) || 0,
+      fontKey: String(fontKey || ""),
+    };
+  }
+
+  if (sum > 0 && wan > sum * 1.01) {
+    return {
+      ok: false,
+      reason: "inferred_movie_gt_sum",
+      expectedByRateWan: rate > 0 && nation > 0 ? (nation * rate) / 100 : null,
+      movieWan: wan,
+      nationWan: nation,
+      boxRate: rate,
+      sumBoxNum: sum,
+      originalRank: Number(originalRank) || 0,
+      fontKey: String(fontKey || ""),
+    };
+  }
+
+  if (nation > 0 && rate > 0) {
+    expectedByRateWan = (nation * rate) / 100;
+    const tolerance = Math.max(5, expectedByRateWan * 0.15);
+    if (Math.abs(wan - expectedByRateWan) > tolerance) {
+      return {
+        ok: false,
+        reason: "inferred_box_rate_mismatch",
+        expectedByRateWan,
+        movieWan: wan,
+        nationWan: nation,
+        boxRate: rate,
+        sumBoxNum: sum,
+        originalRank: Number(originalRank) || 0,
+        fontKey: String(fontKey || ""),
+      };
+    }
+  }
+
   return {
-    ...candidate,
-    movies: sorted.map((m, i) => ({ ...m, rank: i + 1 })),
+    ok: true,
+    reason: "ok",
+    expectedByRateWan,
+    movieWan: wan,
+    nationWan: nation,
+    boxRate: rate,
+    sumBoxNum: sum,
+    originalRank: Number(originalRank) || 0,
+    fontKey: String(fontKey || ""),
+  };
+}
+
+/**
+ * INFERRED snapshot 整轮交叉验证。
+ * 任一片或 nation 为 inferred 时强制校验；失败 → 整轮不发布。
+ */
+export function validateInferredCrossCheck(candidate) {
+  const movies = candidate?.movies || [];
+  const nationBox = candidate?.nation?.box;
+  const nationWan = nationBox?.ok ? Number(nationBox.valueWan) || 0 : 0;
+  const nationInferred = nationBox?.reason === "inferred";
+  const hasInferredMovie = movies.some((m) => m?.box?.reason === "inferred");
+  const needsCheck = hasInferredMovie || nationInferred;
+
+  const movieReports = movies.map((m) => {
+    const decodedWan = m?.box?.ok ? Number(m.box.valueWan) : null;
+    const decodeReason = m?.box?.reason || "decode_failed";
+    const base = {
+      movieId: String(m.movieId || ""),
+      name: m.name || "",
+      rank: Number(m.rank) || 0,
+      originalRank: Number(m.originalRank) || Number(m.rank) || 0,
+      sumBoxNum: Number(m.sumBoxNum) || 0,
+      boxRate: m.boxRate || "",
+      decodedWan,
+      decodeReason,
+      expectedByRateWan: null,
+      crossCheckOk: true,
+      crossCheckReason: "skipped_verified",
+    };
+
+    if (!m?.box?.ok) {
+      return {
+        ...base,
+        crossCheckOk: false,
+        crossCheckReason: "decode_not_ok",
+      };
+    }
+
+    // VERIFIED / plain：不强制 boxRate 门槛；仍记录 expected 便于日志
+    if (decodeReason !== "inferred") {
+      const rate = parseRate(m.boxRate);
+      if (nationWan > 0 && rate > 0) {
+        base.expectedByRateWan = (nationWan * rate) / 100;
+      }
+      return base;
+    }
+
+    const check = validateInferredMovieBox({
+      movieWan: decodedWan,
+      nationWan,
+      boxRate: m.boxRate,
+      sumBoxNum: m.sumBoxNum,
+      originalRank: m.originalRank,
+      fontKey: candidate?.fontKey,
+    });
+    return {
+      ...base,
+      expectedByRateWan: check.expectedByRateWan,
+      crossCheckOk: check.ok,
+      crossCheckReason: check.reason,
+    };
+  });
+
+  if (!needsCheck) {
+    return {
+      ok: true,
+      reason: "ok",
+      nationWan,
+      movieReports,
+    };
+  }
+
+  const failedMovies = movieReports.filter((r) => !r.crossCheckOk);
+  if (failedMovies.length) {
+    return {
+      ok: false,
+      reason: "inferred_crosscheck_failed",
+      detail: failedMovies[0].crossCheckReason,
+      nationWan,
+      movieReports,
+      failedMovieIds: failedMovies.map((r) => r.movieId),
+    };
+  }
+
+  // D. TOP5 整体：sum(movieWan) <= nation * 1.05
+  const decodedOk = movies.filter((m) => m?.box?.ok && Number(m.box.valueWan) > 0);
+  const moviesSumWan = decodedOk.reduce((sum, m) => sum + Number(m.box.valueWan), 0);
+  if (nationWan > 0 && moviesSumWan > nationWan * 1.05) {
+    return {
+      ok: false,
+      reason: "inferred_crosscheck_failed",
+      detail: "inferred_top5_sum_gt_nation",
+      nationWan,
+      movieReports,
+      failedMovieIds: [],
+    };
+  }
+
+  // 有 boxRate 的影片，大多数应与 movieWan/nationWan 对应
+  const withRate = decodedOk.filter((m) => parseRate(m.boxRate) > 0 && nationWan > 0);
+  if (withRate.length >= 2) {
+    let matchCount = 0;
+    for (const m of withRate) {
+      const expected = (nationWan * parseRate(m.boxRate)) / 100;
+      const tolerance = Math.max(5, expected * 0.15);
+      if (Math.abs(Number(m.box.valueWan) - expected) <= tolerance) matchCount += 1;
+    }
+    if (matchCount / withRate.length < 0.6) {
+      return {
+        ok: false,
+        reason: "inferred_crosscheck_failed",
+        detail: "inferred_rate_majority_mismatch",
+        nationWan,
+        movieReports,
+        failedMovieIds: [],
+      };
+    }
+  }
+
+  // nation 也是 INFERRED：复用 validateNationCrossCheck，必要时用 TOP5+boxRate 反推
+  if (nationInferred && nationWan > 0) {
+    const top1 = [...decodedOk].sort((a, b) => (Number(a.rank) || 0) - (Number(b.rank) || 0))[0];
+    const cross = validateNationCrossCheck(nationWan, {
+      top1BoxWan: Number(top1?.box?.valueWan) || 0,
+      top1BoxRate: parseRate(top1?.boxRate),
+      moviesSumWan,
+    });
+    if (!cross.ok) {
+      // 尝试用有 boxRate 的影片反推 nation 范围，看解码 nation 是否落在合理区间
+      const implied = [];
+      for (const m of withRate) {
+        const rate = parseRate(m.boxRate);
+        const wan = Number(m.box.valueWan);
+        if (rate > 0 && wan > 0) implied.push((wan / rate) * 100);
+      }
+      if (implied.length) {
+        const minImplied = Math.min(...implied) * 0.85;
+        const maxImplied = Math.max(...implied) * 1.15;
+        if (nationWan < minImplied || nationWan > maxImplied) {
+          return {
+            ok: false,
+            reason: "inferred_crosscheck_failed",
+            detail: "inferred_nation_mismatch",
+            nationWan,
+            movieReports,
+            failedMovieIds: [],
+            nationReasons: cross.reasons,
+          };
+        }
+      } else {
+        return {
+          ok: false,
+          reason: "inferred_crosscheck_failed",
+          detail: "inferred_nation_mismatch",
+          nationWan,
+          movieReports,
+          failedMovieIds: [],
+          nationReasons: cross.reasons,
+        };
+      }
+    }
+  }
+
+  // nation 缺失但影片是 inferred：若多片有 boxRate，要求互相能推出一致 nation
+  if (!nationWan && hasInferredMovie && withRate.length >= 2) {
+    const implied = withRate.map((m) => (Number(m.box.valueWan) / parseRate(m.boxRate)) * 100);
+    const minI = Math.min(...implied);
+    const maxI = Math.max(...implied);
+    if (maxI > minI * 1.25) {
+      return {
+        ok: false,
+        reason: "inferred_crosscheck_failed",
+        detail: "inferred_nation_unresolvable",
+        nationWan: 0,
+        movieReports,
+        failedMovieIds: [],
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    reason: "ok",
+    nationWan,
+    movieReports,
   };
 }
 
 /**
  * 原子门控：本轮展示影片必须全部有可信 current box；
  * 已发布 TOP N 后，临时少片不得缩榜。
+ * INFERRED 必须通过业务交叉验证。
  */
 export function validateCandidate(candidate, store = boxStore) {
   const movies = candidate?.movies || [];
@@ -292,12 +571,28 @@ export function validateCandidate(candidate, store = boxStore) {
     };
   }
 
+  const inferredGate = validateInferredCrossCheck(candidate);
+  if (!inferredGate.ok) {
+    return {
+      ok: false,
+      reason: inferredGate.reason || "inferred_crosscheck_failed",
+      detail: inferredGate.detail || "",
+      moviesTotal,
+      moviesDecoded,
+      failedMovieIds: inferredGate.failedMovieIds || [],
+      nationWan: inferredGate.nationWan,
+      movieReports: inferredGate.movieReports,
+    };
+  }
+
   return {
     ok: true,
     reason: "ok",
     moviesTotal,
     moviesDecoded,
     failedMovieIds: [],
+    nationWan: inferredGate.nationWan,
+    movieReports: inferredGate.movieReports,
   };
 }
 
@@ -542,14 +837,19 @@ export function createBoxPipeline(options = {}) {
           pollId: thisPoll,
           businessDate,
           fontKey,
+          rankSource: candidate.rankSource || "dashboard-rank",
+          mapConfidence: candidate.mapConfidence || "",
+          nationWan: gate.nationWan ?? candidate.nation?.box?.valueWan ?? null,
           fetchMs,
           mapMs,
           decodeMs,
           moviesTotal: gate.moviesTotal ?? moviesTotal,
           moviesDecoded: gate.moviesDecoded ?? moviesDecoded,
           failedMovieIds: gate.failedMovieIds || [],
+          movies: gate.movieReports || [],
           publish: false,
           rejectReason: gate.reason,
+          rejectDetail: gate.detail || "",
         });
         return {
           ok: false,
@@ -560,19 +860,22 @@ export function createBoxPipeline(options = {}) {
         };
       }
 
-      // 仅完整可信快照才允许重排；票房/排名/冠军同属一轮
-      candidate = rerankCandidateByTrustedBox(candidate);
-
+      // rank 已由 dashboard-rank.js 确定；禁止按 realtime 二次排序
       const committed = store.commit(candidate);
+      const inferredLog = validateInferredCrossCheck(candidate);
       console.log("[BOX_V2]", {
         pollId: thisPoll,
         businessDate,
         fontKey,
+        rankSource: candidate.rankSource || "dashboard-rank",
+        mapConfidence: candidate.mapConfidence || "",
+        nationWan: inferredLog.nationWan ?? candidate.nation?.box?.valueWan ?? null,
         fetchMs,
         mapMs,
         decodeMs,
         moviesTotal,
         moviesDecoded,
+        movies: inferredLog.movieReports || [],
         publish: committed.ok,
         rejectReason: committed.ok ? "" : committed.reason,
       });
@@ -668,18 +971,21 @@ export function createBoxPipeline(options = {}) {
   };
 }
 
-/** 纯函数测试用：走与生产相同的 validate → rerank → commit */
+/** 纯函数测试用：走与生产相同的 validate → commit（不再按 realtime 重排） */
 export function simulateBoxRounds(rounds, store = boxStore) {
   const results = [];
   for (const round of rounds) {
-    let candidate = {
+    const candidate = {
       responseId: round.responseId || results.length + 1,
       businessDate: round.businessDate || "2026-09-15",
       fontKey: round.fontKey || "fontA",
+      rankSource: "dashboard-rank",
+      mapConfidence: round.mapConfidence || "verified",
       movies: (round.movies || []).map((m, i) => ({
         movieId: String(m.movieId || i + 1),
         name: m.name || `M${i + 1}`,
         rank: m.rank || i + 1,
+        originalRank: m.originalRank || m.rank || i + 1,
         box:
           m.box === null || m.decodeFail
             ? makeDecodeResult({ ok: false, reason: m.reason || "decode_fail" })
@@ -694,6 +1000,8 @@ export function simulateBoxRounds(rounds, store = boxStore) {
         boxRate: m.boxRate || "",
         showCountRate: m.showCountRate || "",
         avgShowView: m.avgShowView || "",
+        sumBoxDesc: m.sumBoxDesc || "",
+        sumBoxNum: m.sumBoxNum || 0,
       })),
       nation: round.nation
         ? {
@@ -704,7 +1012,7 @@ export function simulateBoxRounds(rounds, store = boxStore) {
                     ok: true,
                     valueWan: round.nation.box,
                     text: String(round.nation.box),
-                    reason: "verified",
+                    reason: round.nation.reason || "verified",
                   }),
             showCount: round.nation.showCount || "",
             views: round.nation.views || "",
@@ -732,7 +1040,6 @@ export function simulateBoxRounds(rounds, store = boxStore) {
       continue;
     }
 
-    candidate = rerankCandidateByTrustedBox(candidate);
     const committed = store.commit(candidate);
     results.push({
       committed,

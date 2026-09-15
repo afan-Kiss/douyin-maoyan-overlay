@@ -30,6 +30,7 @@ function emptyMovie(id, meta = {}) {
     movieId: String(id || ""),
     name: meta.name || "",
     rank: meta.rank || 0,
+    originalRank: meta.originalRank || meta.rank || 0,
     displayBoxWan: 0,
     lastValidBoxWan: 0,
     boxRate: "",
@@ -270,6 +271,7 @@ export function createBoxStore(options = {}) {
         movieId: id,
         name: m.name || prev.name,
         rank: Number(m.rank) || prev.rank,
+        originalRank: Number(m.originalRank) || prev.originalRank || Number(m.rank) || prev.rank,
         raw: m.raw || prev.raw,
       };
       next = mergeNonEmpty(next, m, DASHBOARD_FIELDS);

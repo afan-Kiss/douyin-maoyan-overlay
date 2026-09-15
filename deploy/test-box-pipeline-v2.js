@@ -249,7 +249,7 @@ async function main() {
         {
           businessDate: "2026-09-15",
           movies: [
-            // B 票房超过 A → 可信快照重排后 B 为冠军
+    // dashboard-rank 已给出正式 rank；Store 只继承，不按票房重排
             { movieId: "B", name: "NewChamp", rank: 1, box: 520 },
             { movieId: "A", name: "OldChamp", rank: 2, box: 400 },
           ],
