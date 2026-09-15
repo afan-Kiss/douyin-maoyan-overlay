@@ -418,14 +418,21 @@ function assignByHungarian(puaGlyphs, costMatrix, options = {}) {
   };
 }
 
-/** 交叉校验唯一用正式图；多候选/超时时取已有候选作临时图，供气泡 loose 解码 */
-function pickMapFromFingerprints(search, uniqueReason, provisionalReason) {
+/** 交叉校验唯一用正式图；多候选时按 boxRate×nation 误差选最优，避免“随便取第一个”导致错数。 */
+function pickMapFromFingerprints(search, uniqueReason, provisionalReason, crossContext = null) {
   const size = search?.fingerprints?.size || 0;
   if (size < 1) return null;
-  const entry = search.fingerprints.values().next().value;
-  if (!entry?.map) return null;
   const timedOut = search.timeout === true;
   const unique = size === 1 && !timedOut;
+
+  let entry = null;
+  if (unique || !crossContext) {
+    entry = search.fingerprints.values().next().value;
+  } else {
+    entry = pickBestFingerprintByBoxRate(search.fingerprints, crossContext);
+  }
+  if (!entry?.map) return null;
+
   return {
     ok: true,
     reason: unique ? uniqueReason : provisionalReason,
@@ -440,6 +447,39 @@ function pickMapFromFingerprints(search, uniqueReason, provisionalReason) {
   };
 }
 
+function pickBestFingerprintByBoxRate(fingerprints, crossContext) {
+  let best = null;
+  let bestScore = Infinity;
+  for (const entry of fingerprints.values()) {
+    const decoded = entry?.decoded;
+    if (!decoded?.nation?.text) continue;
+    const nationWan = parseFloat(String(decoded.nation.text).replace(/[^\d.]/g, ""));
+    if (!(nationWan > 0)) continue;
+    let score = 0;
+    let matched = 0;
+    for (const movie of crossContext.movies || []) {
+      const rate = Number(movie.boxRateNum) || parseFloat(String(movie.boxRate || "").replace("%", "")) || 0;
+      if (!(rate > 0)) continue;
+      const key = `movie-${movie.rank || ""}`;
+      const text = decoded[key]?.text;
+      if (!text) continue;
+      const wan = parseFloat(String(text).replace(/[^\d.]/g, ""));
+      if (!(wan > 0)) continue;
+      const expected = (nationWan * rate) / 100;
+      const rel = Math.abs(wan - expected) / Math.max(expected, 1);
+      score += rel;
+      matched += 1;
+    }
+    if (matched < 2) continue;
+    score /= matched;
+    if (score < bestScore) {
+      bestScore = score;
+      best = entry;
+    }
+  }
+  return best || fingerprints.values().next().value;
+}
+
 function resolveOutlineAmbiguityWithCrossCheck(puaGlyphs, digitTemplates, crossContext, helpers = {}, budget = {}) {
   if (puaGlyphs.length !== 10 || !crossContext?.nationHtml) {
     return { ok: false, reason: "cross_check_missing_context", map: null };
@@ -451,6 +491,7 @@ function resolveOutlineAmbiguityWithCrossCheck(puaGlyphs, digitTemplates, crossC
     search.timeout
       ? "outline_cross_check_timeout_provisional"
       : "outline_cross_check_ambiguous_provisional",
+    crossContext,
   );
   if (picked) return picked;
   if (search.timeout) {
@@ -663,7 +704,7 @@ export function branchAndBoundCrossCheck(puaGlyphs, crossContext = {}, helpers =
 
   const dfs = (depth) => {
     if (deadline()) return;
-    if (fingerprints.size > 1) return;
+    // 不再在 fingerprints.size>1 时提前停：多候选时要继续搜，才能按 boxRate 选最优。
     if (depth === otherIdx.length) {
       perf.candidates_examined += 1;
       const map = mapFromAssignment(puaGlyphs, digitAssign);
@@ -684,7 +725,7 @@ export function branchAndBoundCrossCheck(puaGlyphs, crossContext = {}, helpers =
       used.add(digit);
       dfs(depth + 1);
       used.delete(digit);
-      if (perf.timeout || fingerprints.size > 1) return;
+      if (perf.timeout) return;
     }
   };
 
@@ -944,6 +985,7 @@ export function resolveMapByCrossCheckDisambiguation(puaGlyphs, crossContext = {
     search.timeout
       ? "cross_check_timeout_provisional"
       : "cross_check_ambiguous_provisional",
+    crossContext,
   );
   if (picked) {
     return {

@@ -17,6 +17,7 @@ import {
   isUntrustedBoxDecode as rankUntrustedBoxDecode,
   isPuaCodePoint,
   iterMarkupCodePoints,
+  decodeBoxNumNode,
 } from "./dashboard-rank.js";
 import {
   ensurePuaMap,
@@ -349,20 +350,30 @@ export function getActivePuaMapState() {
   };
 }
 
-export function buildCrossContextFromRaw(raw) {
+export function buildCrossContextFromRaw(raw, options = {}) {
   const nation = raw?.movieList?.nationBoxInfo ?? {};
-  const list = raw?.movieList?.list ?? [];
+  const fullList = raw?.movieList?.list ?? [];
+  // 字体交叉校验只用当日实时榜前 N：全量 60+ 会拖垮 DFS，导致 mapping_timeout → 永久 map_not_ready。
+  const limitRaw = Number(options.topCount);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.max(1, limitRaw), 20) : 10;
+  const list = fullList.slice(0, limit);
+  // 默认不带 split：分账 HTML 会成倍放大 DFS 校验成本，且实时票房/大盘已足够约束映射。
+  const includeSplit = options.includeSplit === true;
   return {
     nationHtml: nation.nationBoxSplitUnit?.num || "",
     nationUnit: normalizeUnit(nation.nationBoxSplitUnit?.unit),
-    nationSplitHtml: nation.nationSplitBoxSplitUnit?.num || "",
-    nationSplitUnit: normalizeUnit(nation.nationSplitBoxSplitUnit?.unit),
+    nationSplitHtml: includeSplit ? nation.nationSplitBoxSplitUnit?.num || "" : "",
+    nationSplitUnit: includeSplit
+      ? normalizeUnit(nation.nationSplitBoxSplitUnit?.unit)
+      : normalizeUnit(nation.nationBoxSplitUnit?.unit),
     movies: list.map((item, index) => ({
       rank: index + 1,
       todayBoxHtml: item.boxSplitUnit?.num || "",
       todayUnit: normalizeUnit(item.boxSplitUnit?.unit),
-      splitBoxHtml: item.splitBoxSplitUnit?.num || "",
-      splitUnit: normalizeUnit(item.splitBoxSplitUnit?.unit),
+      splitBoxHtml: includeSplit ? item.splitBoxSplitUnit?.num || "" : "",
+      splitUnit: includeSplit
+        ? normalizeUnit(item.splitBoxSplitUnit?.unit)
+        : normalizeUnit(item.boxSplitUnit?.unit),
       boxRate: item.boxRate || "",
       boxRateNum: parseRate(item.boxRate),
     })),
@@ -426,11 +437,15 @@ export async function scheduleDashboardPuaMap(raw, options = {}) {
     return { ok: false, reason: "no_font_style" };
   }
   const { schedulePuaMapBuild } = await import("./font-pipeline.js");
-  const built = await schedulePuaMapBuild(normalizeFontCss(fontStyle), buildCrossContextFromRaw(raw), {
-    force: options.force === true,
-    budget: options.budget,
-    simulateDelayMs: options.simulateDelayMs || 0,
-  });
+  const built = await schedulePuaMapBuild(
+    normalizeFontCss(fontStyle),
+    buildCrossContextFromRaw(raw, { topCount: options.topCount || 10 }),
+    {
+      force: options.force === true,
+      budget: options.budget,
+      simulateDelayMs: options.simulateDelayMs || 0,
+    },
+  );
   let mapBuilt = built;
   if (built?.map && Array.isArray(built.map)) {
     mapBuilt = { ...built, map: new Map(built.map) };
@@ -450,7 +465,7 @@ export async function loadPuaMapForDashboard(raw, options = {}) {
   }
   const built = await ensurePuaMap(normalizeFontCss(fontStyle), {
     force: options.force === true,
-    crossContext: buildCrossContextFromRaw(raw),
+    crossContext: buildCrossContextFromRaw(raw, { topCount: options.topCount || 10 }),
     helpers: puaMapHelpers,
     fontBuffer: options.fontBuffer,
   });
@@ -1732,26 +1747,56 @@ function logDashboardRankDebug(movies) {
   }
 }
 
+/**
+ * 结构阶段明文票房：不依赖字体 mapping。
+ * PUA 编码字段保持 ENCODED / 0，等 decodeDashboardFields 再解。
+ */
+function resolveStructuralPlainBox(todayBoxHtml, todayUnit, plausibility = {}) {
+  const encodedBox = isEncodedBoxHtml(todayBoxHtml);
+  if (encodedBox) {
+    return { todayBox: 0, todayBoxText: "--", decodeStatus: DECODE_STATUS.ENCODED, decodeVerified: false };
+  }
+  const todayRaw = decodeBoxNumNode(todayBoxHtml);
+  const decodeStatus = resolveDecodeStatus(todayBoxHtml, todayRaw, false, {
+    todayUnit,
+    ...plausibility,
+  });
+  if (decodeStatus !== DECODE_STATUS.OK) {
+    return { todayBox: 0, todayBoxText: "--", decodeStatus, decodeVerified: false };
+  }
+  const todayBox = resolveTodayBox(todayRaw, todayUnit);
+  if (todayBox <= 0) {
+    return { todayBox: 0, todayBoxText: "--", decodeStatus: DECODE_STATUS.FAILED, decodeVerified: false };
+  }
+  return {
+    todayBox,
+    todayBoxText: todayRaw,
+    decodeStatus: DECODE_STATUS.OK,
+    decodeVerified: true,
+  };
+}
+
 function mapDashboardItemStructure(item, index) {
   const info = item.movieInfo || {};
   const todayBoxHtml = item.boxSplitUnit?.num || "";
   const todayUnit = normalizeUnit(item.boxSplitUnit?.unit);
-  const encodedBox = isEncodedBoxHtml(todayBoxHtml);
   const splitHtml = item.splitBoxSplitUnit?.num || "";
   const splitUnit = normalizeUnit(item.splitBoxSplitUnit?.unit);
+  const sumBoxNum = resolveMaoyanSumBoxWan(item);
+  const plain = resolveStructuralPlainBox(todayBoxHtml, todayUnit, { sumBoxNumWan: sumBoxNum });
 
   return {
     _apiIndex: index,
     originalRank: index + 1,
-    decodeStatus: encodedBox ? DECODE_STATUS.ENCODED : DECODE_STATUS.FAILED,
+    decodeStatus: plain.decodeStatus,
     movieId: info.movieId ?? `unknown-${index}`,
     name: info.movieName || "未知",
     releaseInfo: info.releaseInfo || "",
     releaseDate: info.releaseDate || info.showDate || "",
-    todayBox: 0,
+    todayBox: plain.todayBox,
     todayBoxHtml,
     todayUnit,
-    todayBoxText: "--",
+    todayBoxText: plain.todayBoxText,
     boxRate: item.boxRate || "--",
     boxRateNum: parseRate(item.boxRate),
     splitBoxRate: item.splitBoxRate || "--",
@@ -1765,9 +1810,9 @@ function mapDashboardItemStructure(item, index) {
     avgSeatView: item.avgSeatView || "--",
     sumBoxDesc: item.sumBoxDesc || "--",
     sumSplitBoxDesc: item.sumSplitBoxDesc || "--",
-    sumBoxNum: resolveMaoyanSumBoxWan(item),
+    sumBoxNum,
     listItem: item,
-    decodeVerified: false,
+    decodeVerified: plain.decodeVerified,
   };
 }
 
@@ -1907,8 +1952,9 @@ export function parseDashboardStructure(raw, topCount = 5) {
 
   const nationBoxHtml = nation.nationBoxSplitUnit?.num || "";
   const nationUnit = normalizeUnit(nation.nationBoxSplitUnit?.unit);
-  const nationEncoded = isEncodedBoxHtml(nationBoxHtml);
-  const nationDecodeStatus = nationEncoded ? DECODE_STATUS.ENCODED : DECODE_STATUS.FAILED;
+  const nationPlain = resolveStructuralPlainBox(nationBoxHtml, nationUnit, {
+    absurdMaxWan: ABSURD_BOX_WAN_MAX,
+  });
 
   const fontUrlKey = resolveUrlKey(raw?.fontStyle || "");
   // 结构阶段还没有内容 sha256，但必须把“本轮字体身份”带到每条记录上。
@@ -1930,9 +1976,9 @@ export function parseDashboardStructure(raw, topCount = 5) {
       title: nation.title || "实时大盘",
       todayBoxHtml: nationBoxHtml,
       todayUnit: nationUnit,
-      todayBoxText: "--",
-      todayBox: 0,
-      decodeStatus: nationDecodeStatus,
+      todayBoxText: nationPlain.todayBoxText,
+      todayBox: nationPlain.todayBox,
+      decodeStatus: nationPlain.decodeStatus,
       splitBoxHtml: nationSplitHtml,
       splitBoxText: "--",
       splitBoxUnit: nationSplitUnit,
@@ -1943,7 +1989,7 @@ export function parseDashboardStructure(raw, topCount = 5) {
       seatValue: seatMetric.value,
       seatRaw: seatMetric.seatRaw,
       seatSource: seatMetric.source,
-      decodeVerified: false,
+      decodeVerified: nationPlain.decodeVerified,
       fontMappingVersion: fontUrlKey,
     },
     calendar: {
@@ -1960,6 +2006,8 @@ export function parseDashboardStructure(raw, topCount = 5) {
 }
 
 export function parseDashboard(raw, topCount = 5) {
+  // 结构阶段已完成明文 parseBoxNum；PUA 无 mapping 时保持 ENCODED/0。
+  // 有 VERIFIED map 时再走 decodeDashboardFields（不影响 V2 session 路径）。
   const structural = parseDashboardStructure(raw, topCount);
   const contentKey = getPublishedState().contentKey;
   if (contentKey && isMapVerified(contentKey)) {

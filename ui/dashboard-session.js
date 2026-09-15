@@ -75,8 +75,14 @@ export async function prepareSessionFont(session) {
 
 export async function buildSessionPuaMap(session, options = {}) {
   const { schedulePuaMapBuild } = await import("./font-pipeline.js");
-  const crossContext = buildCrossContextFromRaw(session.raw);
-  const built = await schedulePuaMapBuild(session.fontStyle, crossContext, options);
+  const topCount = Number(options.topCount) > 0 ? Number(options.topCount) : session.parsed?.movies?.length || 5;
+  const crossContext = buildCrossContextFromRaw(session.raw, { topCount: Math.max(topCount, 5) });
+  const budget = {
+    timeoutMs: 15000,
+    maxExamined: 200000,
+    ...(options.budget || {}),
+  };
+  const built = await schedulePuaMapBuild(session.fontStyle, crossContext, { ...options, budget });
   const contentKey = built?.versionKey || session.fontContentKey || session.fontUrlKey;
   session.fontContentKey = contentKey;
   session.parsed.fontContentKey = contentKey;

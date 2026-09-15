@@ -81,8 +81,10 @@ async function main() {
 
   const win = new BrowserWindow({
     width: 540,
-    height: 1080,
+    height: 960,
     show: true,
+    frame: false,
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(ROOT, "preload.js"),
       contextIsolation: true,
@@ -98,6 +100,7 @@ async function main() {
 
   const boxV2Events = [];
   const samples = [];
+  const rejectReasons = Object.create(null);
   let flashDashCount = 0;
   let champMissingCount = 0;
   let top5MissingCount = 0;
@@ -105,6 +108,8 @@ async function main() {
   let rejectCount = 0;
   let firstGoodAt = 0;
   let maxCards = 0;
+  let wrongBubbleCount = 0;
+  const inferredFails = [];
 
   win.webContents.on("console-message", (_e, _level, message) => {
     const text = String(message || "");
@@ -180,15 +185,40 @@ async function main() {
         const el = card.querySelector('[data-metric="dailyBox"] .metric__value');
         return (el?.textContent || "").trim();
       });
+      const top5 = cards.slice(0, 5).map((card, idx) => {
+        const name = (card.querySelector(".race-card__title")?.textContent || "").trim();
+        const daily =
+          (card.querySelector('[data-metric="dailyBox"] .metric__value')?.textContent || "").trim();
+        const sum =
+          (card.querySelector('[data-metric="sumBoxDesc"] .metric__value')?.textContent || "").trim();
+        const rate =
+          (card.querySelector('[data-metric="boxRate"] .metric__value')?.textContent || "").trim();
+        const rankText =
+          (card.querySelector(".race-card__rank")?.textContent || "").replace(/\D+/g, "") ||
+          String(idx + 1);
+        return {
+          rank: Number(rankText) || idx + 1,
+          movieId: card.dataset.movieId || "",
+          name,
+          realtime: daily,
+          sumBoxDesc: sum,
+          boxRate: rate,
+        };
+      });
       const events = window.__boxV2Events || [];
       window.__boxV2Events = [];
+      const bubbles = [...document.querySelectorAll(".race-card__delta-bubble, #nation-delta")]
+        .map((el) => (el.textContent || "").trim())
+        .filter(Boolean);
       return {
         at: Date.now(),
         cardCount: cards.length,
         dailies,
+        top5,
         champ: (document.getElementById("champ-box")?.textContent || "").trim(),
         nation: (document.getElementById("nation-box")?.textContent || "").trim(),
         hasData: document.body.classList.contains("is-ready"),
+        bubbles,
         events,
       };
     })()`);
@@ -201,7 +231,43 @@ async function main() {
     for (const ev of snap.events || []) {
       boxV2Events.push(ev);
       if (ev.publish === true) publishCount += 1;
-      if (ev.publish === false) rejectCount += 1;
+      if (ev.publish === false) {
+        rejectCount += 1;
+        const reason = String(ev.rejectReason || ev.reason || "unknown");
+        rejectReasons[reason] = (rejectReasons[reason] || 0) + 1;
+        if (reason === "inferred_crosscheck_failed") {
+          for (const m of ev.movies || []) {
+            if (m && m.crossCheckOk === false) {
+              inferredFails.push({
+                at: ev.at || Date.now(),
+                pollId: ev.pollId,
+                movieId: m.movieId,
+                name: m.name,
+                decodedWan: m.decodedWan,
+                nationWan: ev.nationWan,
+                boxRate: m.boxRate,
+                expectedByRateWan: m.expectedByRateWan,
+                difference:
+                  m.expectedByRateWan != null && m.decodedWan != null
+                    ? Number(m.decodedWan) - Number(m.expectedByRateWan)
+                    : null,
+                mapConfidence: ev.mapConfidence,
+                crossCheckReason: m.crossCheckReason,
+              });
+            }
+          }
+          if (!(ev.movies || []).some((m) => m && m.crossCheckOk === false)) {
+            inferredFails.push({
+              at: ev.at || Date.now(),
+              pollId: ev.pollId,
+              detail: ev.detail || ev.rejectReason,
+              nationWan: ev.nationWan,
+              mapConfidence: ev.mapConfidence,
+              movies: (ev.movies || []).slice(0, 5),
+            });
+          }
+        }
+      }
     }
 
     const emptyDaily = (snap.dailies || []).filter((t) => isEmptyBox(t)).length;
@@ -219,11 +285,21 @@ async function main() {
       if (maxCards >= 5 && snap.cardCount < 5) top5MissingCount += 1;
     }
 
+    const badBubbles = (snap.bubbles || []).filter((t) => {
+      const s = String(t || "").trim();
+      if (!s) return false;
+      if (s.includes("--")) return true;
+      if (/^\+\s*0/.test(s)) return true;
+      return false;
+    });
+    if (badBubbles.length) wrongBubbleCount += 1;
+
     samples.push({
       at: snap.at,
       elapsedSec: Math.round((Date.now() - started) / 1000),
       cardCount: snap.cardCount,
       dailies: snap.dailies,
+      top5: snap.top5 || [],
       champ: snap.champ,
       nation: snap.nation,
       emptyDaily,
@@ -232,19 +308,30 @@ async function main() {
       nationEmpty,
       publishCount,
       rejectCount,
+      bubbles: snap.bubbles || [],
     });
 
     console.log("[SOAK_SAMPLE]", {
-      ...samples[samples.length - 1],
+      elapsedSec: samples[samples.length - 1].elapsedSec,
+      cardCount: snap.cardCount,
+      champ: snap.champ,
+      nation: snap.nation,
+      top5: snap.top5,
+      publishCount,
+      rejectCount,
       lastRejects: (snap.events || [])
         .filter((e) => e.publish === false)
         .map((e) => e.rejectReason || e.reason || "?")
         .slice(-3),
       lastPublish: (snap.events || []).some((e) => e.publish === true),
+      lastRankSource: (snap.events || []).map((e) => e.rankSource).filter(Boolean).slice(-1)[0] || "",
     });
     await delay(INTERVAL_MS);
   }
 
+  const totalGate = publishCount + rejectCount;
+  const publishRate = totalGate > 0 ? publishCount / totalGate : 0;
+  const rankSources = [...new Set(boxV2Events.map((e) => e.rankSource).filter(Boolean))];
   const report = {
     at: new Date().toISOString(),
     observeMs: OBSERVE_MS,
@@ -253,13 +340,20 @@ async function main() {
     serviceReady: Boolean(service?.ready || maoyan.getApiStatus()?.ready),
     publishCount,
     rejectCount,
+    publishRate,
+    rejectReasons,
+    inferredFailCount: inferredFails.length,
+    inferredFails: inferredFails.slice(0, 40),
     flashDashCount,
     champMissingCount,
     top5MissingCount,
+    wrongBubbleCount,
     firstGoodAt,
     maxCards,
     sampleCount: samples.length,
     lastSample: samples[samples.length - 1] || null,
+    lastTop5: samples[samples.length - 1]?.top5 || [],
+    rankSources,
     boxV2EventCount: boxV2Events.length,
     recentBoxV2: boxV2Events.slice(-30),
     ok:
@@ -267,13 +361,23 @@ async function main() {
       flashDashCount === 0 &&
       champMissingCount === 0 &&
       top5MissingCount === 0 &&
-      publishCount > 0,
+      publishCount > 0 &&
+      rankSources.every((s) => s === "dashboard-rank"),
   };
 
   const outFile = path.join(OUT_DIR, `soak-electron-${Date.now()}.json`);
   fs.writeFileSync(
     outFile,
-    JSON.stringify({ report, samples: samples.slice(-80), boxV2Events: boxV2Events.slice(-300) }, null, 2),
+    JSON.stringify(
+      {
+        report,
+        samples: samples.slice(-80),
+        boxV2Events: boxV2Events.slice(-300),
+        inferredFails: inferredFails.slice(0, 80),
+      },
+      null,
+      2,
+    ),
   );
   console.log("[SOAK_REPORT]", JSON.stringify(report, null, 2));
   console.log("[SOAK] wrote", outFile);

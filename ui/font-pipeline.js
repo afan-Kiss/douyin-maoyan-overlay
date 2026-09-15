@@ -220,6 +220,7 @@ export async function schedulePuaMapBuild(fontStyle, crossContext, options = {})
           crossContext,
           helpers: puaMapHelpers,
           fontBuffer: buffer,
+          budget: options.budget || {},
         });
         if (cached?.ok && cached.map && cached.confidence === MAP_CONFIDENCE.VERIFIED) {
           clearFailure(vk);

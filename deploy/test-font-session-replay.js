@@ -64,7 +64,7 @@ async function main() {
     assert.equal(reg.normalizeFontIdentity("mtsi:abc12345"), "url:abc12345");
   }
 
-  // 4. 结构解析不依赖映射
+  // 4. 结构解析不依赖映射：明文直接 parseBoxNum；PUA 无 map 保持 ENCODED/0
   {
     const raw = {
       calendar: { today: "2026-09-15" },
@@ -79,14 +79,30 @@ async function main() {
             movieInfo: { movieId: 1, movieName: "测试片" },
             boxSplitUnit: { num: "10.5", unit: "万" },
             boxRate: "12%",
+            sumBoxDesc: "1亿",
+          },
+          {
+            movieInfo: { movieId: 2, movieName: "编码片" },
+            boxSplitUnit: { num: "\uE6D5\uE6D6", unit: "万" },
+            boxRate: "8%",
+            sumBoxDesc: "2亿",
           },
         ],
       },
     };
     const structural = api.parseDashboardStructure(raw, 5);
-    assert.equal(structural.nation.todayBox, 0);
-    assert.equal(structural.movies[0].name, "测试片");
-    assert.equal(structural.movies[0].todayBoxText, "--");
+    assert.equal(structural.nation.todayBox, 123.4, "plain nation needs no font map");
+    assert.equal(structural.nation.todayBoxText, "123.4");
+    assert.equal(structural.nation.decodeStatus, "ok");
+    const plainMovie = structural.movies.find((m) => m.movieId === 1);
+    const encodedMovie = structural.movies.find((m) => m.movieId === 2);
+    assert.equal(plainMovie.name, "测试片");
+    assert.equal(plainMovie.todayBox, 10.5);
+    assert.equal(plainMovie.todayBoxText, "10.5");
+    assert.equal(plainMovie.decodeStatus, "ok");
+    assert.equal(encodedMovie.decodeStatus, "encoded");
+    assert.equal(encodedMovie.todayBox, 0);
+    assert.equal(encodedMovie.todayBoxText, "--");
   }
 
   // 5. scheduleDashboardPuaMap 不直接 apply（Node 无 document 时跳过 Worker）
