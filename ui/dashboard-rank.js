@@ -191,10 +191,20 @@ function normalizeUnit(unit) {
 
 /**
  * 累计总票房（万）：只取猫眼接口真实字段。
- * 优先数字字段，否则解析 sumBoxDesc（如 "23.35亿"）。
- * 禁止估算、禁止用实时票房/占比反推。
+ * 优先 sumBoxDesc / sumBoxInfoDesc（带「万/亿」），与专业版展示一致。
+ * 数字字段仅在 desc 缺失时回退；禁止估算、禁止用实时票房/占比反推。
  */
 export function resolveMaoyanSumBoxWan(item = {}) {
+  const desc = String(item.sumBoxDesc || item.sumBoxInfoDesc || "").trim();
+  if (desc && desc !== "--" && desc !== "-") {
+    // 累计字段若被反爬编码，本函数不猜数（交由上层保留旧值）
+    if (containsEncodedBoxMarkup(desc)) return 0;
+    if (desc.includes("亿") || desc.includes("万")) {
+      const fromDesc = parseBoxNum(desc);
+      if (fromDesc > 0) return fromDesc;
+    }
+  }
+
   const numericCandidates = [
     item.sumBox,
     item.sumBoxInfo,
@@ -205,13 +215,85 @@ export function resolveMaoyanSumBoxWan(item = {}) {
     if (raw == null || raw === "") continue;
     if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) {
       // 猫眼偶发返回「元」量级的大整数，统一到「万」
-      return raw >= 1000000 ? raw / 10000 : raw;
+      // 阈值：>=1e7 元（≥1000万）才按元缩放，避免把「万」量级误除
+      if (raw >= 10_000_000) return raw / 10000;
+      return raw;
     }
-    const parsed = parseBoxNum(String(raw));
+    const text = String(raw).trim();
+    if (!text || containsEncodedBoxMarkup(text)) continue;
+    const parsed = parseBoxNum(text);
     if (parsed > 0) return parsed;
   }
-  const desc = item.sumBoxDesc || item.sumBoxInfoDesc || "";
-  return parseBoxNum(desc);
+
+  if (desc && desc !== "--" && desc !== "-" && !containsEncodedBoxMarkup(desc)) {
+    const fromPlain = parseBoxNum(desc, "万");
+    if (fromPlain > 0) return fromPlain;
+  }
+  return 0;
+}
+
+/**
+ * 累计票房稳定性校验（不改排序算法，只过滤异常值）。
+ * 异常时返回 prev，避免污染排名与展示。
+ */
+export function stabilizeSumBoxWan(nextWan, options = {}) {
+  const next = Number(nextWan) || 0;
+  const prev = Number(options.prevWan) || 0;
+  const todayBox = Number(options.todayBoxWan) || 0;
+  const rawDesc = String(options.rawDesc || "").trim();
+
+  if (!(next > 0)) {
+    return {
+      ok: false,
+      valueWan: prev > 0 ? prev : 0,
+      reason: "non_positive",
+      keptPrevious: prev > 0,
+    };
+  }
+
+  // 1) 累计必须大于实时（允许极小误差）
+  if (todayBox > 0 && next + 0.01 < todayBox) {
+    return {
+      ok: false,
+      valueWan: prev > 0 ? prev : 0,
+      reason: "sum_lt_today",
+      keptPrevious: prev > 0,
+    };
+  }
+
+  // 2) 连续刷新禁止暴跳（如 1亿→7亿）
+  if (prev > 0) {
+    const ratio = next / prev;
+    if (ratio >= 2 || ratio <= 0.5) {
+      return {
+        ok: false,
+        valueWan: prev,
+        reason: "sudden_jump",
+        keptPrevious: true,
+        prevWan: prev,
+        nextWan: next,
+        ratio,
+      };
+    }
+  }
+
+  // 3) 与猫眼原始 desc 单位一致：desc 能解析时，数值不得明显偏离
+  if (rawDesc && (rawDesc.includes("亿") || rawDesc.includes("万")) && !containsEncodedBoxMarkup(rawDesc)) {
+    const descWan = parseBoxNum(rawDesc);
+    if (descWan > 0) {
+      const drift = Math.abs(next - descWan) / descWan;
+      if (drift > 0.05) {
+        return {
+          ok: true,
+          valueWan: descWan,
+          reason: "aligned_to_desc",
+          keptPrevious: false,
+        };
+      }
+    }
+  }
+
+  return { ok: true, valueWan: next, reason: "ok", keptPrevious: false };
 }
 
 export function resolveDecodeStatus(todayBoxHtml, todayRaw, encodedBox, options = {}) {

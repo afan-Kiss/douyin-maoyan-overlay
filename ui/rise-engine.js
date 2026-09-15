@@ -3,14 +3,18 @@
  * 无 tick / 无 DOM 采样 / 无「暂无变化」。
  */
 
+/**
+ * 气泡展示格式化：统一「万」，不改 deltaWan 计算。
+ * 例：0.05万→+0.05万；1万→+1.00万；不显示「元」。
+ */
 export function formatRiseText(deltaWan) {
   if (!Number.isFinite(deltaWan) || deltaWan <= 0) return "";
-  const sign = "+";
-  const cents = Math.round(Math.abs(deltaWan) * 1000000);
-  if (!cents) return "";
-  if (cents >= 10000000000) return `${sign}${Number((cents / 10000000000).toFixed(10))}亿`;
-  if (cents >= 1000000) return `${sign}${Number((cents / 1000000).toFixed(6))}万`;
-  return `${sign}${Number((cents / 100).toFixed(2))}元`;
+  const n = Math.abs(deltaWan);
+  // 内部单位是「万」；≥1亿（10000万）才升到亿
+  if (n >= 10000) {
+    return `+${(n / 10000).toFixed(2)}亿`;
+  }
+  return `+${n.toFixed(2)}万`;
 }
 
 export function formatRiseTextWithArrow(deltaWan) {

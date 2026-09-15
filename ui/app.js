@@ -918,12 +918,9 @@ function escapeHtml(s) {
 
 function formatDelta(deltaWan) {
   if (!Number.isFinite(deltaWan) || deltaWan <= 0) return "";
-  const sign = "+";
-  const cents = Math.round(Math.abs(deltaWan) * 1000000);
-  if (!cents) return "";
-  if (cents >= 10000000000) return `${sign}${Number((cents / 10000000000).toFixed(10))}亿`;
-  if (cents >= 1000000) return `${sign}${Number((cents / 1000000).toFixed(6))}万`;
-  return `${sign}${Number((cents / 100).toFixed(2))}元`;
+  const n = Math.abs(deltaWan);
+  if (n >= 10000) return `+${(n / 10000).toFixed(2)}亿`;
+  return `+${n.toFixed(2)}万`;
 }
 
 function formatDeltaWithArrow(deltaWan) {

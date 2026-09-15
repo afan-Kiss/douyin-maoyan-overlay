@@ -110,6 +110,7 @@ async function main() {
   let maxCards = 0;
   let wrongBubbleCount = 0;
   const inferredFails = [];
+  let lastPublishedTop5 = [];
 
   win.webContents.on("console-message", (_e, _level, message) => {
     const text = String(message || "");
@@ -230,7 +231,23 @@ async function main() {
 
     for (const ev of snap.events || []) {
       boxV2Events.push(ev);
-      if (ev.publish === true) publishCount += 1;
+      if (ev.publish === true) {
+        publishCount += 1;
+        lastPublishedTop5 = (ev.movies || []).slice(0, 5).map((m) => ({
+          rank: m.rank,
+          movieId: m.movieId,
+          name: m.name,
+          todayBox: m.decodedWan,
+          sumBoxNum: m.sumBoxNum,
+          sumBoxDesc:
+            Number(m.sumBoxNum) >= 10000
+              ? `${(Number(m.sumBoxNum) / 10000).toFixed(2)}亿`
+              : Number(m.sumBoxNum) > 0
+                ? `${Number(m.sumBoxNum)}万`
+                : "--",
+          boxRate: m.boxRate,
+        }));
+      }
       if (ev.publish === false) {
         rejectCount += 1;
         const reason = String(ev.rejectReason || ev.reason || "unknown");
@@ -270,6 +287,28 @@ async function main() {
       }
     }
 
+    const top5 =
+      lastPublishedTop5.length > 0
+        ? lastPublishedTop5
+        : (snap.top5 || []).map((m) => ({
+            rank: m.rank,
+            movieId: m.movieId,
+            name: m.name,
+            todayBox: m.realtime,
+            sumBox: m.sumBoxDesc,
+            boxRate: m.boxRate,
+          }));
+
+    console.log(
+      "[TOP5]",
+      top5.map((m) => ({
+        rank: m.rank,
+        movie: m.name,
+        todayBox: m.todayBox ?? m.realtime,
+        sumBox: m.sumBoxDesc || m.sumBox || m.sumBoxNum,
+      })),
+    );
+
     const emptyDaily = (snap.dailies || []).filter((t) => isEmptyBox(t)).length;
     const numericDaily = (snap.dailies || []).filter((t) => looksNumericBox(t)).length;
     const champEmpty = isEmptyBox(snap.champ);
@@ -299,7 +338,7 @@ async function main() {
       elapsedSec: Math.round((Date.now() - started) / 1000),
       cardCount: snap.cardCount,
       dailies: snap.dailies,
-      top5: snap.top5 || [],
+      top5,
       champ: snap.champ,
       nation: snap.nation,
       emptyDaily,
@@ -316,7 +355,7 @@ async function main() {
       cardCount: snap.cardCount,
       champ: snap.champ,
       nation: snap.nation,
-      top5: snap.top5,
+      top5,
       publishCount,
       rejectCount,
       lastRejects: (snap.events || [])

@@ -66,28 +66,32 @@ function normalizeUnit(unit) {
 }
 
 /**
- * 累计总票房（万）：只取猫眼接口真实字段。
- * 优先数字字段，否则解析 sumBoxDesc（如 "23.35亿"）。
- * 禁止估算、禁止用实时票房/占比反推。
+ * 累计总票房（万）：优先 sumBoxDesc（带万/亿），数字字段仅作回退。
  */
 export function resolveMaoyanSumBoxWan(item = {}) {
-  const numericCandidates = [
-    item.sumBox,
-    item.sumBoxInfo,
-    item.totalBox,
-    item.boxSum,
-  ];
+  const desc = String(item.sumBoxDesc || item.sumBoxInfoDesc || "").trim();
+  if (desc && desc !== "--" && desc !== "-") {
+    if (/&#x[e-f0-9]{3,4};/i.test(desc) || /[\uE000-\uF8FF]/.test(desc)) return 0;
+    if (desc.includes("亿") || desc.includes("万")) {
+      const fromDesc = parseBoxNum(desc);
+      if (fromDesc > 0) return fromDesc;
+    }
+  }
+  const numericCandidates = [item.sumBox, item.sumBoxInfo, item.totalBox, item.boxSum];
   for (const raw of numericCandidates) {
     if (raw == null || raw === "") continue;
     if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) {
-      // 猫眼偶发返回「元」量级的大整数，统一到「万」
-      return raw >= 1000000 ? raw / 10000 : raw;
+      if (raw >= 10_000_000) return raw / 10000;
+      return raw;
     }
     const parsed = parseBoxNum(String(raw));
     if (parsed > 0) return parsed;
   }
-  const desc = item.sumBoxDesc || item.sumBoxInfoDesc || "";
-  return parseBoxNum(desc);
+  if (desc && desc !== "--" && desc !== "-") {
+    const fromPlain = parseBoxNum(desc, "万");
+    if (fromPlain > 0) return fromPlain;
+  }
+  return 0;
 }
 
 export function resolveDecodeStatus(todayBoxHtml, todayRaw, encodedBox) {

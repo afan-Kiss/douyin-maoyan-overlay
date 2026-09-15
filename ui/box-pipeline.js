@@ -31,9 +31,11 @@ import { isMapVerified, normalizeFontIdentity, getMapForKeyLoose } from "./font-
 import {
   parseRate,
   validateNationCrossCheck,
+  resolveMaoyanSumBoxWan,
+  stabilizeSumBoxWan,
 } from "./dashboard-rank.js";
 import { boxStore } from "./box-store.js";
-import { formatWanForDisplay } from "./box-display.js";
+import { formatWanForDisplay, formatWanDisplayText } from "./box-display.js";
 
 /** V2 生产主链固定 5s；不受旧设置 4s/8s/10s 影响 */
 export const BOX_POLL_MS = 5000;
@@ -185,27 +187,66 @@ export function resolveEntityBoxDecode(entity, fontKey = "") {
   return verified.reason !== "unavailable" ? verified : plain;
 }
 
-function buildCandidateFromDecoded(decoded, session, fontKey) {
-  const movies = (decoded.movies || []).map((m) => ({
-    movieId: String(m.movieId),
-    name: m.name || "",
-    // rank 唯一来源：dashboard-rank.js（禁止 V2 按 realtime 再排）
-    rank: Number(m.rank) || 0,
-    originalRank: Number(m.originalRank) || Number(m.rank) || 0,
-    box: resolveEntityBoxDecode(m, fontKey),
-    boxRate: m.boxRate || "",
-    showCountRate: m.showCountRate || "",
-    avgShowView: m.avgShowView || "",
-    avgSeatView: m.avgSeatView || "",
-    sumBoxDesc: m.sumBoxDesc || "",
-    sumBoxNum: m.sumBoxNum || 0,
-    showCountDesc: m.showCountDesc || "",
-    viewCountDesc: m.viewCountDesc || "",
-    poster: m.poster || m.image || "",
-    trailer: m.trailer || "",
-    raw: m,
-    detail: {},
-  }));
+function buildCandidateFromDecoded(decoded, session, fontKey, store = null) {
+  const prevSnap = store?.getSnapshot?.() || null;
+  const prevById = new Map((prevSnap?.movies || []).map((m) => [String(m.movieId), m]));
+
+  const movies = (decoded.movies || []).map((m) => {
+    const box = resolveEntityBoxDecode(m, fontKey);
+    const todayWan = box?.ok ? Number(box.valueWan) || 0 : 0;
+    const rawDesc = String(m.sumBoxDesc || "").trim();
+    const prev = prevById.get(String(m.movieId));
+    const resolvedWan =
+      Number(m.sumBoxNum) > 0 ? Number(m.sumBoxNum) : resolveMaoyanSumBoxWan(m.listItem || m);
+    const stab = stabilizeSumBoxWan(resolvedWan, {
+      prevWan: Number(prev?.sumBoxNum) || 0,
+      todayBoxWan: todayWan,
+      rawDesc,
+    });
+    const sumBoxNum = stab.valueWan > 0 ? stab.valueWan : 0;
+    const sumBoxDesc =
+      stab.keptPrevious && prev?.sumBoxDesc
+        ? prev.sumBoxDesc
+        : rawDesc && rawDesc !== "--"
+          ? rawDesc
+          : sumBoxNum > 0
+            ? formatWanDisplayText(sumBoxNum)
+            : "--";
+
+    console.log("[SUM_BOX_DEBUG]", {
+      movieName: m.name || "",
+      movieId: String(m.movieId),
+      rawSumBoxDesc: rawDesc || "",
+      decodedText: sumBoxDesc,
+      decodedWan: sumBoxNum,
+      unit: sumBoxDesc.includes("亿") ? "亿" : "万",
+      fontMappingVersion: fontKey || m.fontContentKey || "",
+      crossCheck: stab.reason,
+      keptPrevious: stab.keptPrevious === true,
+      todayWan,
+    });
+
+    return {
+      movieId: String(m.movieId),
+      name: m.name || "",
+      // rank 唯一来源：dashboard-rank.js（禁止 V2 按 realtime 再排）
+      rank: Number(m.rank) || 0,
+      originalRank: Number(m.originalRank) || Number(m.rank) || 0,
+      box,
+      boxRate: m.boxRate || "",
+      showCountRate: m.showCountRate || "",
+      avgShowView: m.avgShowView || "",
+      avgSeatView: m.avgSeatView || "",
+      sumBoxDesc,
+      sumBoxNum,
+      showCountDesc: m.showCountDesc || "",
+      viewCountDesc: m.viewCountDesc || "",
+      poster: m.poster || m.image || "",
+      trailer: m.trailer || "",
+      raw: m,
+      detail: {},
+    };
+  });
 
   const nation = decoded.nation
     ? {
@@ -628,6 +669,7 @@ export function projectStoreMovie(storeMovie) {
     avgShowView: storeMovie.avgShowView || raw.avgShowView || "",
     avgSeatView: storeMovie.avgSeatView || raw.avgSeatView || "",
     sumBoxDesc: storeMovie.sumBoxDesc || raw.sumBoxDesc || "",
+    sumBoxNum: Number(storeMovie.sumBoxNum) > 0 ? Number(storeMovie.sumBoxNum) : Number(raw.sumBoxNum) || 0,
     displayBoxWan: amount,
     lastValidBoxWan: storeMovie.lastValidBoxWan,
   };
@@ -828,7 +870,7 @@ export function createBoxPipeline(options = {}) {
         : session.parsed;
       decodeMs = Math.round(nowMs() - tDec);
 
-      let candidate = buildCandidateFromDecoded(decoded, session, fontKey);
+      let candidate = buildCandidateFromDecoded(decoded, session, fontKey, store);
       moviesDecoded = candidate.movies.filter((m) => m.box?.ok).length;
 
       const gate = validateCandidate(candidate, store);
