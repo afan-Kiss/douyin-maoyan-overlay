@@ -772,10 +772,23 @@ export function finalizeRefreshBoxFields(
   }
   if (status === DECODE_STATUS.OK) status = DECODE_STATUS.DECODE_ERROR;
 
-  // decode 失败：保留上一轮有效票房，禁止用 0/"--" 覆盖
+  // decode 失败：保留上一轮有效票房，禁止用 0/"--" 覆盖；
+  // 但上一轮本身若是荒谬/不可信数值，不得继续粘住。
   const prevBox = Number(entity?.todayBox) || 0;
   const prevText = String(entity?.todayBoxText || "").trim();
-  const keepPrev = prevBox > 0 && !isUntrustedBoxDecode(String(prevBox));
+  let keepPrev =
+    prevBox > 0 &&
+    !isUntrustedBoxDecode(String(prevBox)) &&
+    !(prevText && prevText !== "--" && isUntrustedBoxDecode(prevText));
+  if (keepPrev) {
+    const prevProbe = resolveDecodeStatus(String(prevBox), String(prevBox), false, {
+      todayUnit: ctx.todayUnit || "万",
+      nationBoxWan: ctx.nationBoxWan,
+      sumBoxNumWan: ctx.sumBoxNumWan,
+      absurdMaxWan: ctx.absurdMaxWan,
+    });
+    if (prevProbe === DECODE_STATUS.DECODE_ERROR) keepPrev = false;
+  }
 
   return {
     ...entity,

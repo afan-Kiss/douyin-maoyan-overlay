@@ -246,7 +246,27 @@ export function isMapVerified(contentKey) {
 }
 
 export function isVisualReady(contentKey) {
-  return Boolean(entries.get(contentKey)?.visualReady);
+  const requested = String(contentKey || "").trim();
+  if (!requested) return false;
+  const direct = entries.get(requested);
+  if (direct?.visualReady) return true;
+
+  const mapped = urlKeyToContent.get(requested);
+  if (mapped) {
+    const viaUrl = entries.get(mapped);
+    if (viaUrl?.visualReady) return true;
+  }
+
+  const normalized = normalizeFontIdentity(requested);
+  if (!normalized) return false;
+  if (normalized !== requested) {
+    const viaNorm = entries.get(normalized);
+    if (viaNorm?.visualReady) return true;
+  }
+  for (const [key, entry] of entries) {
+    if (entry?.visualReady && normalizeFontIdentity(key) === normalized) return true;
+  }
+  return false;
 }
 
 export function getPublishedState() {
