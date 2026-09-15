@@ -119,8 +119,8 @@ async function main() {
   assert(r[0].rises.length === 1, "t5 rise");
   assert(nearly(r[0].rises[0].deltaWan, 0.5), "t5 delta 0.5");
   const t5text = formatRiseTextWithArrow(0.5);
-  assert(t5text.includes("万") && t5text.includes("↑"), `t5 text got ${t5text}`);
-  assert(t5text.includes("+0.50万"), `t5 wan format got ${t5text}`);
+  // 0.5万 = 5000元 → +5千元
+  assert(t5text.includes("+5千元") && t5text.includes("↑"), `t5 tiered format got ${t5text}`);
   passed += 1;
 
   // 6. 错误回落 99 → 仍 101.5，无 bubble

@@ -3,18 +3,43 @@
  * 无 tick / 无 DOM 采样 / 无「暂无变化」。
  */
 
+/** 去掉末尾无意义的 0（1.0→1，1.20→1.2） */
+function formatFixedTrim(n, maxDecimals) {
+  let s = Number(n).toFixed(maxDecimals);
+  if (s.includes(".")) {
+    s = s.replace(/0+$/, "").replace(/\.$/, "");
+  }
+  return s;
+}
+
 /**
- * 气泡展示格式化：统一「万」，不改 deltaWan 计算。
- * 例：0.05万→+0.05万；1万→+1.00万；不显示「元」。
+ * 气泡增量格式化（输入单位：元）。
+ * <1000 → +xxx元
+ * <10000 → +x.x千元
+ * <100000 → +x.xx万
+ * ≥100000 → +x.x万
+ */
+export function formatRiseDelta(deltaYuan) {
+  if (!Number.isFinite(deltaYuan) || deltaYuan <= 0) return "";
+  const y = Math.round(Math.abs(deltaYuan));
+  if (y < 1000) {
+    return `+${y}元`;
+  }
+  if (y < 10000) {
+    return `+${formatFixedTrim(y / 1000, 1)}千元`;
+  }
+  if (y < 100000) {
+    return `+${formatFixedTrim(y / 10000, 2)}万`;
+  }
+  return `+${formatFixedTrim(y / 10000, 1)}万`;
+}
+
+/**
+ * 气泡展示：内部 delta 单位是「万」，换算成元后走 formatRiseDelta。
  */
 export function formatRiseText(deltaWan) {
   if (!Number.isFinite(deltaWan) || deltaWan <= 0) return "";
-  const n = Math.abs(deltaWan);
-  // 内部单位是「万」；≥1亿（10000万）才升到亿
-  if (n >= 10000) {
-    return `+${(n / 10000).toFixed(2)}亿`;
-  }
-  return `+${n.toFixed(2)}万`;
+  return formatRiseDelta(deltaWan * 10000);
 }
 
 export function formatRiseTextWithArrow(deltaWan) {
@@ -41,31 +66,40 @@ export function createRiseEngine(options = {}) {
 
   /**
    * Store 接受票房后调用。oldValue<=0 或 newValue<=oldValue → 忽略。
+   * 约定：调用方已在 entity 上写入 displayBoxWan=newValue（commit 后的新值）。
    */
   function onAcceptedBox(movieId, oldValue, newValue, meta = {}) {
     const oldWan = Number(oldValue) || 0;
     const newWan = Number(newValue) || 0;
     if (!(oldWan > 0)) return null;
     if (!(newWan > oldWan)) return null;
-    const deltaWan = newWan - oldWan;
+    const deltaWan = Number((newWan - oldWan).toFixed(4));
     if (!(deltaWan >= minDelta)) return null;
+
+    const deltaYuan = Math.round(deltaWan * 10000);
+    const displayAfterCommit = Number(
+      meta.displayAfterCommit != null ? meta.displayAfterCommit : newWan,
+    );
 
     const evt = {
       movieId: String(movieId || ""),
       name: meta.name || "",
       deltaWan,
+      deltaYuan,
       oldWan,
       newWan,
+      displayAfterCommit,
       at: Date.now(),
       kind: meta.kind || "movie",
     };
 
     console.log("[BOX_RISE]", {
-      movieId: evt.movieId,
-      name: evt.name,
-      oldWan: evt.oldWan,
-      newWan: evt.newWan,
+      movie: evt.name || evt.movieId,
+      oldBoxWan: evt.oldWan,
+      newBoxWan: evt.newWan,
       deltaWan: evt.deltaWan,
+      deltaYuan: evt.deltaYuan,
+      displayAfterCommit: evt.displayAfterCommit,
     });
 
     for (const fn of listeners) {
@@ -78,7 +112,13 @@ export function createRiseEngine(options = {}) {
     return evt;
   }
 
-  return { onAcceptedBox, onRise, formatRiseText, formatRiseTextWithArrow };
+  return {
+    onAcceptedBox,
+    onRise,
+    formatRiseDelta,
+    formatRiseText,
+    formatRiseTextWithArrow,
+  };
 }
 
 export const riseEngine = createRiseEngine();

@@ -289,6 +289,8 @@ export function createBoxStore(options = {}) {
           const evt = engine.onAcceptedBox(id, applied.oldWan, applied.newWan, {
             name: next.name,
             kind: "movie",
+            // applyBoxToEntity 已写入 displayBoxWan=newWan；Rise 基于 commit 后的新值
+            displayAfterCommit: next.displayBoxWan,
           });
           if (evt) rises.push(evt);
         }
@@ -333,6 +335,7 @@ export function createBoxStore(options = {}) {
           const evt = engine.onAcceptedBox("__nation__", applied.oldWan, applied.newWan, {
             name: "今日大盘",
             kind: "nation",
+            displayAfterCommit: nextNation.displayBoxWan,
           });
           if (evt) rises.push(evt);
         }
