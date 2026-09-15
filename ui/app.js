@@ -143,6 +143,10 @@ let bubbleTimerScheduled = false;
 let partialDataWarning = "";
 let activeLoginAttemptId = 0;
 let lastAppliedLoginAttemptId = 0;
+/** UI 稳定性 trace：上一帧 movieId 列表与字段签名 */
+let lastUiTraceMovieIds = [];
+const lastUiTraceSignatures = new Map();
+let uiRenderSeq = 0;
 
 function isEmptyField(val) {
   if (val == null) return true;
@@ -1653,10 +1657,117 @@ function setTextIfChanged(el, next) {
   return true;
 }
 
+/**
+ * 有效值覆盖、无效值忽略（禁止把已显示内容刷成 "--"/空）。
+ */
+function setTextKeepValid(el, next) {
+  if (!el) return false;
+  if (isEmptyField(next)) return false;
+  return setTextIfChanged(el, String(next).trim());
+}
+
 function setHtmlIfChanged(el, next) {
   if (!el || el.innerHTML === next) return false;
   el.innerHTML = next;
   return true;
+}
+
+function isUiTraceEnabled() {
+  if (typeof process !== "undefined" && process?.env?.UI_TRACE === "1") return true;
+  try {
+    return new URLSearchParams(location.search).has("uiTrace");
+  } catch {
+    return false;
+  }
+}
+
+function movieUiSignature(movie) {
+  if (!movie) return "";
+  return [
+    movie.rank,
+    movie.displayBoxWan ?? movie.todayBox ?? "",
+    movie.boxRate ?? "",
+    movie.showCountRate ?? "",
+    movie.avgShowView ?? "",
+    movie.sumBoxDesc ?? "",
+    movie.showCountDesc ?? "",
+  ].join("|");
+}
+
+function logUiRender(movies, meta = {}) {
+  if (!isUiTraceEnabled()) return;
+  uiRenderSeq += 1;
+  const list = movies || [];
+  const nextIds = list.map((m) => String(m.movieId));
+  const prevSet = new Set(lastUiTraceMovieIds);
+  const nextSet = new Set(nextIds);
+  const addedMovies = nextIds.filter((id) => !prevSet.has(id));
+  const removedMovies = lastUiTraceMovieIds.filter((id) => !nextSet.has(id));
+  const changedMovies = list.filter((m) => {
+    const id = String(m.movieId);
+    if (!prevSet.has(id)) return false;
+    const sig = movieUiSignature(m);
+    return lastUiTraceSignatures.get(id) !== sig;
+  }).map((m) => String(m.movieId));
+
+  console.log("[UI_RENDER]", {
+    timestamp: Date.now(),
+    snapshotId: meta.snapshotId ?? meta.pollId ?? uiRenderSeq,
+    moviesCount: nextIds.length,
+    changedMovies: changedMovies.length,
+    changedMovieIds: changedMovies,
+    removedMovies: removedMovies.length,
+    removedMovieIds: removedMovies,
+    addedMovies: addedMovies.length,
+    addedMovieIds: addedMovies,
+  });
+
+  lastUiTraceMovieIds = nextIds;
+  lastUiTraceSignatures.clear();
+  for (const m of list) {
+    lastUiTraceSignatures.set(String(m.movieId), movieUiSignature(m));
+  }
+}
+
+/** 结构重建 summary 前拆下正在显示的涨幅气泡，避免被 innerHTML 清掉 */
+function detachActiveRiseBubble(summaryWrap) {
+  const bubble = summaryWrap?.querySelector?.(".race-card__delta-bubble");
+  if (!bubble) return null;
+  const active =
+    bubble.classList.contains("is-visible") ||
+    bubble.classList.contains("is-animating") ||
+    Boolean(String(bubble.textContent || "").trim());
+  if (!active) return null;
+  bubble.remove();
+  return bubble;
+}
+
+function reattachRiseBubble(summaryWrap, bubble) {
+  if (!summaryWrap || !bubble) return;
+  const daily = summaryWrap.querySelector('[data-metric="dailyBox"]');
+  if (!daily) return;
+  const placeholder = daily.querySelector(".race-card__delta-bubble");
+  if (placeholder) placeholder.replaceWith(bubble);
+  else {
+    const valueEl = daily.querySelector(".metric__value");
+    if (valueEl) daily.insertBefore(bubble, valueEl);
+    else daily.appendChild(bubble);
+  }
+}
+
+/** summary 结构重建后：无效新值保留旧 DOM（有效值已由 buildSummaryHtml 写入） */
+function restoreSummaryMetricsFromPrevious(summaryWrap, prevByKey) {
+  if (!summaryWrap || !prevByKey) return;
+  summaryWrap.querySelectorAll(".metric[data-metric]").forEach((metric) => {
+    const key = metric.dataset.metric;
+    const prevHtml = prevByKey[key];
+    if (!key || !prevHtml) return;
+    const valueEl = metric.querySelector(".metric__value");
+    if (!valueEl) return;
+    const nextText = String(valueEl.textContent || "").trim();
+    if (!isEmptyField(nextText) && nextText !== "--") return;
+    if (displayHtmlLooksLikeBox(prevHtml)) valueEl.innerHTML = prevHtml;
+  });
 }
 
 function fitMetricEls(card) {
@@ -2399,9 +2510,15 @@ function updateRaceCard(card, movie, isNew = false, options = {}) {
   if (summaryWrap) {
     const inPlace = updateSummaryInPlace(summaryWrap, movie, options);
     if (inPlace === null) {
+      const prevByKey = {};
+      summaryWrap.querySelectorAll(".metric[data-metric]").forEach((metric) => {
+        const key = metric.dataset.metric;
+        const valueEl = metric.querySelector(".metric__value");
+        if (key && valueEl) prevByKey[key] = valueEl.innerHTML;
+      });
+      const savedBubble = detachActiveRiseBubble(summaryWrap);
       if (options.holdBoxes) {
-        const dailyMetric = summaryWrap.querySelector('[data-metric="dailyBox"] .metric__value');
-        const heldDaily = dailyMetric?.innerHTML || "";
+        const heldDaily = prevByKey.dailyBox || "";
         summaryWrap.innerHTML = buildSummaryHtml(movie);
         if (heldDaily && displayHtmlLooksLikeBox(heldDaily)) {
           const nextDaily = summaryWrap.querySelector('[data-metric="dailyBox"] .metric__value');
@@ -2410,6 +2527,8 @@ function updateRaceCard(card, movie, isNew = false, options = {}) {
       } else {
         summaryWrap.innerHTML = buildSummaryHtml(movie);
       }
+      restoreSummaryMetricsFromPrevious(summaryWrap, prevByKey);
+      reattachRiseBubble(summaryWrap, savedBubble);
       summaryStructural = true;
     } else if (inPlace) {
       summaryValuesChanged = true;
@@ -2524,6 +2643,8 @@ function renderList(movies, options = {}) {
     prevRankMap.set(String(movie.movieId), movie.rank);
     return card;
   });
+
+  logUiRender(list, options);
 
   if (cards.length) {
     syncRaceListChildren(cards);
@@ -2673,13 +2794,15 @@ function setEncodedBoxValue(el, html, options = {}) {
 function updateNationSeatMetric(nation) {
   const metric = resolveNationSeatMetric(nation || {});
   if (nationSeatLabelEl) {
-    setTextIfChanged(nationSeatLabelEl, metric.label);
+    setTextKeepValid(nationSeatLabelEl, metric.label);
   }
   if (nationSeatEl) {
-    setTextIfChanged(nationSeatEl, metric.value || "--");
+    setTextKeepValid(nationSeatEl, metric.value);
   }
-  const hideSeat = isEmptyField(metric.value) || metric.value === "--";
-  $("nation-seat-pill")?.classList.toggle("is-hidden", hideSeat);
+  const shown =
+    (!isEmptyField(metric.value) && metric.value !== "--") ||
+    !isEmptyField(nationSeatEl?.textContent);
+  $("nation-seat-pill")?.classList.toggle("is-hidden", !shown);
 }
 
 function isBoxPipelineTraceEnabled() {
@@ -2823,10 +2946,16 @@ function updateNation(nation, parsed, options = {}) {
     } else if (!hasDisplayedData) {
       setPlainBoxValue(nationBoxEl, null, unitEl, { hold: false });
     }
-    setTextIfChanged(nationShowsEl, projected.showCountDesc || "--");
-    setTextIfChanged(nationViewsEl, projected.viewCountDesc || "--");
-    $("nation-shows-pill")?.classList.toggle("is-hidden", isEmptyField(projected.showCountDesc));
-    $("nation-views-pill")?.classList.toggle("is-hidden", isEmptyField(projected.viewCountDesc));
+    setTextKeepValid(nationShowsEl, projected.showCountDesc);
+    setTextKeepValid(nationViewsEl, projected.viewCountDesc);
+    $("nation-shows-pill")?.classList.toggle(
+      "is-hidden",
+      isEmptyField(projected.showCountDesc) && isEmptyField(nationShowsEl?.textContent),
+    );
+    $("nation-views-pill")?.classList.toggle(
+      "is-hidden",
+      isEmptyField(projected.viewCountDesc) && isEmptyField(nationViewsEl?.textContent),
+    );
     updateNationSeatMetric(projected);
     if (heroDateEl) {
       setTextIfChanged(heroDateEl, resolveDisplayDate(parsed || { calendar: { today: boxStore.businessDate } }));
@@ -3082,7 +3211,11 @@ function paintFromStoreSnapshot(projected, meta = {}) {
   const speed = buildSpeedMap(latestMovies);
   latestSpeedMap = speed;
   const movies = enrichMoviesQuick(latestMovies, speed);
-  renderList(movies, { holdBoxes: false });
+  renderList(movies, {
+    holdBoxes: false,
+    snapshotId: meta.pollId || meta.snapshotId || uiRenderSeq + 1,
+    pollId: meta.pollId,
+  });
   updateNation(latestNation, latestParsedMeta, { holdBoxes: false });
   updateChampion(movies, projected.businessDate, { holdBoxes: false });
   hasDisplayedData = true;
@@ -3843,6 +3976,7 @@ async function init() {
       pulseNoChangeBubble,
       canPaintCurrentBox,
       paintStructuralDashboard,
+      paintFromStoreSnapshot,
       getMovieBoxAmount,
       getMovieBoxAmountFresh,
       formatDailyBoxDisplay,
@@ -3852,6 +3986,22 @@ async function init() {
       clearBoxStates,
       resolveCurrentValidBox,
       syncMovieBoxState,
+      isBubbleVisible,
+      getCardPoolSize: () => cardPool.size,
+      getCardNode: (movieId) => cardPool.get(String(movieId)) || null,
+      commitAndPaint(candidate, meta = {}) {
+        const result = boxStore.commit(candidate);
+        if (result.ok) {
+          const projected = projectSnapshotForRender(result.snapshot || boxStore.getSnapshot());
+          paintFromStoreSnapshot(projected, {
+            rises: result.rises || [],
+            skipEnrichSchedule: true,
+            pollId: meta.pollId || Date.now(),
+            ...meta,
+          });
+        }
+        return result;
+      },
     };
     setStatus("ok", "");
     return;
