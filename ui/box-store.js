@@ -198,10 +198,57 @@ export function createBoxStore(options = {}) {
 
   /**
    * 原子提交 CandidateSnapshot。
+   * 部分解码 / 临时少片：整轮拒绝，UI 保留上一份 Snapshot。
    */
   function commit(candidate) {
     if (!candidate || !Array.isArray(candidate.movies)) {
       return { ok: false, reason: "empty_candidate", rises: [], snapshot: lastPublished };
+    }
+
+    const incoming = candidate.movies;
+    const moviesTotal = incoming.length;
+    const failedMovieIds = incoming
+      .filter((m) => !(m?.box?.ok && isPositiveWan(m.box.valueWan)))
+      .map((m) => String(m.movieId));
+    const moviesDecoded = moviesTotal - failedMovieIds.length;
+
+    if (!moviesTotal) {
+      return {
+        ok: false,
+        reason: "no_movies",
+        rises: [],
+        snapshot: lastPublished,
+        moviesTotal: 0,
+        moviesDecoded: 0,
+        failedMovieIds: [],
+      };
+    }
+
+    // 本轮展示影片必须全部有可信 current box；禁止半套新数据
+    if (moviesDecoded !== moviesTotal) {
+      return {
+        ok: false,
+        reason: "partial_box_decode",
+        rises: [],
+        snapshot: lastPublished,
+        moviesTotal,
+        moviesDecoded,
+        failedMovieIds,
+      };
+    }
+
+    const publishedCount = Array.isArray(lastPublished?.movies) ? lastPublished.movies.length : 0;
+    if (publishedCount > 0 && moviesTotal < publishedCount) {
+      return {
+        ok: false,
+        reason: "partial_movie_list",
+        rises: [],
+        snapshot: lastPublished,
+        moviesTotal,
+        moviesDecoded,
+        failedMovieIds: [],
+        publishedCount,
+      };
     }
 
     const nextDate = String(candidate.businessDate || "").slice(0, 10);
@@ -210,22 +257,10 @@ export function createBoxStore(options = {}) {
     }
     if (nextDate) businessDate = nextDate;
 
-    const decodedMovies = candidate.movies.filter(
-      (m) => m?.box?.ok && isPositiveWan(m.box.valueWan),
-    );
-    const nationOk = candidate.nation?.box?.ok && isPositiveWan(candidate.nation.box.valueWan);
-
-    if (!decodedMovies.length && !nationOk && lastPublished) {
-      return { ok: false, reason: "no_decoded_box", rises: [], snapshot: lastPublished };
-    }
-
-    // 排名必须来自本轮已成功解码的票房；若一个都解不出来则拒绝（上面已处理）
-    // 有解码成功时：用 candidate 的官方 rank（已在 pipeline 用可信 todayBox 排序）
-
     const rises = [];
     const keepIds = new Set();
 
-    for (const m of candidate.movies) {
+    for (const m of incoming) {
       const id = String(m.movieId);
       keepIds.add(id);
       const prev = movies.get(id) || emptyMovie(id, m);
@@ -244,6 +279,7 @@ export function createBoxStore(options = {}) {
         next = mergeNonEmpty(next, m.detail, DETAIL_KEYS);
       }
 
+      // 门控已保证全部 box.ok；此处仍做 lastValid 高水位保护
       if (m.box?.ok && isPositiveWan(m.box.valueWan)) {
         const applied = applyBoxToEntity(next, m.box.valueWan);
         next = applied.entity;
@@ -254,11 +290,15 @@ export function createBoxStore(options = {}) {
           });
           if (evt) rises.push(evt);
         }
-      } else {
-        // 解码失败：票房字段完全不更新
-        next.displayBoxWan = prev.displayBoxWan;
+      } else if (prev.lastValidBoxWan > 0) {
+        next.displayBoxWan = prev.lastValidBoxWan;
         next.lastValidBoxWan = prev.lastValidBoxWan;
         next.lastAcceptedAt = prev.lastAcceptedAt;
+      }
+
+      // invariant：曾有有效票房则 display 不得清零
+      if (next.lastValidBoxWan > 0 && !(next.displayBoxWan > 0)) {
+        next.displayBoxWan = next.lastValidBoxWan;
       }
 
       movies.set(id, next);
@@ -266,6 +306,7 @@ export function createBoxStore(options = {}) {
 
     for (const [id, m] of movies) {
       if (!keepIds.has(id)) {
+        // 不删卡：临时缺席已在门控拒绝；此处仅标记非本轮榜内
         movies.set(id, { ...m, rank: 0 });
       }
     }
@@ -294,9 +335,13 @@ export function createBoxStore(options = {}) {
           if (evt) rises.push(evt);
         }
       } else {
+        // nation 解码失败：保留上一轮有效值；电影仍可更新
         nextNation.displayBoxWan = nation.displayBoxWan;
         nextNation.lastValidBoxWan = nation.lastValidBoxWan;
         nextNation.lastAcceptedAt = nation.lastAcceptedAt;
+      }
+      if (nextNation.lastValidBoxWan > 0 && !(nextNation.displayBoxWan > 0)) {
+        nextNation.displayBoxWan = nextNation.lastValidBoxWan;
       }
       nation = nextNation;
     }
@@ -304,7 +349,15 @@ export function createBoxStore(options = {}) {
     const snapshot = getSnapshot();
     lastPublished = snapshot;
     emitChange(snapshot);
-    return { ok: true, reason: "published", rises, snapshot };
+    return {
+      ok: true,
+      reason: "published",
+      rises,
+      snapshot,
+      moviesTotal,
+      moviesDecoded,
+      failedMovieIds: [],
+    };
   }
 
   function mergeDetail(movieId, detail) {

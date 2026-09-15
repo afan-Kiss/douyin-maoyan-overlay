@@ -14,7 +14,9 @@ import {
   fetchDashboard,
   decodeDashboardFields,
   isUntrustedBoxDecode,
+  isEncodedBoxHtml,
   parseBoxNum,
+  decodeBoxHtmlLoose,
   DECODE_STATUS,
   tryPublishDashboardSession,
 } from "./maoyan-api.js";
@@ -25,14 +27,25 @@ import {
   tryPublishSession,
   sessionFontIdentity,
 } from "./dashboard-session.js";
-import { isMapVerified, normalizeFontIdentity } from "./font-registry.js";
+import { isMapVerified, normalizeFontIdentity, getMapForKeyLoose } from "./font-registry.js";
 import { boxStore } from "./box-store.js";
 import { formatWanForDisplay } from "./box-display.js";
 
-const DEFAULT_POLL_MS = 5000;
+/** V2 生产主链固定 5s；不受旧设置 4s/8s/10s 影响 */
+export const BOX_POLL_MS = 5000;
+const DEFAULT_POLL_MS = BOX_POLL_MS;
 
 function nowMs() {
   return typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
+}
+
+/** VERIFIED 或 INFERRED 且有映射表即可进入 V2 decode */
+export function isMapReadyForV2(contentKey) {
+  const key = String(contentKey || "").trim();
+  if (!key) return false;
+  if (isMapVerified(key)) return true;
+  const map = getMapForKeyLoose(key);
+  return Boolean(map && map.size > 0);
 }
 
 /**
@@ -104,12 +117,76 @@ export function decodeMovieToResult(movie, fontKey) {
   return makeDecodeResult({ ok: false, fontKey: key, reason: "unavailable" });
 }
 
+/**
+ * 明文票房：无 fontStyle / 非 PUA 时直接 parseBoxNum。
+ * 例如 boxSplitUnit.num = "143.82"
+ */
+export function tryPlainBoxDecode(entity, fontKey = "") {
+  const html = String(entity?.todayBoxHtml || entity?.boxSplitUnit?.num || "").trim();
+  if (!html || html === "--" || html === "-") {
+    return makeDecodeResult({ ok: false, fontKey, reason: "no_plain_text" });
+  }
+  if (isEncodedBoxHtml(html)) {
+    return makeDecodeResult({ ok: false, fontKey, reason: "encoded_needs_map" });
+  }
+  const text = html.replace(/<[^>]+>/g, "").replace(/,/g, "").trim();
+  if (!text || text === "--" || isUntrustedBoxDecode(text)) {
+    return makeDecodeResult({ ok: false, fontKey, reason: "invalid_plain_text" });
+  }
+  const unit = entity?.todayUnit || entity?.boxSplitUnit?.unit || "万";
+  const valueWan = parseBoxNum(text, unit);
+  return makeDecodeResult({
+    ok: true,
+    valueWan,
+    text,
+    unit,
+    fontKey,
+    reason: "plain",
+  });
+}
+
+/** PUA 验证解码优先；失败再尝试 loose(INFERRED) / 明文。 */
+export function resolveEntityBoxDecode(entity, fontKey = "") {
+  const key = fontKey || entity?.fontContentKey || entity?.fontMappingVersion || "";
+  const verified = decodeMovieToResult(entity, key);
+  if (verified.ok) return verified;
+
+  const html = String(entity?.todayBoxHtml || entity?.boxSplitUnit?.num || "").trim();
+  if (html && isEncodedBoxHtml(html) && key && isMapReadyForV2(key)) {
+    const unit = entity?.todayUnit || entity?.boxSplitUnit?.unit || "万";
+    const wan = decodeBoxHtmlLoose(html, unit, key);
+    if (wan > 0) {
+      return makeDecodeResult({
+        ok: true,
+        valueWan: wan,
+        text: String(wan),
+        unit,
+        fontKey: key,
+        reason: isMapVerified(key) ? "verified" : "inferred",
+      });
+    }
+    return makeDecodeResult({ ok: false, fontKey: key, reason: "map_decode_failed" });
+  }
+
+  if (
+    verified.reason === "map_not_ready" ||
+    verified.reason === "decode_error" ||
+    entity?.decodeStatus === DECODE_STATUS.ENCODED ||
+    entity?.decodeStatus === DECODE_STATUS.DECODE_ERROR
+  ) {
+    if (isEncodedBoxHtml(html)) return verified;
+  }
+  const plain = tryPlainBoxDecode(entity, key);
+  if (plain.ok) return plain;
+  return verified.reason !== "unavailable" ? verified : plain;
+}
+
 function buildCandidateFromDecoded(decoded, session, fontKey) {
   const movies = (decoded.movies || []).map((m) => ({
     movieId: String(m.movieId),
     name: m.name || "",
     rank: Number(m.rank) || 0,
-    box: decodeMovieToResult(m, fontKey),
+    box: resolveEntityBoxDecode(m, fontKey),
     boxRate: m.boxRate || "",
     showCountRate: m.showCountRate || "",
     avgShowView: m.avgShowView || "",
@@ -126,7 +203,7 @@ function buildCandidateFromDecoded(decoded, session, fontKey) {
 
   const nation = decoded.nation
     ? {
-        box: decodeMovieToResult(decoded.nation, fontKey),
+        box: resolveEntityBoxDecode(decoded.nation, fontKey),
         showCount: decoded.nation.showCountDesc || "",
         views: decoded.nation.viewCountDesc || "",
         showCountDesc: decoded.nation.showCountDesc || "",
@@ -151,23 +228,77 @@ function buildCandidateFromDecoded(decoded, session, fontKey) {
   };
 }
 
-function validateCandidate(candidate) {
-  if (!candidate?.movies?.length) return { ok: false, reason: "no_movies" };
-  const decodedCount = candidate.movies.filter((m) => m.box?.ok).length;
-  // 首次也必须等到有效解码；中间态禁止进入 UI
-  if (decodedCount === 0 && !candidate.nation?.box?.ok) {
-    return { ok: false, reason: "no_decoded_box", decodedCount };
+/**
+ * 仅在全部展示影片票房可信解码后重排；部分失败时绝不改 rank。
+ */
+export function rerankCandidateByTrustedBox(candidate) {
+  const movies = candidate?.movies || [];
+  if (!movies.length || !movies.every((m) => m?.box?.ok && Number(m.box.valueWan) > 0)) {
+    return candidate;
   }
-  // TOP1：本轮解码失败时，仅当 Store 已有该片 lastValid 才允许发布（冠军用旧有效值，绝不继承上一冠军数字）
-  const hasPublished = Boolean(boxStore.getLastPublished()?.hasData);
-  const top1 = candidate.movies.find((m) => m.rank === 1) || candidate.movies[0];
-  if (hasPublished && top1 && !top1.box?.ok) {
-    const prev = boxStore.getMovie(top1.movieId);
-    if (!(prev?.lastValidBoxWan > 0)) {
-      return { ok: false, reason: "top1_decode_failed", decodedCount };
-    }
+  const sorted = [...movies].sort((a, b) => {
+    const diff = Number(b.box.valueWan) - Number(a.box.valueWan);
+    if (diff !== 0) return diff;
+    return (Number(a.rank) || 0) - (Number(b.rank) || 0);
+  });
+  return {
+    ...candidate,
+    movies: sorted.map((m, i) => ({ ...m, rank: i + 1 })),
+  };
+}
+
+/**
+ * 原子门控：本轮展示影片必须全部有可信 current box；
+ * 已发布 TOP N 后，临时少片不得缩榜。
+ */
+export function validateCandidate(candidate, store = boxStore) {
+  const movies = candidate?.movies || [];
+  const moviesTotal = movies.length;
+  const failedMovieIds = movies
+    .filter((m) => !(m?.box?.ok && Number(m.box.valueWan) > 0))
+    .map((m) => String(m.movieId));
+  const moviesDecoded = moviesTotal - failedMovieIds.length;
+
+  if (!moviesTotal) {
+    return {
+      ok: false,
+      reason: "no_movies",
+      moviesTotal: 0,
+      moviesDecoded: 0,
+      failedMovieIds: [],
+    };
   }
-  return { ok: true, reason: "ok", decodedCount };
+
+  if (moviesDecoded !== moviesTotal) {
+    return {
+      ok: false,
+      reason: "partial_box_decode",
+      moviesTotal,
+      moviesDecoded,
+      failedMovieIds,
+    };
+  }
+
+  const published = store?.getLastPublished?.();
+  const publishedCount = Array.isArray(published?.movies) ? published.movies.length : 0;
+  if (publishedCount > 0 && moviesTotal < publishedCount) {
+    return {
+      ok: false,
+      reason: "partial_movie_list",
+      moviesTotal,
+      moviesDecoded,
+      failedMovieIds: [],
+      publishedCount,
+    };
+  }
+
+  return {
+    ok: true,
+    reason: "ok",
+    moviesTotal,
+    moviesDecoded,
+    failedMovieIds: [],
+  };
 }
 
 /**
@@ -175,7 +306,13 @@ function validateCandidate(candidate) {
  */
 export function projectStoreMovie(storeMovie) {
   if (!storeMovie) return null;
-  const amount = Number(storeMovie.displayBoxWan) || 0;
+  // invariant：曾有有效票房则不得投影成 0/--
+  const amount =
+    Number(storeMovie.displayBoxWan) > 0
+      ? Number(storeMovie.displayBoxWan)
+      : Number(storeMovie.lastValidBoxWan) > 0
+        ? Number(storeMovie.lastValidBoxWan)
+        : 0;
   const { valueText, unit } = formatWanForDisplay(amount);
   const raw = storeMovie.raw || {};
   return {
@@ -203,7 +340,12 @@ export function projectStoreMovie(storeMovie) {
 
 export function projectStoreNation(storeNation) {
   if (!storeNation) return null;
-  const amount = Number(storeNation.displayBoxWan) || 0;
+  const amount =
+    Number(storeNation.displayBoxWan) > 0
+      ? Number(storeNation.displayBoxWan)
+      : Number(storeNation.lastValidBoxWan) > 0
+        ? Number(storeNation.lastValidBoxWan)
+        : 0;
   const { valueText, unit } = formatWanForDisplay(amount);
   return {
     todayBox: amount,
@@ -249,11 +391,14 @@ export function createBoxPipeline(options = {}) {
   const fetchFn = options.fetchDashboardFn || fetchDashboard;
   const onPublish = typeof options.onPublish === "function" ? options.onPublish : null;
 
-  let pollIntervalMs = Number(options.pollIntervalMs) > 0 ? Number(options.pollIntervalMs) : DEFAULT_POLL_MS;
+  // 生产主链固定 5000ms；options 仅测试可覆盖
+  let pollIntervalMs =
+    Number(options.pollIntervalMs) > 0 ? Number(options.pollIntervalMs) : BOX_POLL_MS;
   let timer = null;
   let inFlight = false;
   let pollId = 0;
   let stopped = true;
+  const lockPollMs = options.lockPollMs !== false;
 
   /**
    * 执行一轮完整 pipeline。返回状态对象。
@@ -311,8 +456,8 @@ export function createBoxPipeline(options = {}) {
           contentKey = session.fontContentKey || session.fontUrlKey || "";
           fontKey = normalizeFontIdentity(contentKey) || contentKey;
 
-          // 已有 verified mapping → 直接复用，不重建
-          if (!isMapVerified(contentKey)) {
+          // 已有可用 mapping（VERIFIED/INFERRED）→ 直接复用，不重建
+          if (!isMapReadyForV2(contentKey)) {
             const built = await buildSessionPuaMap(session);
             contentKey = built?.contentKey || session.fontContentKey || contentKey;
             fontKey = normalizeFontIdentity(contentKey) || contentKey;
@@ -326,19 +471,21 @@ export function createBoxPipeline(options = {}) {
           if (pub.ok) {
             tryPublishDashboardSession({
               responseId: session.responseId,
-              contentKey: session.fontContentKey,
+              contentKey: session.fontContentKey || contentKey,
               businessDate: session.businessDate,
               fontStyle: session.fontStyle,
             });
-          } else if (pub.reason === "stale_response" && isMapVerified(contentKey)) {
-            // mapping 已就绪：继续 decode，不因 response 门控丢掉本轮
+          } else if (pub.reason === "stale_response" && isMapReadyForV2(contentKey)) {
             tryPublishDashboardSession({
               responseId: session.responseId,
               contentKey,
               businessDate: session.businessDate,
               fontStyle: session.fontStyle,
             });
-          } else if (!isMapVerified(contentKey)) {
+          }
+
+          // 硬门控：无可用 mapping 绝不能进入 decode/publish
+          if (!isMapReadyForV2(contentKey)) {
             mapMs = Math.round(nowMs() - tMap);
             console.log("[BOX_V2]", {
               pollId: thisPoll,
@@ -350,10 +497,9 @@ export function createBoxPipeline(options = {}) {
               moviesTotal,
               moviesDecoded: 0,
               publish: false,
-              rejectReason: pub.reason || "map_not_ready",
+              rejectReason: "map_not_ready",
             });
-            // mapping 未就绪：不 publish，UI 保持旧值
-            return { ok: false, reason: pub.reason || "map_not_ready", fontKey };
+            return { ok: false, reason: "map_not_ready", fontKey };
           }
         } catch (err) {
           mapMs = Math.round(nowMs() - tMap);
@@ -387,10 +533,10 @@ export function createBoxPipeline(options = {}) {
         : session.parsed;
       decodeMs = Math.round(nowMs() - tDec);
 
-      const candidate = buildCandidateFromDecoded(decoded, session, fontKey);
+      let candidate = buildCandidateFromDecoded(decoded, session, fontKey);
       moviesDecoded = candidate.movies.filter((m) => m.box?.ok).length;
 
-      const gate = validateCandidate(candidate);
+      const gate = validateCandidate(candidate, store);
       if (!gate.ok) {
         console.log("[BOX_V2]", {
           pollId: thisPoll,
@@ -399,13 +545,23 @@ export function createBoxPipeline(options = {}) {
           fetchMs,
           mapMs,
           decodeMs,
-          moviesTotal,
-          moviesDecoded,
+          moviesTotal: gate.moviesTotal ?? moviesTotal,
+          moviesDecoded: gate.moviesDecoded ?? moviesDecoded,
+          failedMovieIds: gate.failedMovieIds || [],
           publish: false,
           rejectReason: gate.reason,
         });
-        return { ok: false, reason: gate.reason, candidate, moviesDecoded };
+        return {
+          ok: false,
+          reason: gate.reason,
+          candidate,
+          moviesDecoded: gate.moviesDecoded ?? moviesDecoded,
+          failedMovieIds: gate.failedMovieIds || [],
+        };
       }
+
+      // 仅完整可信快照才允许重排；票房/排名/冠军同属一轮
+      candidate = rerankCandidateByTrustedBox(candidate);
 
       const committed = store.commit(candidate);
       console.log("[BOX_V2]", {
@@ -478,7 +634,10 @@ export function createBoxPipeline(options = {}) {
   }
 
   function setPollIntervalMs(ms) {
-    const next = Math.max(1000, Math.min(60000, Number(ms) || DEFAULT_POLL_MS));
+    // 生产默认锁定 5000ms，避免旧设置 4000/8000/10000 污染 V2
+    const next = lockPollMs
+      ? BOX_POLL_MS
+      : Math.max(1000, Math.min(60000, Number(ms) || BOX_POLL_MS));
     pollIntervalMs = next;
     if (!stopped) {
       stop();
@@ -509,11 +668,11 @@ export function createBoxPipeline(options = {}) {
   };
 }
 
-/** 纯函数测试用：在无 DOM/网络时跑 Store 规则 */
+/** 纯函数测试用：走与生产相同的 validate → rerank → commit */
 export function simulateBoxRounds(rounds, store = boxStore) {
   const results = [];
   for (const round of rounds) {
-    const candidate = {
+    let candidate = {
       responseId: round.responseId || results.length + 1,
       businessDate: round.businessDate || "2026-09-15",
       fontKey: round.fontKey || "fontA",
@@ -530,7 +689,7 @@ export function simulateBoxRounds(rounds, store = boxStore) {
                 text: String(m.box),
                 unit: "万",
                 fontKey: round.fontKey || "fontA",
-                reason: "verified",
+                reason: m.reason || "verified",
               }),
         boxRate: m.boxRate || "",
         showCountRate: m.showCountRate || "",
@@ -553,11 +712,33 @@ export function simulateBoxRounds(rounds, store = boxStore) {
         : null,
       createdAt: Date.now(),
     };
+
+    const gate = validateCandidate(candidate, store);
+    if (!gate.ok) {
+      results.push({
+        committed: {
+          ok: false,
+          reason: gate.reason,
+          rises: [],
+          snapshot: store.getLastPublished(),
+          moviesTotal: gate.moviesTotal,
+          moviesDecoded: gate.moviesDecoded,
+          failedMovieIds: gate.failedMovieIds,
+        },
+        snapshot: store.getSnapshot(),
+        rises: [],
+        gate,
+      });
+      continue;
+    }
+
+    candidate = rerankCandidateByTrustedBox(candidate);
     const committed = store.commit(candidate);
     results.push({
       committed,
       snapshot: store.getSnapshot(),
       rises: committed.rises || [],
+      gate,
     });
   }
   return results;

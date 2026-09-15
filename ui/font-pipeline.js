@@ -113,6 +113,8 @@ function buildInWorker(fontBuffer, fontStyle, crossContext, budget, simulateDela
     return buildOnMainThread(fontBuffer, fontStyle, crossContext, budget, simulateDelayMs);
   }
   const id = ++workerSeq;
+  // 预留主线程回退用的拷贝：postMessage transfer 会掏空原 buffer
+  const mainFallbackBuffer = fontBuffer.slice(0);
   return new Promise((resolve, reject) => {
     const onMessage = (event) => {
       const msg = event.data || {};
@@ -144,6 +146,9 @@ function buildInWorker(fontBuffer, fontStyle, crossContext, budget, simulateDela
       },
       [fontBuffer],
     );
+  }).catch(async (err) => {
+    console.warn("[font-pipeline] worker build failed, fallback main thread", err?.message || err);
+    return buildOnMainThread(mainFallbackBuffer, fontStyle, crossContext, budget, simulateDelayMs);
   });
 }
 

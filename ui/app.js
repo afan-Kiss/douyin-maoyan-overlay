@@ -59,7 +59,7 @@ import { formatRiseTextWithArrow } from "./rise-engine.js";
 import {
   createBoxPipeline,
   projectSnapshotForRender,
-  DEFAULT_POLL_MS,
+  BOX_POLL_MS,
 } from "./box-pipeline.js";
 import { applyOverlaySettings, getOverlaySettings } from "./settings-applier.js";
 import { bindDesignViewport } from "./viewport-fit.js";
@@ -281,7 +281,8 @@ function shouldPreferEncodedBox(movie) {
 
 function formatDailyBoxDisplay(movie) {
   if (BOX_PIPELINE_V2) {
-    const amount = Number(movie.displayBoxWan || movie.todayBox) || 0;
+    const amount =
+      Number(movie.displayBoxWan || movie.lastValidBoxWan || movie.todayBox) || 0;
     if (amount > 0) return `¥${formatWanDisplayText(amount)}`;
     return "--";
   }
@@ -1548,7 +1549,7 @@ function purgeMovieState(id) {
 
 function getMovieBoxAmount(movie) {
   if (BOX_PIPELINE_V2) {
-    const n = Number(movie?.displayBoxWan || movie?.todayBox) || 0;
+    const n = Number(movie?.displayBoxWan || movie?.lastValidBoxWan || movie?.todayBox) || 0;
     return n > 0 ? n : 0;
   }
   // 显示层：keep-previous 必须返回已恢复的可信值
@@ -2700,24 +2701,21 @@ function logBoxPipeline(payload) {
 
 function updateChampion(movies, businessDate, options = {}) {
   if (BOX_PIPELINE_V2) {
+    // Store 是唯一真相；禁止 DOM 保底决定业务票房
     const champion = boxStore.getChampion();
-    const top =
-      champion ||
-      (movies || []).find((m) => m.rank === 1) ||
-      movies?.[0] ||
-      null;
-    if (!top) {
-      champBoxPillEl?.classList.add("is-hidden");
+    if (!champion) {
+      if (!hasDisplayedData) {
+        champBoxPillEl?.classList.add("is-hidden");
+        setPlainBoxValue(champBoxEl, null, champBoxUnitEl, { hold: false });
+      }
       return;
     }
-    const amount = Number(champion?.displayBoxWan || top.displayBoxWan || top.todayBox) || 0;
+    const amount = Number(champion.displayBoxWan || champion.lastValidBoxWan) || 0;
     if (amount > 0) {
       champBoxPillEl?.classList.remove("is-hidden");
       setPlainBoxValue(champBoxEl, amount, champBoxUnitEl);
       lastChampionAmount = amount;
-      lastChampionKey = String(top.movieId);
-    } else if (elementHasVisibleBox(champBoxEl)) {
-      champBoxPillEl?.classList.remove("is-hidden");
+      lastChampionKey = String(champion.movieId);
     } else if (!hasDisplayedData) {
       setPlainBoxValue(champBoxEl, null, champBoxUnitEl, { hold: false });
     }
@@ -2807,12 +2805,15 @@ function updateChampion(movies, businessDate, options = {}) {
 
 function updateNation(nation, parsed, options = {}) {
   if (BOX_PIPELINE_V2) {
+    // Store 是唯一真相；禁止 DOM 业务兜底
     const storeNation = boxStore.getSnapshot().nation;
+    const displayAmount = Number(storeNation.displayBoxWan || storeNation.lastValidBoxWan) || 0;
     const projected = {
       ...(nation || {}),
-      todayBox: storeNation.displayBoxWan || 0,
-      displayBoxWan: storeNation.displayBoxWan || 0,
-      todayBoxText: storeNation.displayBoxWan > 0 ? String(storeNation.displayBoxWan) : "",
+      todayBox: displayAmount,
+      displayBoxWan: displayAmount,
+      lastValidBoxWan: storeNation.lastValidBoxWan || 0,
+      todayBoxText: displayAmount > 0 ? String(displayAmount) : "",
       todayUnit: "万",
       showCountDesc: storeNation.showCount || nation?.showCountDesc || "",
       viewCountDesc: storeNation.views || nation?.viewCountDesc || "",
@@ -2820,11 +2821,8 @@ function updateNation(nation, parsed, options = {}) {
       seatValue: storeNation.seatValue || nation?.seatValue || "",
     };
     const unitEl = document.querySelector(".js-nation-unit");
-    const displayAmount = Number(projected.displayBoxWan) || 0;
     if (displayAmount > 0) {
       setPlainBoxValue(nationBoxEl, displayAmount, unitEl);
-    } else if (elementHasVisibleBox(nationBoxEl)) {
-      /* keep */
     } else if (!hasDisplayedData) {
       setPlainBoxValue(nationBoxEl, null, unitEl, { hold: false });
     }
@@ -3111,7 +3109,8 @@ function paintFromStoreSnapshot(projected, meta = {}) {
 
 const boxPipeline = createBoxPipeline({
   store: boxStore,
-  pollIntervalMs: DEFAULT_POLL_MS,
+  pollIntervalMs: BOX_POLL_MS,
+  lockPollMs: true,
   getApiBase: () => config.apiBase || "",
   getTopCount: () => getDisplayMovieCount(),
   onPublish: (projected, meta) => {
@@ -3458,16 +3457,14 @@ async function refreshData() {
 
 function restartPolling() {
   if (BOX_PIPELINE_V2) {
-    const ms = Number(config.pollIntervalMs) > 0 ? Number(config.pollIntervalMs) : DEFAULT_POLL_MS;
-    // 强制默认 5s；旧 2000 迁移
-    const normalized = ms === 2000 ? DEFAULT_POLL_MS : Math.max(1000, Math.min(60000, ms));
-    config.pollIntervalMs = normalized;
-    boxPipeline.setPollIntervalMs(normalized);
+    // V2 生产主链固定 5000ms，忽略旧设置 4000/8000/10000
+    config.pollIntervalMs = BOX_POLL_MS;
+    boxPipeline.setPollIntervalMs(BOX_POLL_MS);
     boxPipeline.stop();
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = setInterval(() => {
       void refreshData();
-    }, normalized);
+    }, BOX_POLL_MS);
     return;
   }
   if (pollTimer) clearInterval(pollTimer);
@@ -3476,16 +3473,14 @@ function restartPolling() {
 
 function startPolling() {
   if (BOX_PIPELINE_V2) {
-    const ms = Number(config.pollIntervalMs) > 0 ? Number(config.pollIntervalMs) : DEFAULT_POLL_MS;
-    const normalized = ms === 2000 ? DEFAULT_POLL_MS : Math.max(1000, Math.min(60000, ms));
-    config.pollIntervalMs = normalized;
-    boxPipeline.setPollIntervalMs(normalized);
+    config.pollIntervalMs = BOX_POLL_MS;
+    boxPipeline.setPollIntervalMs(BOX_POLL_MS);
     boxPipeline.stop();
     if (pollTimer) clearInterval(pollTimer);
     void refreshData();
     pollTimer = setInterval(() => {
       void refreshData();
-    }, normalized);
+    }, BOX_POLL_MS);
     return;
   }
   refreshData();

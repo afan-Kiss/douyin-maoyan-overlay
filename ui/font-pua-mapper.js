@@ -107,10 +107,16 @@ function nowMs() {
 
 async function loadOpentype() {
   if (opentypeModule) return opentypeModule;
-  const imported =
-    typeof window !== "undefined"
-      ? await import("./vendor/opentype.mjs")
-      : await import("opentype.js");
+  // Renderer / Worker 用本地 vendor；纯 Node 测试用 npm 包。
+  // Worker 无 window，旧逻辑会误走 "opentype.js" bare import 并失败。
+  const inDomOrWorker =
+    typeof document !== "undefined" ||
+    (typeof self !== "undefined" &&
+      typeof WorkerGlobalScope !== "undefined" &&
+      self instanceof WorkerGlobalScope);
+  const imported = inDomOrWorker
+    ? await import("./vendor/opentype.mjs")
+    : await import("opentype.js");
   opentypeModule = imported.default || imported;
   return opentypeModule;
 }
