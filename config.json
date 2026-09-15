@@ -2,7 +2,7 @@
   "apiBase": "http://127.0.0.1:8765",
   "remoteAdminUrl": "https://xiangyuzhubao.xyz/maoyan-admin",
   "updateServerUrl": "https://xiangyuzhubao.xyz",
-  "pollIntervalMs": 2000,
+  "pollIntervalMs": 5000,
   "topCount": 5,
   "window": {
     "width": 525,

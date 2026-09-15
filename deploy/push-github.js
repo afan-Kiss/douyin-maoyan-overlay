@@ -39,7 +39,7 @@ function main() {
   const token = String(cred.token || "").trim();
   const owner = String(cred.owner || "afan-Kiss").trim();
   const repo = String(cred.repo || "douyin-maoyan-overlay").trim();
-  const branch = String(cred.branch || "master").trim();
+  const branch = String(process.argv[2] || process.env.PUSH_BRANCH || cred.branch || "master").trim();
   const remote = String(cred.remote || "origin").trim();
   const proxy = String(cred.proxy || "http://127.0.0.1:7897").trim();
 
