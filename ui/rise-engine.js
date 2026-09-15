@@ -14,24 +14,16 @@ function formatFixedTrim(n, maxDecimals) {
 
 /**
  * 气泡增量格式化（输入单位：元）。
- * <1000 → +xxx元
- * <10000 → +x.x千元
- * <100000 → +x.xx万
- * ≥100000 → +x.x万
+ * <10000 → +xxx元
+ * ≥10000 → +x.xx万（最多 2 位小数，去尾零；如 12500→+1.25万）
  */
 export function formatRiseDelta(deltaYuan) {
   if (!Number.isFinite(deltaYuan) || deltaYuan <= 0) return "";
   const y = Math.round(Math.abs(deltaYuan));
-  if (y < 1000) {
+  if (y < 10000) {
     return `+${y}元`;
   }
-  if (y < 10000) {
-    return `+${formatFixedTrim(y / 1000, 1)}千元`;
-  }
-  if (y < 100000) {
-    return `+${formatFixedTrim(y / 10000, 2)}万`;
-  }
-  return `+${formatFixedTrim(y / 10000, 1)}万`;
+  return `+${formatFixedTrim(y / 10000, 2)}万`;
 }
 
 /**

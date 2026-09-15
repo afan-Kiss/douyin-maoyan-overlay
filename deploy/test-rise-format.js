@@ -15,10 +15,13 @@ async function main() {
   // —— 格式 ——
   const cases = [
     [300, "+300元"],
-    [1000, "+1千元"],
-    [1200, "+1.2千元"],
-    [5600, "+5.6千元"],
+    [999, "+999元"],
+    [1000, "+1000元"],
+    [1200, "+1200元"],
+    [5600, "+5600元"],
+    [9999, "+9999元"],
     [10000, "+1万"],
+    [12500, "+1.25万"],
     [56000, "+5.6万"],
     [560000, "+56万"],
   ];
@@ -28,9 +31,10 @@ async function main() {
 
   // wan → yuan 入口
   assert.strictEqual(formatRiseText(0.03), "+300元");
-  assert.strictEqual(formatRiseText(0.1), "+1千元");
-  assert.strictEqual(formatRiseText(0.12), "+1.2千元");
+  assert.strictEqual(formatRiseText(0.1), "+1000元");
+  assert.strictEqual(formatRiseText(0.12), "+1200元");
   assert.strictEqual(formatRiseText(1), "+1万");
+  assert.strictEqual(formatRiseText(1.25), "+1.25万");
   assert.strictEqual(formatRiseText(5.6), "+5.6万");
   assert.strictEqual(formatRiseText(56), "+56万");
   assert.strictEqual(formatRiseTextWithArrow(0.03), "+300元 ↑");

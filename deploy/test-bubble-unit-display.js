@@ -1,5 +1,5 @@
 /**
- * 气泡增量分级显示（元 / 千元 / 万）
+ * 气泡增量分级显示（元 / 万，不再使用千元）
  * node deploy/test-bubble-unit-display.js
  */
 const assert = require("assert");
@@ -13,18 +13,24 @@ async function main() {
   // 内部单位是「万」
   assert.strictEqual(formatRiseText(0.03), "+300元");
   assert.strictEqual(formatRiseText(0.05), "+500元");
-  assert.strictEqual(formatRiseText(0.1), "+1千元");
-  assert.strictEqual(formatRiseText(0.12), "+1.2千元");
+  assert.strictEqual(formatRiseText(0.1), "+1000元");
+  assert.strictEqual(formatRiseText(0.12), "+1200元");
   assert.strictEqual(formatRiseText(1), "+1万");
+  assert.strictEqual(formatRiseText(1.25), "+1.25万");
   assert.strictEqual(formatRiseText(5.6), "+5.6万");
 
   assert.strictEqual(formatRiseTextWithArrow(0.03), "+300元 ↑");
   assert.strictEqual(formatRiseTextWithArrow(1), "+1万 ↑");
 
   assert.strictEqual(formatRiseDelta(300), "+300元");
-  assert.strictEqual(formatRiseDelta(1200), "+1.2千元");
+  assert.strictEqual(formatRiseDelta(999), "+999元");
+  assert.strictEqual(formatRiseDelta(1000), "+1000元");
+  assert.strictEqual(formatRiseDelta(9999), "+9999元");
+  assert.strictEqual(formatRiseDelta(10000), "+1万");
+  assert.strictEqual(formatRiseDelta(12500), "+1.25万");
+  assert.strictEqual(formatRiseDelta(560000), "+56万");
 
-  console.log("PASS bubble unit display (tiered yuan/qian/wan)");
+  console.log("PASS bubble unit display (yuan/wan, no qian)");
 }
 
 main().catch((err) => {
