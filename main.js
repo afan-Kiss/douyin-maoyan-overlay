@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, screen } = require("electron");
+const { app, BrowserWindow, ipcMain, screen, Menu } = require("electron");
 
 app.commandLine.appendSwitch("high-dpi-support", "1");
 const fs = require("fs");
@@ -170,6 +170,8 @@ function createWindow({ onReadyToShow } = {}) {
     minWidth: 360,
     minHeight: 400,
     frame: false,
+    autoHideMenuBar: true,
+    title: "",
     transparent: winCfg.transparent === true,
     alwaysOnTop: winCfg.alwaysOnTop === true,
     resizable: true,
@@ -188,12 +190,15 @@ function createWindow({ onReadyToShow } = {}) {
 
   mainWindow.setContentSize(size.width, size.height);
   mainWindow.setAlwaysOnTop(winCfg.alwaysOnTop === true);
-  mainWindow.loadFile(path.join(__dirname, "ui", "index.html"));
+  mainWindow.setMenu(null);
   mainWindow.setMenuBarVisibility(false);
+  mainWindow.loadFile(path.join(__dirname, "ui", "index.html"));
 
   mainWindow.webContents.on("did-finish-load", () => {
     mainWindow.webContents.setVisualZoomLevelLimits(1, 1);
     mainWindow.webContents.setZoomFactor(1);
+    // 文档 <title> 会写回窗口标题；无边框下不需要标题栏文字
+    if (!mainWindow.isDestroyed()) mainWindow.setTitle("");
   });
 
   mainWindow.once("ready-to-show", async () => {
@@ -433,6 +438,8 @@ if (!ensureSingleInstance({ onSecondInstance: focusMainWindow })) {
   // 第二个实例会弹窗提示并退出
 } else {
   app.whenReady().then(async () => {
+    // 彻底关闭 Electron 默认 File/Edit/View/Window/Help 菜单
+    Menu.setApplicationMenu(null);
     ensureSplashVersionIpc();
     const appVersion = readAppVersionShort();
     const splashWindow = createStartupSplash(appVersion);

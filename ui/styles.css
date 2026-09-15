@@ -410,6 +410,7 @@ body:not(.is-ready) .bg-curtain--r {
   gap: 8px;
   margin: 2px 0 8px;
   position: relative;
+  -webkit-app-region: drag;
 }
 
 .hero__title {
