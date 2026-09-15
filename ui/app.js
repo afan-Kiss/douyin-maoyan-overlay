@@ -1,8 +1,10 @@
 import {
   fetchDashboard,
+  parseDashboardStructure,
   parseDashboard,
-  injectFontStyle,
   decodeBoxFromHtml,
+  decodeBoxHtmlLoose,
+  decodeFontNum,
   enrichMovies,
   enrichMoviesQuick,
   parseBoxNum,
@@ -17,6 +19,14 @@ import {
   isEncodedBoxHtml,
   boxHtmlUsesAntiScrapeFont,
   refreshMovieBoxFields,
+  refreshNationBoxFields,
+  getFontMappingVersion,
+  getActivePuaMapState,
+  prepareDashboardFont,
+  scheduleDashboardPuaMap,
+  fontFamilyForVersion,
+  getActiveFontFamily,
+  resolveMaoyanSumBoxWan,
   rerankMoviesByTodayBox,
   isMaoyanFontReady,
   DECODE_STATUS,
@@ -25,10 +35,34 @@ import {
   getExtraMetricsGridClass,
   buildDailyTrendItems,
   formatReleaseTag,
+  tryPublishDashboardSession,
 } from "./maoyan-api.js";
+import {
+  createDashboardSession,
+  isSessionCurrent,
+  prepareSessionFont,
+  buildSessionPuaMap,
+  tryPublishSession,
+  decodeSessionDashboard,
+  sessionFontIdentity,
+} from "./dashboard-session.js";
+import { normalizeFontIdentity, isVisualReady } from "./font-registry.js";
+import {
+  submitBubbleSample,
+  tickBubbleSamples,
+  bubbleSamples,
+  registerBubbleAnchor,
+  getBubbleSkipLog,
+  BUBBLE_SKIP,
+} from "./bubble-tracker.js";
 import { applyOverlaySettings, getOverlaySettings } from "./settings-applier.js";
 import { bindDesignViewport } from "./viewport-fit.js";
-import { formatWanForDisplay, formatWanDisplayText } from "./box-display.js";
+import {
+  formatWanForDisplay,
+  formatWanDisplayText,
+  formatBoxTextForDisplay,
+  sanitizeBoxUnit,
+} from "./box-display.js";
 import {
   createEnrichScheduleState,
   shouldScheduleFullEnrich,
@@ -39,6 +73,7 @@ import {
   shouldMarkFullEnrichFailure,
   FULL_ENRICH_GLOBAL_TIMEOUT_MS,
 } from "./enrich-scheduler.js";
+import { beginStartupSession, markStartup, flushStartupReport, getPreviousStartupReport } from "./startup-metrics.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -59,7 +94,8 @@ let config = {};
 let pollTimer = null;
 let retryTimer = null;
 let loginWatchTimer = null;
-let refreshing = false;
+let fetchInFlight = false;
+let mappingGeneration = 0;
 let hasDisplayedData = false;
 let enrichAllowed = false;
 let firstDashboardPainted = false;
@@ -78,6 +114,13 @@ const speedSnapshots = new Map();
 const lastGoodMovies = new Map();
 const lastGoodNation = {};
 let lastGoodCacheDay = "";
+let lastFontMappingVersion = "";
+let lastChampionKey = "";
+let lastChampionAmount = 0;
+let lastChampionUnit = "万";
+let lastChampionFontVersion = "";
+const DISPLAY_CACHE_TTL_MS = 120000;
+const displayCache = new Map();
 let latestMovies = [];
 let latestSpeedMap = {};
 let latestNation = null;
@@ -85,7 +128,12 @@ let latestParsedMeta = null;
 let pollGeneration = 0;
 let FULL_ENRICH_INTERVAL_MS = 60000;
 const inlineDeltaTimers = new Map();
+const BUBBLE_INTERVAL_MS = 3000;
+let bubbleTimer = null;
+let bubbleTimerScheduled = false;
 let partialDataWarning = "";
+let activeLoginAttemptId = 0;
+let lastAppliedLoginAttemptId = 0;
 
 function isEmptyField(val) {
   if (val == null) return true;
@@ -157,7 +205,7 @@ function formatEndDateMetric(m) {
   return dateText || days;
 }
 
-/** 上映：优先日历上映日（tech），否则大盘 releaseInfo（如上映12天） */
+/** 上映：优先 tech releaseDate，其次 dashboard releaseInfo */
 function formatReleaseMetric(m) {
   if (!isEmptyField(m?.releaseDate)) {
     return String(m.releaseDate).replace(/^\d{4}-/, "").trim();
@@ -176,18 +224,43 @@ function formatMoneyMetric(val) {
   return `¥${text}`;
 }
 
+function isPuaMapVerified() {
+  const state = getActivePuaMapState();
+  return Boolean(state?.hasMap && state?.meta?.confidence === "verified");
+}
+
+function normalizeDisplayFontVersion(versionKey) {
+  const ver = String(versionKey || "").trim();
+  if (!ver) return "";
+  const sha = ver.match(/sha256:([a-f0-9]+)/i)?.[1];
+  if (sha) return `sha256:${sha}`;
+  const urlHash = ver.match(/^mtsi:([a-f0-9]{8,})$/i)?.[1];
+  if (urlHash) return `url:${urlHash}`;
+  return ver;
+}
+
+function elementHasVisibleBox(el) {
+  if (!el) return false;
+  if (el.classList.contains("mtsi-font-encoded") && String(el.innerHTML || "").trim()) return true;
+  const text = String(el.textContent || "").trim();
+  return Boolean(text && text !== "--" && text !== "-");
+}
+
 function shouldPreferEncodedBox(movie) {
   if (!movie?.todayBoxHtml) return false;
-  // 已有可信明文（含 lastGood 回填）：直播必须用数字，禁止改画乱码导致闪空白
   const text = String(movie.todayBoxText || "").trim();
   const amount = Number(movie.todayBox) || 0;
+  const key = String(movie.movieId || "");
+  const cached = lastGoodMovies.get(key);
+  if (
+    (cached?.todayBox > 0 && !isUntrustedBoxDecode(String(cached.todayBoxText || cached.todayBox))) ||
+    (amount > 0 && !isUntrustedBoxDecode(text || String(amount)))
+  ) {
+    return false;
+  }
   if (amount > 0 && text && text !== "--" && !isUntrustedBoxDecode(text)) {
     return false;
   }
-  if (amount > 0 && !isUntrustedBoxDecode(String(amount))) {
-    return false;
-  }
-  // 字体未就绪时禁止塞乱码点，统一走缓存/“--”
   if (!isMaoyanFontReady()) return false;
   if (isEncodedBoxHtml(movie.todayBoxHtml)) return true;
   const raw = String(movie.todayBoxText || "").trim();
@@ -196,13 +269,13 @@ function shouldPreferEncodedBox(movie) {
 
 function formatDailyBoxDisplay(movie) {
   if (shouldPreferEncodedBox(movie)) return "";
-  // 优先用猫眼原始解码文本，避免二次 toFixed(1) 把 1100 显示成怪异的 1100.1
+  // 优先保留猫眼原文精度；单位经 sanitize，杜绝 PUA 空白「万」
   if (!isEmptyField(movie.todayBoxText) && movie.todayBoxText !== "--") {
     const text = String(movie.todayBoxText).trim();
     if (isUntrustedBoxDecode(text)) return "";
-    const unit = movie.todayUnit || "万";
-    if (text.includes("万") || text.includes("亿")) return formatMoneyMetric(text);
-    return formatMoneyMetric(`${text}${unit}`);
+    const unit = sanitizeBoxUnit(movie.todayUnit || "万");
+    const normalized = formatBoxTextForDisplay(text, unit, parseBoxNum);
+    if (normalized) return `¥${normalized}`;
   }
   const amount = getMovieBoxAmount(movie);
   if (amount > 0) return `¥${formatWanDisplayText(amount)}`;
@@ -231,7 +304,7 @@ const SUMMARY_COLUMN_DEFS = [
     },
     {
       key: "releaseInfo",
-      label: "上映",
+      label: "上映日期",
       get: (m) => formatReleaseMetric(m),
       // 大盘自带字段，不依赖 getTechData；比「实时上座」更适合直播展示
       fallbacks: [],
@@ -245,7 +318,12 @@ const SUMMARY_COLUMN_DEFS = [
       fallbacks: [
         (m) => {
           if (!isEmptyField(m.todayBoxText) && m.todayBoxText !== "--") {
-            return `¥${m.todayBoxText}${m.todayUnit || "万"}`;
+            const cleaned = formatBoxTextForDisplay(
+              m.todayBoxText,
+              sanitizeBoxUnit(m.todayUnit || "万"),
+              parseBoxNum,
+            );
+            return cleaned ? `¥${cleaned}` : "";
           }
           return "";
         },
@@ -332,6 +410,179 @@ function metricValueSignature(def, movie) {
   return isEmptyField(raw) ? "" : String(raw).replace(/\s+/g, "").trim();
 }
 
+function resetBubbleBaselineOnFontChange(fontVer) {
+  const ver = normalizeFontIdentity(fontVer || getFontMappingVersion());
+  if (!ver) return;
+  lastFontMappingVersion = ver;
+}
+
+function displayCacheKey(kind, id, businessDate) {
+  const day = String(businessDate || lastGoodCacheDay || "").slice(0, 10);
+  return `${kind}:${id}:${day}`;
+}
+
+function isStickyBoxCacheKey(key) {
+  return /^(movie-box|champion|nation):/.test(String(key || ""));
+}
+
+function readDisplayCache(key) {
+  const entry = displayCache.get(key);
+  if (!entry) return null;
+  if (!isStickyBoxCacheKey(key) && Date.now() - entry.at > DISPLAY_CACHE_TTL_MS) {
+    displayCache.delete(key);
+    return null;
+  }
+  return entry;
+}
+
+function displayHtmlLooksLikeBox(html) {
+  const raw = String(html || "").trim();
+  if (!raw || raw === "--") return false;
+  if (raw.includes("metric__box-encoded") || raw.includes("mtsi-font-encoded")) {
+    return raw.replace(/<[^>]+>/g, "").trim().length > 0 || /<span[\s>]/i.test(raw);
+  }
+  const text = raw.replace(/<[^>]+>/g, "").trim();
+  return Boolean(text && text !== "--" && text !== "-");
+}
+
+function stickyBoxMetricHtml(previousHtml, cacheKey) {
+  if (displayHtmlLooksLikeBox(previousHtml)) return previousHtml;
+  const cached = readDisplayCache(cacheKey);
+  if (cached?.encodedHtml) {
+    const html = String(cached.encodedHtml);
+    if (html.includes("<")) return html.includes("metric__box-unit") ? html : wrapEncodedBoxMetricHtml(html, cached.unit || "万");
+    return buildEncodedBoxHtml(html, cached.fontVersion, cached.unit || "万");
+  }
+  if (cached?.plainHtml) return String(cached.plainHtml);
+  return null;
+}
+
+function writeDisplayCache(key, payload) {
+  if (!key || !payload) return;
+  displayCache.set(key, { ...payload, at: Date.now() });
+}
+
+function formatCacheAgeMs(at) {
+  if (!at) return "";
+  const sec = Math.max(1, Math.round((Date.now() - at) / 1000));
+  if (sec < 60) return `${sec}秒前`;
+  return `${Math.round(sec / 60)}分钟前`;
+}
+
+function cacheTitleAttr(entry) {
+  if (!entry?.at) return "";
+  return ` title="缓存 ${formatCacheAgeMs(entry.at)}"`;
+}
+
+function buildEncodedBoxHtml(html, fontVersion, unit = "万") {
+  const ver = String(fontVersion || getFontMappingVersion() || "").trim();
+  const family = fontFamilyForVersion(ver || getActiveFontFamily());
+  const safeVer = escapeHtml(ver);
+  const safeFamily = escapeHtml(family);
+  const safeUnit = sanitizeBoxUnit(unit);
+  return `<span class="metric__box-encoded mtsi-font-encoded" data-font-version="${safeVer}" style="font-family:'${safeFamily}',var(--font-sans)">${html}</span><span class="metric__box-unit">${escapeHtml(safeUnit)}</span>`;
+}
+
+function wrapEncodedBoxMetricHtml(html, unit = "万") {
+  if (!html) return html;
+  if (String(html).includes("metric__box-unit")) return html;
+  const safeUnit = sanitizeBoxUnit(unit);
+  return `${html}<span class="metric__box-unit">${escapeHtml(safeUnit)}</span>`;
+}
+
+function resolveDisplayBoxUnit(record, amountWan = 0) {
+  if (Number.isFinite(amountWan) && amountWan >= 10000) return "亿";
+  const unit = sanitizeBoxUnit(record?.todayUnit || "万");
+  return unit === "亿" ? "亿" : "万";
+}
+
+function bubbleDecodeBoxWan(html, unit, contentKey) {
+  if (!html) return 0;
+  const safeUnit = sanitizeBoxUnit(unit || "万");
+  const key = String(contentKey || "").trim();
+  // 编码票房必须带本轮字体身份；禁止静默回退到 published 旧映射
+  if (!key && boxHtmlUsesAntiScrapeFont(html)) return 0;
+  const n = decodeBoxHtmlLoose(html, safeUnit, key || getFontMappingVersion());
+  return n > 0 ? n : 0;
+}
+
+function readBubbleAmountFromCard(card, movie) {
+  const valueEl = card?.querySelector('[data-metric="dailyBox"] .metric__value');
+  if (!valueEl) return 0;
+  const text = String(valueEl.textContent || "")
+    .replace(/[¥,\s]/g, "")
+    .trim();
+  if (!text || text === "--") return 0;
+  const unit = sanitizeBoxUnit(movie?.todayUnit || "万");
+  const n = parseBoxNum(text, unit);
+  if (n > 0 && !isUntrustedBoxDecode(text)) return n;
+  return 0;
+}
+
+function hasVisibleDailyBox(card) {
+  const valueEl = card?.querySelector('[data-metric="dailyBox"] .metric__value');
+  if (!valueEl) return false;
+  if (displayHtmlLooksLikeBox(valueEl.innerHTML)) return true;
+  const text = String(valueEl.textContent || "").trim();
+  return Boolean(text && text !== "--" && text !== "-");
+}
+
+function rememberBubbleBoxAmount(movie, amount) {
+  if (!movie?.movieId || !(amount > 0)) return;
+  const key = String(movie.movieId);
+  const prev = Number(prevValues.get(key)) || 0;
+  // 高水位：仅在更高时更新，低于上次的读数抛弃
+  if (amount > prev) prevValues.set(key, amount);
+}
+
+function scheduleBubbleAmountRetry(card, movie, bubbleEl, key, contentKey) {
+  if (!card || !bubbleEl || bubbleSamples.get(key)?.amount > 0) return;
+  const businessDate = latestParsedMeta?.calendar?.today || lastGoodCacheDay;
+  const attempt = () => {
+    if (!bubbleEl.isConnected) return;
+    const resolved = resolveBubbleAmountWithHtmlDelta(movie, {
+      contentKey,
+      card,
+      bubbleKey: key,
+      trackKey: String(movie.movieId),
+    });
+    if (resolved.amount > 0) {
+      observeBubble(key, bubbleEl, resolved.amount, {
+        movie,
+        businessDate,
+        movieId: movie.movieId,
+        trusted: true,
+        decodeVerified: true,
+        contentKey,
+        responseId: latestParsedMeta?.responseId || 0,
+        previousAmount: resolved.previousAmount,
+      });
+      rememberBubbleBoxAmount(movie, resolved.amount);
+    }
+  };
+  requestAnimationFrame(attempt);
+  setTimeout(attempt, 500);
+  setTimeout(attempt, 2000);
+}
+
+function championCacheKey(movie, businessDate) {
+  const day = String(businessDate || latestParsedMeta?.calendar?.today || lastGoodCacheDay || "").slice(0, 10);
+  return `${movie?.movieId || ""}:${day}`;
+}
+
+function buildMovieBoxRefreshOptions(movie, nation) {
+  const nationBoxWan = nation?.todayBox > 0 ? nation.todayBox : lastGoodNation.todayBox || 0;
+  const sumBoxNumWan =
+    Number(movie?.sumBoxNum) > 0 ? Number(movie.sumBoxNum) : resolveMaoyanSumBoxWan(movie);
+  const mapState = getActivePuaMapState();
+  return {
+    nationBoxWan,
+    sumBoxNumWan,
+    todayUnit: movie?.todayUnit,
+    fontMappingVersion: mapState.version || getFontMappingVersion(),
+  };
+}
+
 function resetLastGoodIfDayChanged(calendarToday) {
   const day =
     String(calendarToday || "")
@@ -341,6 +592,21 @@ function resetLastGoodIfDayChanged(calendarToday) {
     lastGoodMovies.clear();
     for (const key of Object.keys(lastGoodNation)) delete lastGoodNation[key];
     speedSnapshots.clear();
+    prevValues.clear();
+    prevBoxHtml.clear();
+    displayCache.clear();
+    lastChampionKey = "";
+    lastChampionAmount = 0;
+    bubbleSamples.clear();
+    clearInterval(bubbleTimer);
+    bubbleTimer = null;
+    bubbleTimerScheduled = false;
+    for (const timer of inlineDeltaTimers.values()) clearTimeout(timer);
+    inlineDeltaTimers.clear();
+    document.querySelectorAll(".race-card__delta-bubble, #nation-delta").forEach((el) => {
+      el.classList.remove("is-visible", "is-animating", "is-idle", "is-rise");
+      el.textContent = "";
+    });
   }
   lastGoodCacheDay = day;
 }
@@ -413,11 +679,15 @@ function setStatus(type, text) {
   statusEl.style.display = finalType === "ok" ? "none" : "block";
 }
 
-function updatePartialDataWarning(errors = []) {
+async function updatePartialDataWarning(errors = []) {
   if (!errors.length) {
     partialDataWarning = "";
     return;
   }
+  const session = (await window.overlay?.getSessionStatus?.()) || {};
+  const sessionReady =
+    Boolean(session.detailApiReady) ||
+    (Boolean(session.signatureReady) && !session.loginRequired);
   const loginIssue = errors.find(
     (e) =>
       e.action === "login" ||
@@ -425,12 +695,24 @@ function updatePartialDataWarning(errors = []) {
       String(e.code) === "login_required" ||
       String(e.code) === "upstream_401",
   );
-  if (loginIssue) {
+  if (loginIssue && !sessionReady) {
     partialDataWarning = "明日/后天等明细数据需要猫眼登录，请点击右上角「登录」完成账号登录";
+    return;
+  }
+  if (loginIssue && sessionReady) {
+    partialDataWarning = `部分明细暂时不可用：${loginIssue.detail || "接口重试中，大盘与实时票房不受影响"}`;
     return;
   }
   const detail = errors[0]?.detail || "部分详细数据获取失败";
   partialDataWarning = `部分详细数据获取失败：${detail}`;
+}
+
+function shouldApplyLoginResult(result) {
+  const attemptId = Number(result?.attemptId) || 0;
+  if (!attemptId) return true;
+  if (attemptId <= lastAppliedLoginAttemptId) return false;
+  lastAppliedLoginAttemptId = attemptId;
+  return true;
 }
 
 async function finishLoginSuccess(result = {}) {
@@ -441,7 +723,10 @@ async function finishLoginSuccess(result = {}) {
   enrichAllowed = true;
 
   const deferred = Boolean(result?.deferredDetail || result?.detailApiReady === false);
-  setStatus("loading", "登录成功，正在拉取票房数据…");
+  setStatus(
+    "loading",
+    deferred ? "账号已登录，签名准备中，正在拉取票房数据…" : "登录成功，正在拉取票房数据…",
+  );
 
   let status = null;
   try {
@@ -571,10 +856,12 @@ function escapeHtml(s) {
 
 function formatDelta(deltaWan) {
   if (!Number.isFinite(deltaWan) || deltaWan <= 0) return "";
-  if (deltaWan >= 10000) return `+${(deltaWan / 10000).toFixed(2)}亿`;
-  if (deltaWan >= 100) return `+${deltaWan.toFixed(1)}万`;
-  if (deltaWan >= 1) return `+${deltaWan.toFixed(1)}万`;
-  return `+${deltaWan.toFixed(2)}万`;
+  const sign = "+";
+  const cents = Math.round(Math.abs(deltaWan) * 1000000);
+  if (!cents) return "";
+  if (cents >= 10000000000) return `${sign}${Number((cents / 10000000000).toFixed(10))}亿`;
+  if (cents >= 1000000) return `${sign}${Number((cents / 1000000).toFixed(6))}万`;
+  return `${sign}${Number((cents / 100).toFixed(2))}元`;
 }
 
 function formatDeltaWithArrow(deltaWan) {
@@ -588,70 +875,283 @@ function getBubbleDurationMs() {
   return 2000;
 }
 
-function pulseInlineDelta(el, deltaWan, timerKey) {
-  const bubble = getOverlaySettings()?.bubble;
-  const minDelta = bubble?.minDelta ?? 0.001;
-  if (!el || bubble?.enabled === false) return;
-  if (!Number.isFinite(deltaWan) || deltaWan < minDelta) return;
-
-  el.textContent = formatDeltaWithArrow(deltaWan);
-  el.classList.remove("is-animating");
-  void el.offsetWidth;
-  el.classList.add("is-visible", "is-animating");
-
-  const key = timerKey || el;
-  if (inlineDeltaTimers.has(key)) clearTimeout(inlineDeltaTimers.get(key));
-  inlineDeltaTimers.set(
-    key,
-    setTimeout(() => {
-      el.classList.remove("is-visible", "is-animating");
-      el.textContent = "";
-      inlineDeltaTimers.delete(key);
-    }, getBubbleDurationMs()),
-  );
+function isBubbleVisible(key) {
+  const sample = bubbleSamples.get(key);
+  return Boolean(sample && sample.visibleUntil > Date.now());
 }
 
-function safeDecodeBox(html, unit = "万") {
+function markBubbleVisible(key, durationMs) {
+  const sample = bubbleSamples.get(key);
+  if (sample) sample.visibleUntil = Date.now() + durationMs;
+}
+
+const BUBBLE_NO_CHANGE_TEXT = "暂无变化";
+
+function hideBubble(el, key) {
+  if (!el) return;
+  el.textContent = "";
+  el.classList.remove("is-visible", "is-animating", "is-idle", "is-rise");
+  el.style.color = "";
+  el.style.textShadow = "";
+  el.style.animation = "";
+  el.style.animationDuration = "";
+  el.style.opacity = "";
+  el.style.visibility = "";
+  const sample = bubbleSamples.get(key);
+  if (sample) {
+    sample.el = el;
+    sample.visibleUntil = 0;
+  }
+}
+
+function finishBubbleAnimation(el, key) {
+  inlineDeltaTimers.delete(key);
+  const live = bubbleSamples.get(key);
+  if (live) live.visibleUntil = 0;
+  const target = live?.el?.isConnected ? live.el : el?.isConnected ? el : null;
+  if (target) hideBubble(target, key);
+}
+
+/** 统一：上浮动效 → 播完隐藏。mode=rise 红色涨幅，mode=idle 暂无变化 */
+function playBubblePulse(el, key, mode, deltaWan = 0) {
+  const bubble = getOverlaySettings()?.bubble;
+  if (!el || bubble?.enabled === false) return;
+  el.style.display = "inline-flex";
+
+  if (inlineDeltaTimers.has(key)) clearTimeout(inlineDeltaTimers.get(key));
+
+  const durationMs = getBubbleDurationMs();
+  const isRise = mode === "rise";
+  if (isRise) {
+    if (!Number.isFinite(deltaWan) || deltaWan <= 0 || !formatDelta(deltaWan)) return;
+    el.textContent = formatDeltaWithArrow(deltaWan);
+    el.style.color = "#ff4d4d";
+    el.style.textShadow = "0 0 8px rgba(255, 77, 109, 0.45)";
+    el.classList.remove("is-idle");
+    el.classList.add("is-rise");
+  } else {
+    el.textContent = BUBBLE_NO_CHANGE_TEXT;
+    el.style.color = "#d1d5db";
+    el.style.textShadow = "none";
+    el.classList.remove("is-rise");
+    el.classList.add("is-idle");
+  }
+
+  el.style.animation = "none";
+  el.style.animationDuration = `${durationMs}ms`;
+  el.style.opacity = "1";
+  el.style.visibility = "visible";
+  el.classList.remove("is-animating");
+  void el.offsetWidth;
+  el.style.animation = "";
+  el.classList.add("is-visible", "is-animating");
+
+  markBubbleVisible(key, durationMs);
+  const sample = bubbleSamples.get(key);
+  if (sample) sample.el = el;
+  inlineDeltaTimers.set(key, setTimeout(() => finishBubbleAnimation(el, key), durationMs));
+}
+
+function pulseInlineDelta(el, deltaWan, timerKey) {
+  playBubblePulse(el, timerKey || el, "rise", deltaWan);
+}
+
+function pulseNoChangeBubble(el, key) {
+  playBubblePulse(el, key, "idle");
+}
+
+// Rendering records observations; only this clock starts bubbles. Slow requests and
+// duplicate detail/decode renders must not control or restart the animation cadence.
+function observeBubble(key, el, amount, options = {}) {
+  const trusted = isTrustedBubbleAmount(amount, options);
+  const trackKey =
+    key === "__nation__"
+      ? "__nation__"
+      : options.movieId != null
+        ? String(options.movieId)
+        : String(key || "").replace(/^movie-/, "");
+  const previousAmount =
+    Number(options.previousAmount) > 0
+      ? Number(options.previousAmount)
+      : Number(bubbleSamples.get(key)?.baseline) > 0
+        ? Number(bubbleSamples.get(key).baseline)
+        : Number(prevValues.get(trackKey)) || 0;
+  const result = submitBubbleSample({
+    key,
+    el,
+    amount,
+    businessDate: options.businessDate || lastGoodCacheDay,
+    movieId: options.movieId || "",
+    scope: key === "__nation__" ? "nation" : "movie",
+    contentKey: options.contentKey || getFontMappingVersion(),
+    decodeVerified: trusted,
+    responseId: options.responseId || 0,
+    resetBaseline: options.resetBaseline === true,
+    isReasonableDelta: isReasonableBoxDelta,
+    bubbleEnabled: getOverlaySettings()?.bubble?.enabled !== false,
+    isVisible: isBubbleVisible,
+    lastTriggeredAmount: bubbleSamples.get(key)?.lastTriggeredAmount || 0,
+    previousAmount,
+  });
+  if (result.action === "pulse" && result.delta > 0) {
+    pulseInlineDelta(el, result.delta, key);
+    const sample = bubbleSamples.get(key);
+    if (sample) sample.lastTriggeredAmount = amount;
+  } else if (result.reason === BUBBLE_SKIP.SETTINGS_OFF) {
+    hideBubble(el, key);
+  }
+  ensureBubbleTimer();
+}
+
+function ensureBubbleTimer() {
+  if (!bubbleSamples.size || bubbleTimer !== null) return;
+  if (bubbleTimerScheduled) return;
+  bubbleTimerScheduled = true;
+  setTimeout(() => {
+    bubbleTimerScheduled = false;
+    if (!bubbleSamples.size) return;
+    tickBubbles();
+    if (bubbleTimer === null && bubbleSamples.size > 0) {
+      bubbleTimer = setInterval(tickBubbles, BUBBLE_INTERVAL_MS);
+    }
+  }, BUBBLE_INTERVAL_MS);
+}
+
+function bindBubbleAnchor(key, el) {
+  if (!key || !el) return;
+  registerBubbleAnchor(key, el);
+  ensureBubbleTimer();
+}
+
+function tickBubbles() {
+  tickBubbleSamples({
+    isReasonableDelta: isReasonableBoxDelta,
+    bubbleEnabled: getOverlaySettings()?.bubble?.enabled !== false,
+    isVisible: isBubbleVisible,
+    onPulse: (el, delta, key) => {
+      pulseInlineDelta(el, delta, key);
+      const sample = bubbleSamples.get(key);
+      if (sample) sample.lastTriggeredAmount = sample.amount;
+    },
+    onNoChange: (el, key) => {
+      pulseNoChangeBubble(el, key);
+    },
+  });
+}
+
+window.addEventListener("beforeunload", () => {
+  clearInterval(bubbleTimer);
+  bubbleTimer = null;
+  bubbleTimerScheduled = false;
+  for (const timer of inlineDeltaTimers.values()) clearTimeout(timer);
+});
+
+function safeDecodeBox(html, unit = "万", contentKey = "") {
   if (!html) return 0;
+  const encoded = boxHtmlUsesAntiScrapeFont(html);
+  // 编码票房必须绑定本轮字体版本。没有版本时宁可暂时不解码，也不能
+  // 用上一轮 published map 猜，否则会把错误大数写进高水位。
+  if (encoded && !contentKey) return 0;
+  if (contentKey || encoded) {
+    const loose = bubbleDecodeBoxWan(html, unit, contentKey);
+    if (loose > 0) return loose;
+  }
   const value = decodeBoxFromHtml(html, unit);
   return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
+function isTrustedBubbleAmount(amount, options = {}) {
+  if (options.trusted === true || options.decodeVerified === true) return true;
+  // 已经拿到干净正数就给气泡用；不要被「仍带编码 HTML」的 movie 标志卡死
+  if (!Number.isFinite(amount) || amount <= 0) return false;
+  if (isUntrustedBoxDecode(String(amount))) return false;
+  return true;
+}
+
 function isTrustedMovieBoxAmount(movie) {
   if (!movie) return false;
+  if (movie.decodeVerified === true) return getMovieBoxAmount(movie) > 0;
   const text = String(movie.todayBoxText || "").trim();
   if (text && text !== "--" && isUntrustedBoxDecode(text)) return false;
   const amount = getMovieBoxAmount(movie);
   if (amount <= 0) return false;
   if (isUntrustedBoxDecode(String(amount))) return false;
-  return true;
+  if (movie.decodeStatus === DECODE_STATUS.OK) return true;
+  const html = movie.todayBoxHtml || "";
+  if (html && isEncodedBoxHtml(html)) return false;
+  if (text && /^\d+(\.\d+)?$/.test(text)) return true;
+  if (!html) return true;
+  return false;
 }
 
 function isReasonableBoxDelta(prevAmount, nextAmount, delta) {
   if (!Number.isFinite(delta) || delta <= 0) return false;
   if (!Number.isFinite(prevAmount) || !Number.isFinite(nextAmount)) return false;
-  if (nextAmount <= prevAmount) return false;
+  if (prevAmount <= 0 || nextAmount <= prevAmount) return false;
   if (isUntrustedBoxDecode(String(nextAmount)) || isUntrustedBoxDecode(String(prevAmount))) {
     return false;
   }
-  // 可信数字已过滤垃圾解码；放宽跳变阈值，避免解码中断恢复后多部片涨幅被误杀
   if (prevAmount >= 1 && delta > prevAmount * 3 && delta > 200) return false;
   return true;
 }
 
-function resolvePrevAmount(prevAmount, prevHtml, unit) {
+function resolvePrevAmount(prevAmount, prevHtml, unit, contentKey = "") {
   if (Number.isFinite(prevAmount) && prevAmount > 0) return prevAmount;
-  if (prevHtml) return safeDecodeBox(prevHtml, unit);
+  if (prevHtml) return safeDecodeBox(prevHtml, unit, contentKey);
   return 0;
 }
 
-function computeBoxIncrease(prevAmount, prevHtml, nextHtml, unit) {
-  const next = safeDecodeBox(nextHtml, unit);
+function computeBoxIncrease(prevAmount, prevHtml, nextHtml, unit, contentKey = "") {
+  const next = safeDecodeBox(nextHtml, unit, contentKey);
   if (next <= 0) return 0;
-  const prev = resolvePrevAmount(prevAmount, prevHtml, unit);
+  const prev = resolvePrevAmount(prevAmount, prevHtml, unit, contentKey);
   if (prev <= 0 || next <= prev) return 0;
   const delta = next - prev;
   return delta >= 0.001 ? delta : 0;
+}
+
+function resolveBubbleAmountWithHtmlDelta(record, options = {}) {
+  const unit = sanitizeBoxUnit(record?.todayUnit || "万");
+  const contentKey =
+    options.contentKey ||
+    record?.fontContentKey ||
+    record?.fontMappingVersion ||
+    getFontMappingVersion();
+  const trackKey = options.trackKey || String(record?.movieId || "__nation__");
+  const bubbleKey = options.bubbleKey || (trackKey === "__nation__" ? "__nation__" : `movie-${trackKey}`);
+  const htmlSig = String(record?.todayBoxHtml || "").trim();
+  const isNew = options.isNew === true;
+  const prevSample = bubbleSamples.get(bubbleKey);
+  const prevHtml = prevBoxHtml.get(trackKey) || prevSample?.lastBoxHtml || "";
+  const prevAmount = Number(prevValues.get(trackKey)) || Number(prevSample?.baseline) || 0;
+
+  let amount = 0;
+  let previousAmount = prevAmount;
+
+  if (htmlSig) {
+    amount = bubbleDecodeBoxWan(htmlSig, unit, contentKey);
+    if (!amount && options.card) {
+      amount = readBubbleAmountFromCard(options.card, record);
+    }
+    if (!isNew && prevHtml && htmlSig !== prevHtml) {
+      const prevDecoded = bubbleDecodeBoxWan(prevHtml, unit, contentKey);
+      const currDecoded = amount || bubbleDecodeBoxWan(htmlSig, unit, contentKey);
+      if (currDecoded > prevDecoded && prevDecoded > 0) {
+        amount = currDecoded;
+        previousAmount = prevDecoded;
+      } else {
+        const htmlDelta = computeBoxIncrease(prevAmount, prevHtml, htmlSig, unit, contentKey);
+        if (htmlDelta > 0 && currDecoded > 0) {
+          amount = currDecoded;
+          previousAmount = prevDecoded > 0 ? prevDecoded : prevAmount;
+        }
+      }
+    }
+  } else {
+    amount = resolveFreshBubbleAmount(record, { contentKey, card: options.card });
+  }
+
+  return { amount, previousAmount, htmlSig, contentKey, unit, bubbleKey, trackKey };
 }
 
 function mergeDailyTableRows(prevRows, nextRows) {
@@ -683,6 +1183,7 @@ function mergeDailyTableRows(prevRows, nextRows) {
 function stabilizeMovie(movie) {
   const key = String(movie.movieId);
   const prev = lastGoodMovies.get(key) || {};
+  const oldTodayBox = Number(prev.todayBox) || 0;
   const stable = { ...movie };
 
   for (const field of PRESERVE_MOVIE_FIELDS) {
@@ -739,7 +1240,11 @@ function stabilizeMovie(movie) {
     prev.todayBox > 0 && !isUntrustedBoxDecode(String(prev.todayBoxText || prev.todayBox));
 
   if (stable.todayBox <= 0 && stable.todayBoxHtml) {
-    const decoded = safeDecodeBox(stable.todayBoxHtml, stable.todayUnit);
+    const decoded = safeDecodeBox(
+      stable.todayBoxHtml,
+      stable.todayUnit,
+      stable.fontContentKey || stable.fontMappingVersion || "",
+    );
     if (decoded > 0) stable.todayBox = decoded;
     else if (prevBoxTrusted) {
       stable.todayBox = prev.todayBox;
@@ -763,8 +1268,47 @@ function stabilizeMovie(movie) {
     stable.decodeStatus = DECODE_STATUS.OK;
   }
 
+  const newTodayBox = Number(stable.todayBox) || 0;
+  const kept =
+    oldTodayBox > 0 &&
+    newTodayBox === oldTodayBox &&
+    (movie.decodeKeepPrevious === true ||
+      !(Number(movie.todayBox) > 0) ||
+      String(movie.todayBoxText || "").trim() === "--");
+  logMovieBoxMerge({
+    movieId: stable.movieId,
+    title: stable.name,
+    oldTodayBox,
+    newTodayBox: Number(movie.todayBox) > 0 ? Number(movie.todayBox) : null,
+    decodeStatus: movie.decodeStatus || stable.decodeStatus || "",
+    fontMappingVersion: stable.fontContentKey || stable.fontMappingVersion || "",
+    mergeResult: kept
+      ? "keep-old"
+      : newTodayBox > 0 && newTodayBox !== oldTodayBox
+        ? "replace"
+        : newTodayBox > 0
+          ? "replace"
+          : oldTodayBox > 0
+            ? "keep-old"
+            : "empty",
+  });
+
   updateMovieCache(key, stable);
   return stable;
+}
+
+function isBoxMergeTraceEnabled() {
+  if (typeof process !== "undefined" && process?.env?.BOX_MERGE_TRACE === "1") return true;
+  try {
+    return new URLSearchParams(location.search).has("boxMergeTrace");
+  } catch {
+    return false;
+  }
+}
+
+function logMovieBoxMerge(payload) {
+  if (!isBoxMergeTraceEnabled()) return;
+  console.log("[BOX_MERGE]", payload);
 }
 
 function mergeEnrichedMovies(baseMovies, enrichedMovies, speed = {}) {
@@ -794,8 +1338,22 @@ function mergeEnrichedMovies(baseMovies, enrichedMovies, speed = {}) {
   });
 }
 
+function shouldPreferEncodedNation(nation) {
+  if (!nation?.todayBoxHtml) return false;
+  if ((Number(nation.todayBox) || 0) > 0) return false;
+  if (lastGoodNation.todayBox > 0) return false;
+  const businessDate = latestParsedMeta?.calendar?.today || lastGoodCacheDay;
+  const cached = readDisplayCache(displayCacheKey("nation", "all", businessDate));
+  if (cached?.plainAmount > 0) return false;
+  const fontKey = nation.fontContentKey || nation.fontMappingVersion || getFontMappingVersion();
+  if (!isMaoyanFontReady(fontKey)) return false;
+  return isEncodedBoxHtml(nation.todayBoxHtml);
+}
+
 function stabilizeNation(nation) {
   const stable = { ...nation };
+  const decodeLocked =
+    stable.decodeStatus === DECODE_STATUS.ENCODED || stable.decodeStatus === DECODE_STATUS.DECODE_ERROR;
   for (const field of [
     "todayBoxHtml",
     "todayUnit",
@@ -816,6 +1374,7 @@ function stabilizeNation(nation) {
     stable.todayUnit = stable.todayUnit || lastGoodNation.todayUnit;
   }
   if (
+    !decodeLocked &&
     stable.todayBox <= 0 &&
     lastGoodNation.todayBox > 0 &&
     !isUntrustedBoxDecode(String(lastGoodNation.todayBoxText || lastGoodNation.todayBox))
@@ -823,6 +1382,21 @@ function stabilizeNation(nation) {
     stable.todayBox = lastGoodNation.todayBox;
     if (isEmptyField(stable.todayBoxText) && !isEmptyField(lastGoodNation.todayBoxText)) {
       stable.todayBoxText = lastGoodNation.todayBoxText;
+    }
+  }
+  if (decodeLocked && stable.todayBox <= 0) {
+    const cachedBox = lastGoodNation.todayBox;
+    const cachedText = String(lastGoodNation.todayBoxText || "").trim();
+    if (
+      cachedBox > 0 &&
+      cachedText &&
+      cachedText !== "--" &&
+      !isUntrustedBoxDecode(cachedText)
+    ) {
+      stable.todayBox = cachedBox;
+      if (isEmptyField(stable.todayBoxText)) stable.todayBoxText = cachedText;
+    } else if (isEmptyField(stable.todayBoxText)) {
+      stable.todayBoxText = "--";
     }
   }
   // "--"/空文本不能把已回填的大盘数字再次清零
@@ -863,21 +1437,79 @@ function purgeMovieState(id) {
 }
 
 function getMovieBoxAmount(movie) {
-  if (movie.todayBox > 0 && movie.todayBox < 100000) {
+  if (movie?.decodeStatus === DECODE_STATUS.DECODE_ERROR) return 0;
+  if (movie.decodeVerified === true && movie.todayBox > 0) {
     const raw = String(movie.todayBoxText || movie.todayBox);
     if (!isUntrustedBoxDecode(raw)) return movie.todayBox;
   }
-  if (movie.todayBoxHtml) {
-    const decoded = decodeBoxFromHtml(movie.todayBoxHtml, movie.todayUnit);
-    if (decoded > 0) return decoded;
+  if (movie.todayBoxHtml && movie.decodeVerified === true) {
+    const fromHtml = decodeBoxFromHtml(movie.todayBoxHtml, movie.todayUnit);
+    if (fromHtml > 0 && !isUntrustedBoxDecode(String(fromHtml))) return fromHtml;
+  }
+  if (movie.todayBox > 0) {
+    const raw = String(movie.todayBoxText || movie.todayBox);
+    if (!isUntrustedBoxDecode(raw)) return movie.todayBox;
   }
   if (!isEmptyField(movie.todayBoxText)) {
     const n = parseBoxNum(movie.todayBoxText, movie.todayUnit || "万");
     if (n > 0 && !isUntrustedBoxDecode(movie.todayBoxText)) return n;
   }
-  if (!isEmptyField(movie.dailyIncrease)) {
-    const n = parseBoxNum(movie.dailyIncrease, "万");
-    if (n > 0) return n;
+  const cached = lastGoodMovies.get(String(movie?.movieId || ""));
+  if (cached?.todayBox > 0 && !isUntrustedBoxDecode(String(cached.todayBoxText || cached.todayBox))) {
+    return cached.todayBox;
+  }
+  return 0;
+}
+
+/** 气泡专用：不用 lastGoodMovies / 样本 / plainAmount 缓存，避免涨幅被粘住 */
+function getMovieBoxAmountFresh(movie) {
+  if (movie?.decodeStatus === DECODE_STATUS.DECODE_ERROR) return 0;
+  if (movie.decodeVerified === true && movie.todayBox > 0) {
+    const raw = String(movie.todayBoxText || movie.todayBox);
+    if (!isUntrustedBoxDecode(raw)) return movie.todayBox;
+  }
+  if (movie.todayBoxHtml && movie.decodeVerified === true) {
+    const fromHtml = decodeBoxFromHtml(movie.todayBoxHtml, movie.todayUnit);
+    if (fromHtml > 0 && !isUntrustedBoxDecode(String(fromHtml))) return fromHtml;
+  }
+  if (movie.todayBox > 0) {
+    const raw = String(movie.todayBoxText || movie.todayBox);
+    if (!isUntrustedBoxDecode(raw)) return movie.todayBox;
+  }
+  if (!isEmptyField(movie.todayBoxText)) {
+    const n = parseBoxNum(movie.todayBoxText, movie.todayUnit || "万");
+    if (n > 0 && !isUntrustedBoxDecode(movie.todayBoxText)) return n;
+  }
+  return 0;
+}
+
+/** 每轮从最新 HTML/字段解码，禁止回落到 stabilize 粘住的 todayBox */
+function resolveFreshBubbleAmount(record, options = {}) {
+  const unit = sanitizeBoxUnit(record?.todayUnit || "万");
+  const contentKey =
+    options.contentKey ||
+    record?.fontContentKey ||
+    record?.fontMappingVersion ||
+    getFontMappingVersion();
+  const html = String(record?.todayBoxHtml || "").trim();
+
+  if (html) {
+    const loose = bubbleDecodeBoxWan(html, unit, contentKey);
+    if (loose > 0) return loose;
+
+    if (options.card) {
+      const fromDom = readBubbleAmountFromCard(options.card, record);
+      if (fromDom > 0) return fromDom;
+    }
+    return 0;
+  }
+
+  const fromFields = getMovieBoxAmountFresh(record);
+  if (fromFields > 0) return fromFields;
+
+  if (options.card) {
+    const fromDom = readBubbleAmountFromCard(options.card, record);
+    if (fromDom > 0) return fromDom;
   }
   return 0;
 }
@@ -1142,7 +1774,7 @@ function fitNowrapEl(el, { minSize = 20, allowWrap = false } = {}) {
 }
 
 function mainlandValue(movie) {
-  return movie.mainlandBox || movie.sumBoxDesc || "";
+  return movie.mainlandBox || "";
 }
 
 function buildSummaryMetricHtml(def, movie) {
@@ -1185,7 +1817,7 @@ function getSummaryMetricsByColumn(movie) {
   return colDefs;
 }
 
-function buildSummaryMetricValueHtml(def, movie, previousHtml = "") {
+function buildSummaryMetricValueHtml(def, movie, previousHtml = "", options = {}) {
   const prevText = String(previousHtml || "")
     .replace(/<[^>]+>/g, "")
     .trim();
@@ -1194,26 +1826,70 @@ function buildSummaryMetricValueHtml(def, movie, previousHtml = "") {
     prevText &&
     prevText !== "--" &&
     !String(previousHtml).includes("metric__box-encoded");
+  const businessDate = latestParsedMeta?.calendar?.today || lastGoodCacheDay;
+  const cacheKey = displayCacheKey("movie-box", movie.movieId, businessDate);
 
-  // 本轮只能画乱码时：若上一帧已有明文数字，继续保留，避免字体未绑定时闪空白
+  // 仅在字体未就绪的空窗期暂存票房 DOM，避免闪空；正常轮询必须刷新
+  if (def.key === "dailyBox" && options.holdBoxes && !isMaoyanFontReady()) {
+    const held = stickyBoxMetricHtml(previousHtml, cacheKey);
+    if (held) return held;
+  }
+
   if (def.key === "dailyBox" && shouldPreferEncodedBox(movie)) {
-    if (prevLooksPlain) return previousHtml;
-    const unit = escapeHtml(movie.todayUnit || "万");
-    return `<span class="mtsi-font metric__box-encoded">${movie.todayBoxHtml}</span><span class="unit">${unit}</span>`;
+    if (prevLooksPlain && options.holdBoxes && !isMaoyanFontReady()) return previousHtml;
+    const cached = readDisplayCache(cacheKey);
+    if (cached?.plainHtml && cached.fontVersion === (movie.fontMappingVersion || getFontMappingVersion())) {
+      return `<span class="metric__cache"${cacheTitleAttr(cached)}>${cached.plainHtml}</span>`;
+    }
+    if (movie.todayBoxHtml && isMaoyanFontReady()) {
+      const encoded = buildEncodedBoxHtml(
+        movie.todayBoxHtml,
+        movie.fontMappingVersion,
+        resolveDisplayBoxUnit(movie, getMovieBoxAmount(movie)),
+      );
+      writeDisplayCache(cacheKey, {
+        encodedHtml: encoded,
+        fontVersion: movie.fontMappingVersion || getFontMappingVersion(),
+        source: "encoded",
+      });
+      return encoded;
+    }
+    if (cached?.encodedHtml) {
+      return wrapEncodedBoxMetricHtml(
+        `<span class="metric__cache"${cacheTitleAttr(cached)}>${cached.encodedHtml}</span>`,
+        resolveDisplayBoxUnit(movie, getMovieBoxAmount(movie)),
+      );
+    }
+    if (cached?.plainHtml) {
+      return `<span class="metric__cache"${cacheTitleAttr(cached)}>${cached.plainHtml}</span>`;
+    }
+    const held = stickyBoxMetricHtml(previousHtml, cacheKey);
+    if (held) return held;
+    // 禁止 decode/字体空窗把已显示的有效票房刷成 "--"
+    if (displayHtmlLooksLikeBox(previousHtml)) return previousHtml;
+    return "--";
   }
   const raw = resolveMetricRaw(def, movie);
   const trend = def.trend && !isEmptyField(raw) ? trendArrow(def.trend(movie)) : "";
   if (isEmptyField(raw)) {
-    if (prevText && prevText !== "--") {
-      return previousHtml;
-    }
+    const held = stickyBoxMetricHtml(previousHtml, cacheKey);
+    if (held) return held;
+    if (displayHtmlLooksLikeBox(previousHtml)) return previousHtml;
     return "--";
   }
   const value = String(raw);
-  return `${escapeHtml(value)}${trend}`;
+  const html = `${escapeHtml(value)}${trend}`;
+  if (def.key === "dailyBox" && !shouldPreferEncodedBox(movie)) {
+    writeDisplayCache(cacheKey, {
+      plainHtml: html,
+      fontVersion: movie.fontMappingVersion || getFontMappingVersion(),
+      source: "plain",
+    });
+  }
+  return html;
 }
 
-function updateSummaryInPlace(summaryWrap, movie) {
+function updateSummaryInPlace(summaryWrap, movie, options = {}) {
   const root = summaryWrap?.firstElementChild;
   if (!root?.classList.contains("race-card__summary")) return null;
 
@@ -1229,7 +1905,12 @@ function updateSummaryInPlace(summaryWrap, movie) {
     for (let i = 0; i < defs.length; i += 1) {
       if (metrics[i].dataset.metric !== defs[i].key) return null;
       const valueEl = metrics[i].querySelector(".metric__value");
-      const nextHtml = buildSummaryMetricValueHtml(defs[i], movie, valueEl?.innerHTML || "");
+      const nextHtml = buildSummaryMetricValueHtml(
+        defs[i],
+        movie,
+        valueEl?.innerHTML || "",
+        options,
+      );
       if (valueEl && valueEl.innerHTML !== nextHtml) {
         valueEl.innerHTML = nextHtml;
         changed = true;
@@ -1321,45 +2002,20 @@ function ensureDailyTable(movie) {
   const labels = ["今日", "明日", "后天"];
   const src = Array.isArray(movie.dailyTable) ? movie.dailyTable : [];
   const byLabel = new Map(src.map((row) => [String(row.label || "").trim(), row]));
-  const todayResolved = resolveTodayTableBox(movie);
 
   return labels.map((label, i) => {
     const prev = byLabel.get(label) || src[i] || {};
-    const isToday = i === 0;
-    const box = isToday
-      ? todayResolved.box
-      : !isEmptyField(prev.box) && prev.box !== "--"
-        ? prev.box
-        : "--";
     return {
       label,
-      box,
-      boxHtml: isToday ? todayResolved.boxHtml : prev.boxHtml || "",
-      boxUnit: isToday ? todayResolved.boxUnit : prev.boxUnit || movie.todayUnit || "万",
-      forecast:
-        !isEmptyField(prev.forecast) && prev.forecast !== "--"
-          ? prev.forecast
-          : isToday && !isEmptyField(movie.dynamicForecast)
-            ? movie.dynamicForecast
-            : "--",
-      boxRate:
-        !isEmptyField(prev.boxRate) && prev.boxRate !== "--"
-          ? prev.boxRate
-          : isToday && !isEmptyField(movie.boxRate)
-            ? movie.boxRate
-            : "--",
+      box: !isEmptyField(prev.box) && prev.box !== "--" ? prev.box : "--",
+      boxHtml: prev.boxHtml || "",
+      boxUnit: prev.boxUnit || movie.todayUnit || "万",
+      forecast: !isEmptyField(prev.forecast) && prev.forecast !== "--" ? prev.forecast : "--",
+      boxRate: !isEmptyField(prev.boxRate) && prev.boxRate !== "--" ? prev.boxRate : "--",
       showCountRate:
-        !isEmptyField(prev.showCountRate) && prev.showCountRate !== "--"
-          ? prev.showCountRate
-          : isToday && !isEmptyField(movie.showCountRate)
-            ? movie.showCountRate
-            : "--",
+        !isEmptyField(prev.showCountRate) && prev.showCountRate !== "--" ? prev.showCountRate : "--",
       avgSeatView:
-        !isEmptyField(prev.avgSeatView) && prev.avgSeatView !== "--"
-          ? prev.avgSeatView
-          : isToday && !isEmptyField(movie.avgSeatView)
-            ? movie.avgSeatView
-            : "--",
+        !isEmptyField(prev.avgSeatView) && prev.avgSeatView !== "--" ? prev.avgSeatView : "--",
     };
   });
 }
@@ -1369,13 +2025,13 @@ const DAILY_TABLE_LABELS = ["今日", "明日", "后天"];
 const DAILY_TABLE_COLUMNS = [
   {
     key: "box",
-    label: "票房(含分账)",
+    label: "票房",
     render: (row) => {
       if (!isEmptyField(row.box) && row.box !== "--") {
         return `<span class="num--hot">${escapeHtml(row.box)}</span>`;
       }
       if (row.boxHtml) {
-        return `<span class="mtsi-font js-day-box num--hot">${row.boxHtml}</span><span class="unit">${escapeHtml(row.boxUnit || "万")}</span>`;
+        return `<span class="num--hot">--</span>`;
       }
       return `<span class="num--hot">--</span>`;
     },
@@ -1469,7 +2125,9 @@ function cardClassName(movie) {
 function formatDisplayBox(movie) {
   const amount = getMovieBoxAmount(movie);
   if (amount > 0) return formatWanDisplayText(amount);
-  if (!isEmptyField(movie.todayBoxText)) return `${movie.todayBoxText}${movie.todayUnit || "万"}`;
+  if (!isEmptyField(movie.todayBoxText)) {
+    return formatBoxTextForDisplay(movie.todayBoxText, movie.todayUnit || "万", parseBoxNum) || "--";
+  }
   return "--";
 }
 
@@ -1497,10 +2155,10 @@ function raceCardTemplate(movie) {
   `;
 }
 
-function applyCardEncodedBoxes(card, movie) {
+function applyCardEncodedBoxes(card, movie, options = {}) {
   if (!card || !movie) return;
   const summaryWrap = card.querySelector(".race-card__summary-wrap");
-  if (summaryWrap) updateSummaryInPlace(summaryWrap, movie);
+  if (summaryWrap) updateSummaryInPlace(summaryWrap, movie, options);
 
   const tableRows = ensureDailyTable(movie);
   const tableWrap = card.querySelector(".race-card__table-wrap");
@@ -1540,14 +2198,11 @@ function computeMovieDelta(movie, isNew) {
   const decoded = getMovieBoxAmount(movie);
   if (!isTrustedMovieBoxAmount(movie)) return 0;
 
-  let delta = 0;
-  if (movie.todayBoxHtml && storedHtml && storedHtml !== movie.todayBoxHtml) {
-    delta = computeBoxIncrease(stored, storedHtml, movie.todayBoxHtml, unit);
-  }
-  if (delta <= 0 && decoded > 0 && stored != null && decoded > stored) {
-    delta = computeMovieBoxDeltaWan(stored, decoded);
-  }
-  if (!isReasonableBoxDelta(stored ?? 0, decoded, delta)) return 0;
+  const storedBaseline =
+    Number.isFinite(stored) && stored > 0 ? stored : storedHtml ? safeDecodeBox(storedHtml, unit) : 0;
+
+  const delta = decoded - storedBaseline;
+  if (!isReasonableBoxDelta(storedBaseline, decoded, delta)) return 0;
   return delta;
 }
 
@@ -1565,22 +2220,57 @@ function updateRaceCardDelta(card, movie, isNew) {
     else dailyBoxMetric.appendChild(bubbleEl);
   }
   if (!bubbleEl) return;
-  const delta = computeMovieDelta(movie, isNew);
-  if (delta > 0) {
-    pulseInlineDelta(bubbleEl, delta, `movie-${movie.movieId}`);
+
+  const key = `movie-${movie.movieId}`;
+  const businessDate = latestParsedMeta?.calendar?.today || lastGoodCacheDay;
+  const prevSample = bubbleSamples.get(key);
+  if (prevSample && prevSample.el !== bubbleEl) {
+    prevSample.el = bubbleEl;
+  }
+
+  const resolved = resolveBubbleAmountWithHtmlDelta(movie, {
+    card,
+    isNew,
+    bubbleKey: key,
+    trackKey: String(movie.movieId),
+  });
+  const { amount, previousAmount, htmlSig, contentKey } = resolved;
+  if (prevSample && htmlSig) {
+    prevSample.lastBoxHtml = htmlSig;
+  }
+
+  if (amount > 0) {
+    observeBubble(key, bubbleEl, amount, {
+      movie,
+      businessDate,
+      movieId: movie.movieId,
+      trusted: true,
+      decodeVerified: true,
+      decodeStatus: movie.decodeStatus,
+      contentKey,
+      responseId: latestParsedMeta?.responseId || 0,
+      previousAmount,
+    });
+    rememberBubbleBoxAmount(movie, amount);
+  } else if (prevSample && !prevSample.idleOnly) {
+    prevSample.el = bubbleEl;
+    ensureBubbleTimer();
+  } else if (hasVisibleDailyBox(card)) {
+    bindBubbleAnchor(key, bubbleEl);
+    const anchor = bubbleSamples.get(key);
+    if (anchor && htmlSig) anchor.lastBoxHtml = htmlSig;
+    scheduleBubbleAmountRetry(card, movie, bubbleEl, key, contentKey);
   }
 }
 
 function trackBoxDelta(_card, movie) {
   const key = String(movie.movieId);
-  const decoded = getMovieBoxAmount(movie);
-  const stored = prevValues.get(key);
-
-  // 只抬升/写入可信票房基线，拒绝 1111.1 等解码垃圾污染气泡
-  if (isTrustedMovieBoxAmount(movie)) {
-    if (stored == null || decoded >= stored) {
-      prevValues.set(key, decoded);
-    }
+  const contentKey = movie.fontContentKey || movie.fontMappingVersion || getFontMappingVersion();
+  const decoded = resolveFreshBubbleAmount(movie, { contentKey }) || getMovieBoxAmount(movie);
+  // 高水位：低于上次的读数抛弃，不跟随下行
+  const prev = Number(prevValues.get(key)) || 0;
+  if ((decoded > 0 || isTrustedMovieBoxAmount(movie)) && decoded > prev) {
+    prevValues.set(key, decoded);
   }
   if (movie.todayBoxHtml) {
     const prevHtml = prevBoxHtml.get(key);
@@ -1592,7 +2282,7 @@ function trackBoxDelta(_card, movie) {
   }
 }
 
-function updateRaceCard(card, movie, isNew = false) {
+function updateRaceCard(card, movie, isNew = false, options = {}) {
   const prevRank = Number(card.dataset.rank || 0);
   card.className = cardClassName(movie);
   card.dataset.rank = String(movie.rank);
@@ -1637,9 +2327,19 @@ function updateRaceCard(card, movie, isNew = false) {
   let summaryStructural = false;
   let summaryValuesChanged = false;
   if (summaryWrap) {
-    const inPlace = updateSummaryInPlace(summaryWrap, movie);
+    const inPlace = updateSummaryInPlace(summaryWrap, movie, options);
     if (inPlace === null) {
-      summaryWrap.innerHTML = buildSummaryHtml(movie);
+      if (options.holdBoxes) {
+        const dailyMetric = summaryWrap.querySelector('[data-metric="dailyBox"] .metric__value');
+        const heldDaily = dailyMetric?.innerHTML || "";
+        summaryWrap.innerHTML = buildSummaryHtml(movie);
+        if (heldDaily && displayHtmlLooksLikeBox(heldDaily)) {
+          const nextDaily = summaryWrap.querySelector('[data-metric="dailyBox"] .metric__value');
+          if (nextDaily) nextDaily.innerHTML = heldDaily;
+        }
+      } else {
+        summaryWrap.innerHTML = buildSummaryHtml(movie);
+      }
       summaryStructural = true;
     } else if (inPlace) {
       summaryValuesChanged = true;
@@ -1688,7 +2388,7 @@ function isFirstSeen(movieId) {
   return !prevBoxHtml.has(key) && !prevValues.has(key);
 }
 
-function ensureRaceCard(movie) {
+function ensureRaceCard(movie, options = {}) {
   const key = String(movie.movieId);
   let card = cardPool.get(key);
   if (!card || !card.classList.contains("race-card") || !card.querySelector(".race-card__head")) {
@@ -1699,7 +2399,7 @@ function ensureRaceCard(movie) {
     trackBoxDelta(card, movie, isFirstSeen(key));
     return card;
   }
-  updateRaceCard(card, movie, isFirstSeen(key));
+  updateRaceCard(card, movie, isFirstSeen(key), options);
   return card;
 }
 
@@ -1725,7 +2425,7 @@ function renderLoadingSkeleton() {
   }).join("");
 }
 
-function renderList(movies) {
+function renderList(movies, options = {}) {
   if (!raceListEl) return;
 
   const list = (movies || [])
@@ -1739,13 +2439,16 @@ function renderList(movies) {
   for (const [id, card] of cardPool) {
     if (!activeIds.has(id)) {
       card.remove();
+      bubbleSamples.delete(`movie-${id}`);
+      clearTimeout(inlineDeltaTimers.get(`movie-${id}`));
+      inlineDeltaTimers.delete(`movie-${id}`);
       purgeMovieState(id);
     }
   }
 
   const cards = list.map((movie) => {
     traceMovieRender(movie);
-    const card = ensureRaceCard(movie);
+    const card = ensureRaceCard(movie, options);
     prevRankMap.set(String(movie.movieId), movie.rank);
     return card;
   });
@@ -1755,7 +2458,7 @@ function renderList(movies) {
     // 不再每次轮询全表 refit：字号抖动是界面闪烁主因；结构变化时 updateRaceCard 会局部 fit
   }
 
-  updateChampion(list);
+  updateChampion(list, latestParsedMeta?.calendar?.today || lastGoodCacheDay, options);
 }
 
 function syncRaceListChildren(cards) {
@@ -1767,12 +2470,24 @@ function syncRaceListChildren(cards) {
   raceListEl.replaceChildren(...cards);
 }
 
-function setPlainBoxValue(el, amount, unitEl) {
+function setPlainBoxValue(el, amount, unitEl, options = {}) {
   if (!el) return;
+  const hold = options.hold !== false;
   const { valueText, unit } = formatWanForDisplay(amount);
-  el.classList.remove("mtsi-font");
+  const safeUnit = sanitizeBoxUnit(unit || options.unit || "万");
+  if (hold && (!Number.isFinite(amount) || amount <= 0 || valueText === "--")) {
+    if (elementHasVisibleBox(el)) {
+      if (unitEl && !/[万亿]/.test(String(unitEl.textContent || ""))) {
+        unitEl.textContent = safeUnit;
+      }
+      return;
+    }
+  }
+  el.classList.remove("mtsi-font", "mtsi-font-encoded");
+  el.style.fontFamily = "";
+  delete el.dataset.fontVersion;
   if (el.textContent !== valueText) el.textContent = valueText;
-  if (unitEl && unitEl.textContent !== unit) unitEl.textContent = unit;
+  if (unitEl && unitEl.textContent !== safeUnit) unitEl.textContent = safeUnit;
 }
 
 function resolveDisplayDate(parsed) {
@@ -1809,11 +2524,19 @@ function isDataTraceEnabled() {
   return new URLSearchParams(location.search).has("dataTrace");
 }
 
-function resolveDisplayBoxAmount(html, unit, numeric, text) {
+function resolveDisplayBoxAmount(html, unit, numeric, text, contentKey = "") {
   if (Number.isFinite(numeric) && numeric > 0 && !isUntrustedBoxDecode(String(text || numeric))) {
     return numeric;
   }
-  const fromHtml = safeDecodeBox(html, unit);
+  const fontKey = String(contentKey || "").trim();
+  if (html && fontKey) {
+    const raw = decodeFontNum(html, fontKey);
+    if (raw && !isUntrustedBoxDecode(raw)) {
+      const fromKey = parseBoxNum(raw, unit || "万");
+      if (fromKey > 0 && !isUntrustedBoxDecode(String(fromKey))) return fromKey;
+    }
+  }
+  const fromHtml = safeDecodeBox(html, unit, fontKey);
   if (fromHtml > 0) return fromHtml;
   if (!isEmptyField(text) && !isUntrustedBoxDecode(text)) {
     const n = parseBoxNum(text, unit || "万");
@@ -1822,24 +2545,57 @@ function resolveDisplayBoxAmount(html, unit, numeric, text) {
   return 0;
 }
 
-function setEncodedBoxValue(el, html, fallbackText = "--") {
+function resolveBubbleTrackingAmount(record, options = {}) {
+  return resolveFreshBubbleAmount(record, options);
+}
+
+function setEncodedBoxValue(el, html, options = {}) {
   if (!el) return;
+  const fallbackText = options.fallbackText ?? "--";
+  const unitEl = options.unitEl;
+  const unit = sanitizeBoxUnit(options.unit || "万");
+  const fontVersion = options.fontVersion || getFontMappingVersion();
+  const family = fontFamilyForVersion(fontVersion || getActiveFontFamily());
   const raw = html == null ? "" : String(html);
   if (raw && /登录猫眼|专业版即可|剩余城市|商排|请先登录|开通专业版/.test(raw.replace(/<[^>]+>/g, ""))) {
     if (el.textContent === fallbackText) return;
-    el.classList.remove("mtsi-font");
+    el.classList.remove("mtsi-font", "mtsi-font-encoded");
+    el.style.fontFamily = "";
+    delete el.dataset.fontVersion;
     el.textContent = fallbackText;
+    if (unitEl) setTextIfChanged(unitEl, unit);
     return;
   }
   if (raw) {
-    if (el.innerHTML === raw) return;
-    el.classList.add("mtsi-font");
+    const normalizedVer = normalizeDisplayFontVersion(fontVersion);
+    if (
+      el.innerHTML === raw &&
+      normalizeDisplayFontVersion(el.dataset.fontVersion) === normalizedVer
+    ) {
+      if (unitEl) setTextIfChanged(unitEl, unit);
+      return;
+    }
+    el.classList.remove("mtsi-font");
+    el.classList.add("mtsi-font-encoded");
+    el.dataset.fontVersion = fontVersion || "";
+    el.style.fontFamily = `"${family}", var(--font-sans)`;
     el.innerHTML = raw;
+    if (unitEl) setTextIfChanged(unitEl, unit);
     return;
   }
-  if (el.textContent === fallbackText) return;
-  el.classList.remove("mtsi-font");
+  if (elementHasVisibleBox(el)) {
+    if (unitEl && !/[万亿]/.test(String(unitEl.textContent || ""))) setTextIfChanged(unitEl, unit);
+    return;
+  }
+  if (el.textContent === fallbackText) {
+    if (unitEl) setTextIfChanged(unitEl, unit);
+    return;
+  }
+  el.classList.remove("mtsi-font", "mtsi-font-encoded");
+  el.style.fontFamily = "";
+  delete el.dataset.fontVersion;
   el.textContent = fallbackText;
+  if (unitEl) setTextIfChanged(unitEl, unit);
 }
 
 function updateNationSeatMetric(nation) {
@@ -1854,57 +2610,206 @@ function updateNationSeatMetric(nation) {
   $("nation-seat-pill")?.classList.toggle("is-hidden", hideSeat);
 }
 
-function updateChampion(movies) {
+function updateChampion(movies, businessDate, options = {}) {
   const top = (movies || []).find((m) => m.rank === 1) || movies?.[0];
   if (!top) {
     champBoxPillEl?.classList.add("is-hidden");
     return;
   }
 
+  const cacheKey = championCacheKey(top, businessDate);
+  const championHasFreshBox =
+    (top.todayBoxHtml && String(top.todayBoxHtml).trim()) ||
+    getMovieBoxAmount(top) > 0 ||
+    resolveChampionBoxWan(top) > 0;
+  if (
+    options.holdBoxes &&
+    !championHasFreshBox &&
+    cacheKey === lastChampionKey &&
+    elementHasVisibleBox(champBoxEl)
+  ) {
+    champBoxPillEl?.classList.remove("is-hidden");
+    return;
+  }
+
+  const cacheEntry = readDisplayCache(displayCacheKey("champion", top.movieId, businessDate));
   const preferEncoded = shouldPreferEncodedBox(top);
-  const amount = preferEncoded ? 0 : resolveChampionBoxWan(top);
+  const amount = preferEncoded ? 0 : resolveChampionBoxWan(top) || getMovieBoxAmount(top);
+  const fontVersion = top.fontMappingVersion || getFontMappingVersion();
+  const unit = sanitizeBoxUnit(top.todayUnit || "万");
+
   if (preferEncoded && top.todayBoxHtml) {
     champBoxPillEl?.classList.remove("is-hidden");
-    setEncodedBoxValue(champBoxEl, top.todayBoxHtml);
+    setEncodedBoxValue(champBoxEl, top.todayBoxHtml, {
+      unitEl: champBoxUnitEl,
+      unit,
+      fontVersion,
+    });
+    lastChampionKey = cacheKey;
+    lastChampionFontVersion = fontVersion;
+    writeDisplayCache(displayCacheKey("champion", top.movieId, businessDate), {
+      encodedHtml: top.todayBoxHtml,
+      fontVersion,
+      unit,
+      source: "encoded",
+    });
   } else if (amount > 0) {
     champBoxPillEl?.classList.remove("is-hidden");
     setPlainBoxValue(champBoxEl, amount, champBoxUnitEl);
-    prevValues.set("__champ__", amount);
-  } else {
-    // 本轮解码失败：保留上次冠军票房，禁止闪成 --
+    lastChampionKey = cacheKey;
+    lastChampionAmount = amount;
+    lastChampionUnit = unit;
+    lastChampionFontVersion = fontVersion;
+    writeDisplayCache(displayCacheKey("champion", top.movieId, businessDate), {
+      plainAmount: amount,
+      unit,
+      fontVersion,
+      source: "plain",
+    });
+  } else if (cacheKey === lastChampionKey && lastChampionAmount > 0) {
     champBoxPillEl?.classList.remove("is-hidden");
-    const prevAmount = prevValues.get("__champ__");
-    if (!(prevAmount > 0)) {
-      setPlainBoxValue(champBoxEl, null, champBoxUnitEl);
-    }
+    setPlainBoxValue(champBoxEl, lastChampionAmount, champBoxUnitEl);
+    if (champBoxUnitEl) setTextIfChanged(champBoxUnitEl, lastChampionUnit || unit);
+  } else if (cacheEntry?.plainAmount > 0) {
+    champBoxPillEl?.classList.remove("is-hidden");
+    setPlainBoxValue(champBoxEl, cacheEntry.plainAmount, champBoxUnitEl);
+    if (champBoxUnitEl) setTextIfChanged(champBoxUnitEl, cacheEntry.unit || unit);
+  } else if (cacheEntry?.encodedHtml && isMaoyanFontReady()) {
+    champBoxPillEl?.classList.remove("is-hidden");
+    setEncodedBoxValue(champBoxEl, cacheEntry.encodedHtml, {
+      unitEl: champBoxUnitEl,
+      unit: cacheEntry.unit || unit,
+      fontVersion: cacheEntry.fontVersion || fontVersion,
+    });
+  } else if (elementHasVisibleBox(champBoxEl)) {
+    champBoxPillEl?.classList.remove("is-hidden");
+  } else if (cacheKey !== lastChampionKey) {
+    setPlainBoxValue(champBoxEl, null, champBoxUnitEl, { hold: false });
   }
 }
 
-function updateNation(nation, parsed) {
+function updateNation(nation, parsed, options = {}) {
   nation = stabilizeNation(nation);
   const unitEl = document.querySelector(".js-nation-unit");
-  const unit = nation.todayUnit || "万";
-  const prevNation = prevValues.get("__nation__");
+  const unit = sanitizeBoxUnit(nation.todayUnit || "万");
+  const businessDate = parsed?.calendar?.today || lastGoodCacheDay;
+  const nationContentKey =
+    nation.fontContentKey ||
+    nation.fontMappingVersion ||
+    parsed?.fontContentKey ||
+    parsed?.fontUrlKey ||
+    "";
+  const nationCacheKey = displayCacheKey("nation", "all", businessDate);
   const nationAmount = resolveDisplayBoxAmount(
     nation.todayBoxHtml,
     unit,
     nation.todayBox,
     nation.todayBoxText,
+    nationContentKey,
   );
+  const fontVersion = nation.fontMappingVersion || getFontMappingVersion();
+  const cachedNation = readDisplayCache(nationCacheKey);
 
-  // 今日大盘只展示解码后的真实数字；解码失败保留上次数字，禁止闪成 -- / 乱码
-  if (nationAmount > 0) {
-    if (
-      prevNation != null &&
-      isReasonableBoxDelta(prevNation, nationAmount, nationAmount - prevNation)
-    ) {
-      pulseInlineDelta(nationDeltaEl, nationAmount - prevNation, "__nation__");
+  const nationHasFreshBox =
+    nationAmount > 0 || (nation.todayBoxHtml && String(nation.todayBoxHtml).trim());
+  const skipBoxPaint =
+    options.holdBoxes && !nationHasFreshBox && elementHasVisibleBox(nationBoxEl);
+  if (!skipBoxPaint) {
+    const preferEncoded = shouldPreferEncodedNation(nation);
+    if (preferEncoded && nation.todayBoxHtml) {
+      setEncodedBoxValue(nationBoxEl, nation.todayBoxHtml, { unitEl, unit, fontVersion });
+      writeDisplayCache(nationCacheKey, {
+        encodedHtml: nation.todayBoxHtml,
+        fontVersion,
+        unit,
+        source: "encoded",
+      });
+    } else if (nationAmount > 0 && !preferEncoded) {
+      setPlainBoxValue(nationBoxEl, nationAmount, unitEl);
+      writeDisplayCache(nationCacheKey, {
+        plainAmount: nationAmount,
+        fontVersion,
+        unit,
+        source: "plain",
+      });
+    } else if (cachedNation?.plainAmount > 0) {
+      setPlainBoxValue(nationBoxEl, cachedNation.plainAmount, unitEl);
+      if (unitEl) setTextIfChanged(unitEl, cachedNation.unit || unit);
+    } else if (cachedNation?.encodedHtml && isMaoyanFontReady()) {
+      setEncodedBoxValue(nationBoxEl, cachedNation.encodedHtml, {
+        unitEl,
+        unit: cachedNation.unit || unit,
+        fontVersion: cachedNation.fontVersion || fontVersion,
+      });
+    } else if (lastGoodNation.todayBox > 0) {
+      setPlainBoxValue(nationBoxEl, lastGoodNation.todayBox, unitEl);
+    } else if (elementHasVisibleBox(nationBoxEl)) {
+      /* 保留当前 DOM，避免解码间歇闪空 */
+    } else if (!(prevValues.get("__nation__") > 0) && !preferEncoded) {
+      setPlainBoxValue(nationBoxEl, null, unitEl, { hold: false });
     }
-    setPlainBoxValue(nationBoxEl, nationAmount, unitEl);
-    prevValues.set("__nation__", nationAmount);
-    if (nation.todayBoxHtml) prevBoxHtml.set("__nation__", nation.todayBoxHtml);
-  } else if (!(prevNation > 0)) {
-    setPlainBoxValue(nationBoxEl, null, unitEl);
+  }
+
+  const refreshedNation = refreshNationBoxFields(nation, {
+    fontContentKey: nationContentKey,
+    fontMappingVersion: nationContentKey,
+    movies: latestMovies,
+  });
+  const nationResolved = resolveBubbleAmountWithHtmlDelta(nation, {
+    contentKey: nationContentKey,
+    trackKey: "__nation__",
+    bubbleKey: "__nation__",
+  });
+  const liveNationAmount = nationResolved.amount;
+  if (liveNationAmount > 0) {
+    if (nationResolved.htmlSig) {
+      const nationSample = bubbleSamples.get("__nation__");
+      if (nationSample) nationSample.lastBoxHtml = nationResolved.htmlSig;
+    }
+    observeBubble("__nation__", nationDeltaEl, liveNationAmount, {
+      nation: refreshedNation,
+      businessDate,
+      trusted: true,
+      decodeVerified: true,
+      contentKey: nationContentKey,
+      responseId: parsed?.responseId || 0,
+      previousAmount: nationResolved.previousAmount,
+    });
+    // 必须在 observeBubble 之后提交高水位，否则 previousAmount 会被当前值覆盖，
+    // 大盘每轮都会算成 0 涨幅。
+    const prevNation = Number(prevValues.get("__nation__")) || 0;
+    if (liveNationAmount > prevNation) prevValues.set("__nation__", liveNationAmount);
+    if (nationResolved.htmlSig) prevBoxHtml.set("__nation__", nationResolved.htmlSig);
+  } else if (bubbleSamples.get("__nation__") && !bubbleSamples.get("__nation__").idleOnly) {
+    bubbleSamples.get("__nation__").el = nationDeltaEl;
+    ensureBubbleTimer();
+  } else if (nationDeltaEl && elementHasVisibleBox(nationBoxEl)) {
+    bindBubbleAnchor("__nation__", nationDeltaEl);
+    const retryNation = () => {
+      if (!nationDeltaEl?.isConnected) return;
+      const resolved = resolveBubbleAmountWithHtmlDelta(nation, {
+        contentKey: nationContentKey,
+        trackKey: "__nation__",
+        bubbleKey: "__nation__",
+      });
+      if (resolved.amount > 0) {
+        observeBubble("__nation__", nationDeltaEl, resolved.amount, {
+          nation: refreshedNation,
+          businessDate,
+          trusted: true,
+          decodeVerified: true,
+          contentKey: nationContentKey,
+          responseId: parsed?.responseId || 0,
+          previousAmount: resolved.previousAmount,
+        });
+        const prevNation = Number(prevValues.get("__nation__")) || 0;
+        if (resolved.amount > prevNation) prevValues.set("__nation__", resolved.amount);
+        if (resolved.htmlSig) prevBoxHtml.set("__nation__", resolved.htmlSig);
+      }
+    };
+    requestAnimationFrame(retryNation);
+    setTimeout(retryNation, 500);
+    setTimeout(retryNation, 2000);
   }
 
   setTextIfChanged(nationShowsEl, nation.showCountDesc || "--");
@@ -1983,12 +2888,13 @@ function scheduleBackgroundEnrich(requestPollGen, parsed, speed) {
       const movies = mergeEnrichedMovies(baseMovies, enriched, currentSpeed);
       renderList(movies);
       const errors = getLastEnrichErrors();
-      updatePartialDataWarning(errors);
+      await updatePartialDataWarning(errors);
       setStatus("ok", "");
       if (shouldMarkFullEnrichFailure(errors, getDisplayMovieCount())) {
         markFullEnrichFailure(enrichSchedule, Date.now());
       } else {
         markFullEnrichSuccess(enrichSchedule, Date.now());
+        markStartup("enrichComplete");
       }
     } catch (err) {
       console.warn("后台补充字段失败", err);
@@ -2014,42 +2920,172 @@ function scheduleBackgroundEnrich(requestPollGen, parsed, speed) {
   currentEnrichPromise = promise;
 }
 
-function scheduleDecodeRetry() {
+function scheduleDecodeRetry(requestPollGen, requestFontVer, requestBusinessDate) {
   setTimeout(() => {
+    if (requestPollGen !== pollGeneration) return;
+    if (
+      requestFontVer &&
+      normalizeFontIdentity(requestFontVer) !== normalizeFontIdentity(getFontMappingVersion())
+    ) {
+      return;
+    }
+    if (requestBusinessDate && requestBusinessDate !== lastGoodCacheDay) return;
+
+    const fontVer = getFontMappingVersion();
     if (latestNation) {
-      const amount = resolveDisplayBoxAmount(
-        latestNation.todayBoxHtml,
-        latestNation.todayUnit || "万",
-        latestNation.todayBox,
-        latestNation.todayBoxText
-      );
-      if (amount > 0) {
-        latestNation = { ...latestNation, todayBox: amount };
+      latestNation = refreshNationBoxFields(latestNation, {
+        fontMappingVersion: fontVer,
+        movies: latestMovies,
+      });
+      if (latestNation.todayBox > 0 || latestNation.todayBoxHtml) {
         updateNation(latestNation, latestParsedMeta || {});
       }
     }
 
     if (!latestMovies.length) return;
     const needsRetry = latestMovies.some(
-      (m) => m.todayBoxHtml && getMovieBoxAmount(stabilizeMovie(m)) <= 0
+      (m) => m.todayBoxHtml && getMovieBoxAmount(stabilizeMovie(m)) <= 0,
     );
     if (!needsRetry) {
-      // 解码已成功：禁止二次 renderList，避免约每轮多闪一次
-      updateChampion(latestMovies.map(stabilizeMovie));
+      updateChampion(
+        latestMovies.map(stabilizeMovie),
+        latestParsedMeta?.calendar?.today || lastGoodCacheDay,
+      );
       return;
     }
+    const refreshOpts = (movie) => buildMovieBoxRefreshOptions(movie, latestNation);
     const refreshed = rerankMoviesByTodayBox(
-      latestMovies.map((movie) => refreshMovieBoxFields(movie)),
+      latestMovies.map((movie) => refreshMovieBoxFields(movie, refreshOpts(movie))),
     );
     latestMovies = refreshed;
     const movies = enrichMoviesQuick(refreshed, latestSpeedMap).map(stabilizeMovie);
-    renderList(movies);
+    syncHeroAndMovieBoxes(movies);
   }, 800);
 }
 
+function buildMoviesForRender(parsed, fontContentKey) {
+  const decodeOpts = {
+    fontContentKey,
+    fontMappingVersion: fontContentKey,
+    movies: parsed.movies,
+  };
+  latestNation = parsed.nation
+    ? refreshNationBoxFields(parsed.nation, decodeOpts)
+    : parsed.nation;
+  const refreshOpts = (movie) => ({
+    ...buildMovieBoxRefreshOptions(movie, latestNation),
+    fontContentKey,
+    fontMappingVersion: fontContentKey,
+  });
+  latestMovies = rerankMoviesByTodayBox(
+    parsed.movies.map((movie) => refreshMovieBoxFields(movie, refreshOpts(movie))),
+  );
+  latestParsedMeta = parsed;
+  const speed = buildSpeedMap(latestMovies);
+  latestSpeedMap = speed;
+  return enrichMoviesQuick(latestMovies, speed).map(stabilizeMovie);
+}
+
+function paintStructuralDashboard(parsed, raw, requestGen) {
+  if (!parsed?.movies?.length) return false;
+  resetLastGoodIfDayChanged(parsed.calendar?.today);
+  traceDashboardData(parsed, raw, { enabled: isDataTraceEnabled() });
+  resetBubbleBaselineOnFontChange(parsed.fontUrlKey || parsed.fontContentKey);
+  latestParsedMeta = parsed;
+  latestMovies = parsed.movies.map(stabilizeMovie);
+  latestNation = parsed.nation ? stabilizeNation(parsed.nation) : parsed.nation;
+  const speed = buildSpeedMap(latestMovies);
+  latestSpeedMap = speed;
+  const movies = enrichMoviesQuick(latestMovies, speed).map(stabilizeMovie);
+  // 首次显示后不能永久 hold：只在字体未就绪时暂存票房，避免解码空窗闪空
+  const holdBoxes = hasDisplayedData && !isMaoyanFontReady();
+  const boxOpts = holdBoxes ? { holdBoxes: true } : {};
+  renderList(movies, boxOpts);
+  updateNation(latestNation, parsed, boxOpts);
+  updateChampion(movies, parsed.calendar?.today || lastGoodCacheDay, boxOpts);
+  hasDisplayedData = true;
+  document.body.classList.add("is-ready");
+  setStatus("ok", "");
+  if (!firstDashboardPainted) firstDashboardPainted = true;
+  markStartup("firstRealFields");
+  return true;
+}
+
+function paintDecodedDashboard(parsed, raw, requestGen, fontContentKey) {
+  if (!parsed?.movies?.length || requestGen !== pollGeneration) return false;
+  resetBubbleBaselineOnFontChange(fontContentKey);
+  const movies = buildMoviesForRender(parsed, fontContentKey);
+  syncHeroAndMovieBoxes(movies);
+  markStartup("mappingComplete");
+  if (movies.some((m) => getMovieBoxAmount(m) > 0)) {
+    markStartup("firstBoxDisplay");
+  }
+  return true;
+}
+
+function tryPublishEncodedSession(session, requestGen) {
+  if (!isSessionCurrent(session) || requestGen !== pollGeneration) return;
+  const contentKey = session.fontContentKey;
+  if (!contentKey || !isVisualReady(contentKey)) return;
+  const pub = tryPublishDashboardSession({
+    responseId: session.responseId,
+    contentKey,
+    businessDate: session.businessDate,
+    fontStyle: session.fontStyle,
+  });
+  if (!pub.ok) return;
+  latestParsedMeta = { ...session.parsed, fontContentKey: contentKey };
+  latestNation = session.parsed.nation
+    ? { ...stabilizeNation(session.parsed.nation), fontMappingVersion: contentKey }
+    : latestNation;
+  repaintEncodedGlyphs(requestGen);
+}
+
+function syncHeroAndMovieBoxes(movies) {
+  for (const movie of movies || []) {
+    const card = cardPool.get(String(movie.movieId));
+    if (!card) continue;
+    applyCardEncodedBoxes(card, movie);
+    updateRaceCardDelta(card, movie, false);
+    trackBoxDelta(card, movie);
+  }
+  if (latestNation) updateNation(latestNation, latestParsedMeta || {});
+  updateChampion(movies, latestParsedMeta?.calendar?.today || lastGoodCacheDay);
+}
+
+function redecodeAndRepaint(requestGen) {
+  if (requestGen !== pollGeneration) return;
+  const fontVer = getFontMappingVersion();
+  if (latestNation) {
+    latestNation = refreshNationBoxFields(latestNation, {
+      fontMappingVersion: fontVer,
+      movies: latestMovies,
+    });
+  }
+  if (!latestMovies.length) return;
+  const refreshOpts = (movie) => buildMovieBoxRefreshOptions(movie, latestNation);
+  latestMovies = rerankMoviesByTodayBox(
+    latestMovies.map((movie) => refreshMovieBoxFields(movie, refreshOpts(movie))),
+  );
+  const movies = enrichMoviesQuick(latestMovies, latestSpeedMap).map(stabilizeMovie);
+  syncHeroAndMovieBoxes(movies);
+  markStartup("mappingComplete");
+  if (movies.some((m) => getMovieBoxAmount(m) > 0)) {
+    markStartup("firstBoxDisplay");
+  }
+}
+
+function repaintEncodedGlyphs(requestGen) {
+  if (requestGen !== pollGeneration) return;
+  if (!latestMovies.length) return;
+  const movies = enrichMoviesQuick(latestMovies, latestSpeedMap).map(stabilizeMovie);
+  syncHeroAndMovieBoxes(movies);
+  markStartup("firstBoxDisplay");
+}
+
 async function refreshData() {
-  if (refreshing) return;
-  refreshing = true;
+  if (fetchInFlight) return;
+  fetchInFlight = true;
   pollCount += 1;
 
   try {
@@ -2065,47 +3101,60 @@ async function refreshData() {
 
     const displayCount = getDisplayMovieCount();
     const raw = await fetchDashboard(config.apiBase, "", { topCount: displayCount });
-    // 必须先注入反爬字体再 parse/decode，否则 todayBox 全失败 → 排名冻成猫眼原始序
-    if (raw.fontStyle) {
-      try {
-        await injectFontStyle(raw.fontStyle);
-      } catch (err) {
-        console.warn("字体加载失败", err);
-      }
-    }
-    const parsed = parseDashboard(raw, displayCount);
-    resetLastGoodIfDayChanged(parsed.calendar?.today);
-    traceDashboardData(parsed, raw, { enabled: isDataTraceEnabled() });
-    if (!parsed.movies.length) {
+    markStartup("dashboardReturned");
+
+    const session = createDashboardSession(raw, displayCount);
+    if (!session.parsed.movies.length) {
       if (!hasDisplayedData) setStatus("loading", "等待票房数据…");
       return;
     }
 
     pollGeneration += 1;
-    latestMovies = rerankMoviesByTodayBox(
-      parsed.movies.map((movie) => refreshMovieBoxFields(movie)),
-    );
-    latestNation = parsed.nation
-      ? refreshMovieBoxFields({ ...parsed.nation, todayBoxHtml: parsed.nation.todayBoxHtml || "" })
-      : parsed.nation;
-    latestParsedMeta = parsed;
-    const speed = buildSpeedMap(latestMovies);
-    latestSpeedMap = speed;
-    const movies = enrichMoviesQuick(latestMovies, speed).map(stabilizeMovie);
+    const requestGen = pollGeneration;
+    session.mapGen = ++mappingGeneration;
 
-    renderList(movies);
-    updateNation(latestNation, parsed);
-
-    hasDisplayedData = true;
-    document.body.classList.add("is-ready");
-    setStatus("ok", "");
-
-    if (!firstDashboardPainted) {
-      firstDashboardPainted = true;
-    }
+    paintStructuralDashboard(session.parsed, raw, requestGen);
     enrichAllowed = true;
-    scheduleBackgroundEnrich(pollGeneration, parsed, speed);
-    scheduleDecodeRetry();
+    scheduleBackgroundEnrich(requestGen, session.parsed, latestSpeedMap);
+
+    const fontStyle = session.fontStyle;
+    if (fontStyle) {
+      void prepareSessionFont(session)
+        .then(() => {
+          tryPublishEncodedSession(session, requestGen);
+        })
+        .catch((err) => console.warn("字体注入失败", err));
+
+      void buildSessionPuaMap(session)
+        .then(() => {
+          if (!isSessionCurrent(session)) return;
+          const pub = tryPublishSession(session);
+          if (!pub.ok) return;
+          tryPublishDashboardSession({
+            responseId: session.responseId,
+            contentKey: session.fontContentKey,
+            businessDate: session.businessDate,
+            fontStyle: session.fontStyle,
+          });
+          if (requestGen !== pollGeneration) return;
+          const decoded = decodeSessionDashboard(session);
+          paintDecodedDashboard(decoded, raw, requestGen, session.fontContentKey);
+          scheduleDecodeRetry(
+            requestGen,
+            sessionFontIdentity(session),
+            session.businessDate,
+          );
+        })
+        .catch((err) => {
+          console.warn("PUA 映射失败", err);
+          if (isSessionCurrent(session) && requestGen === pollGeneration) {
+            scheduleDecodeRetry(requestGen, sessionFontIdentity(session), session.businessDate);
+          }
+        });
+    } else {
+      scheduleDecodeRetry(requestGen, getFontMappingVersion(), session.businessDate);
+    }
+
     await updateLoginButton();
   } catch (e) {
     const msg = String(e.message || "");
@@ -2135,7 +3184,7 @@ async function refreshData() {
       setStatus("ok", "");
     }
   } finally {
-    refreshing = false;
+    fetchInFlight = false;
   }
 }
 
@@ -2365,6 +3414,9 @@ async function handleLoginClick() {
   });
 
   const loginResult = await window.overlay?.startLogin?.({ relogin });
+  if (loginResult?.attemptId) {
+    activeLoginAttemptId = Number(loginResult.attemptId) || activeLoginAttemptId;
+  }
   if (loginResult && loginResult.ok === false) {
     offResult?.();
     handleLoginFailure(loginResult);
@@ -2389,14 +3441,17 @@ async function handleLoginClick() {
         const session = (await window.overlay?.getSessionStatus?.()) || {};
         if (
           session.detailApiReady ||
-          (session.loginCookieReady && session.storageStateExists)
+          session.signatureReady ||
+          (session.loginCookieReady && session.storageStateExists && session.identityCookieExists)
         ) {
           clearInterval(loginWatchTimer);
           loginWatchTimer = null;
           resolve({
             ok: true,
+            attemptId: activeLoginAttemptId,
             detailApiReady: Boolean(session.detailApiReady),
             loginCookieReady: Boolean(session.loginCookieReady),
+            loggedIn: true,
           });
         }
       }, 2000);
@@ -2409,14 +3464,22 @@ async function handleLoginClick() {
     loginWatchTimer = null;
   }
 
-  if (result?.ok && (result?.detailApiReady || result?.loggedIn || result?.loginCookieReady)) {
+  if (
+    result?.ok &&
+    shouldApplyLoginResult(result) &&
+    (result?.detailApiReady || result?.loggedIn || result?.loginCookieReady)
+  ) {
     await finishLoginSuccess(result);
     return;
   }
-  handleLoginFailure(result);
+  if (result?.ok === false && shouldApplyLoginResult(result)) {
+    handleLoginFailure(result);
+  }
 }
 
 async function init() {
+  const prevReport = getPreviousStartupReport();
+  beginStartupSession(prevReport?.completed ? "warm" : "cold");
   bindDesignViewport();
   window.addEventListener(
     "resize",
@@ -2427,6 +3490,16 @@ async function init() {
   );
   renderLoadingSkeleton();
   $("btn-login")?.addEventListener("click", handleLoginClick);
+  window.overlay?.onLoginResult?.((result) => {
+    if (!shouldApplyLoginResult(result)) return;
+    if (result?.ok && (result?.detailApiReady || result?.loggedIn || result?.loginCookieReady)) {
+      void finishLoginSuccess(result);
+      return;
+    }
+    if (result?.ok === false && result?.code !== "login_in_progress") {
+      handleLoginFailure(result);
+    }
+  });
   if (heroDateEl) setTextIfChanged(heroDateEl, resolveDisplayDate(null));
 
   config = (await window.overlay?.getConfig()) || {
@@ -2437,6 +3510,7 @@ async function init() {
   config.topCount = RACE_TOP_COUNT;
 
   await syncOverlaySettings();
+  window.getBubbleSkipLog = getBubbleSkipLog;
   window.overlay?.onSettingsChanged?.(async (settings) => {
     applyOverlaySettings(settings);
     config.pollIntervalMs = settings.pollIntervalMs;
@@ -2463,6 +3537,7 @@ async function init() {
       pulseInlineDelta,
       computeMovieDelta,
       formatDeltaWithArrow,
+      resetLastGoodIfDayChanged,
       formatWanForDisplay,
       formatWanDisplayText,
       parseDashboard,
@@ -2472,12 +3547,21 @@ async function init() {
       getExtraMetrics,
       getExtraMetricsGridClass,
       buildDailyTrendItems,
+      observeBubble,
+      bindBubbleAnchor,
+      getBubbleSkipLog,
+      resolveBubbleTrackingAmount,
+      resolveFreshBubbleAmount,
+      playBubblePulse,
+      hideBubble,
+      pulseNoChangeBubble,
     };
     setStatus("ok", "");
     return;
   }
 
   const apiStatus = await waitForApiReady();
+  markStartup("serviceReady");
   if (!apiStatus?.ready) {
     setStatus("error", apiStatus?.error || "票房服务启动失败，5 秒后自动重试…");
     startServiceRetryLoop();
@@ -2487,6 +3571,7 @@ async function init() {
   if (apiStatus.apiBase) config.apiBase = apiStatus.apiBase;
   setStatus("loading", "服务已就绪，正在拉取票房数据…");
   startPolling();
+  setTimeout(() => flushStartupReport(), 90_000);
 }
 
 setTimeout(() => {

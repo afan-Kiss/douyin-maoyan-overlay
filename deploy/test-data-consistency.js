@@ -84,7 +84,7 @@ async function main() {
   assert.strictEqual(parsed.nation.seatValue, "3.2");
 
   const seatRateRaw = mockDashboardRaw({
-    nation: { viewSeatRate: "4.5%", avgShowView: "" },
+    nation: { viewSeatRate: "4.5%", avgShowView: "", viewCountDesc: "", showCountDesc: "" },
   });
   const seatRateParsed = parseDashboard(seatRateRaw, 5);
   assert.strictEqual(seatRateParsed.nation.seatLabel, "上座率");

@@ -25,10 +25,12 @@ let lastHealthCheckOk = false;
 let healthCheckPromise = null;
 let consecutiveHealthFails = 0;
 const HEALTH_CHECK_INTERVAL_MS = 15_000;
+let _healthCheckIntervalMs = HEALTH_CHECK_INTERVAL_MS;
 const HEALTH_FAIL_THRESHOLD = 2;
 
 let _spawnImpl = spawn;
 let _checkHealthImpl = null;
+let _portListeningImpl = null;
 let _testWaitForPidGoneFn = null;
 
 function sleep(ms) {
@@ -54,25 +56,59 @@ function isElectronMain() {
   }
 }
 
-function getDataDir() {
-  if (process.env.MAOYAN_DATA_DIR) {
-    return process.env.MAOYAN_DATA_DIR;
+function listDataDirCandidates() {
+  const roaming = process.env.APPDATA || path.join(require("os").homedir(), "AppData", "Roaming");
+  const local = process.env.LOCALAPPDATA || roaming;
+  const candidates = [];
+
+  try {
+    const pkg = require("./package.json");
+    const productName = pkg.build?.productName || "MaoyanOverlay";
+    candidates.push(path.join(roaming, productName, "maoyan-data"));
+  } catch {
+    candidates.push(path.join(roaming, "MaoyanOverlay", "maoyan-data"));
   }
 
   try {
     const { app } = require("electron");
     if (app && typeof app.getPath === "function") {
-      return path.join(app.getPath("userData"), "maoyan-data");
+      candidates.push(path.join(app.getPath("userData"), "maoyan-data"));
     }
   } catch {
     /* not in electron */
   }
 
-  const local = process.env.LOCALAPPDATA || process.env.APPDATA;
-  if (local) {
-    return path.join(local, "MaoyanOverlay", "maoyan-data");
+  candidates.push(path.join(local, "MaoyanOverlay", "maoyan-data"));
+  candidates.push(path.join(roaming, "douyin-maoyan-overlay", "maoyan-data"));
+
+  return [...new Set(candidates.map((entry) => path.resolve(entry)))];
+}
+
+function pickCanonicalDataDir(candidates = listDataDirCandidates()) {
+  let best = "";
+  let bestMtime = 0;
+  for (const dir of candidates) {
+    const stateFile = path.join(dir, "browser_state.json");
+    try {
+      if (!fs.existsSync(stateFile)) continue;
+      const mtime = fs.statSync(stateFile).mtimeMs;
+      if (mtime > bestMtime) {
+        bestMtime = mtime;
+        best = dir;
+      }
+    } catch {
+      /* ignore unreadable candidate */
+    }
   }
-  return LEGACY_DATA_DIR;
+  if (best) return best;
+  return candidates[0] || LEGACY_DATA_DIR;
+}
+
+function getDataDir() {
+  if (process.env.MAOYAN_DATA_DIR) {
+    return process.env.MAOYAN_DATA_DIR;
+  }
+  return pickCanonicalDataDir();
 }
 
 function migrateLegacyDataDir() {
@@ -322,6 +358,7 @@ function parsePortFromApiBase(apiBase) {
 }
 
 function isPortListening(port, host = "127.0.0.1") {
+  if (_portListeningImpl) return _portListeningImpl(port, host);
   return new Promise((resolve) => {
     const socket = net.createConnection({ port, host });
     const done = (value) => {
@@ -385,13 +422,26 @@ async function killListenersOnPort(port, exceptPid = 0) {
 async function recoverStalePort(apiBase) {
   const port = parsePortFromApiBase(apiBase);
   if (!(await isPortListening(port))) return;
-  if (await checkHealth(apiBase)) return;
+  const expectedDataDir = getDataDir();
+  if (await checkHealth(apiBase, expectedDataDir)) return;
   const exceptPid = maoyanProcess?.pid || 0;
   await killListenersOnPort(port, exceptPid);
 }
 
-function checkHealth(apiBase) {
-  if (_checkHealthImpl) return _checkHealthImpl(apiBase);
+function healthResponseMatches(data, expectedDataDir) {
+  if (!data || data.ok !== true) return false;
+  if (!expectedDataDir) return true;
+  if (!data.dataDir) return false;
+  try {
+    return path.resolve(String(data.dataDir)) === path.resolve(String(expectedDataDir));
+  } catch {
+    return false;
+  }
+}
+
+function checkHealth(apiBase, expectedDataDir) {
+  if (_checkHealthImpl) return _checkHealthImpl(apiBase, expectedDataDir);
+  const dataDir = expectedDataDir || getDataDir();
   return new Promise((resolve) => {
     const url = `${apiBase}/health`;
     const req = http.get(url, { timeout: 2000 }, (res) => {
@@ -402,7 +452,7 @@ function checkHealth(apiBase) {
       res.on("end", () => {
         try {
           const data = JSON.parse(body);
-          resolve(res.statusCode === 200 && data.ok === true);
+          resolve(res.statusCode === 200 && healthResponseMatches(data, dataDir));
         } catch {
           resolve(false);
         }
@@ -664,10 +714,11 @@ async function shutdownMaoyanServiceAndWait(timeoutMs = 10000) {
 }
 
 async function waitForHealth(apiBase, timeoutMs = 30000) {
+  const expectedDataDir = getDataDir();
   const deadline = Date.now() + timeoutMs;
   let delay = 150;
   while (Date.now() < deadline) {
-    if (await checkHealth(apiBase)) return true;
+    if (await checkHealth(apiBase, expectedDataDir)) return true;
     await sleep(delay);
     delay = Math.min(Math.round(delay * 1.5), 1000);
   }
@@ -696,17 +747,18 @@ async function ensureMaoyanServiceInner(config) {
     return apiStatus;
   }
 
-  if (await checkHealth(apiBase)) {
+  const ownDataDir = getDataDir();
+  if (await checkHealth(apiBase, ownDataDir)) {
     apiStatus.ready = true;
     Object.assign(apiStatus, getMaoyanSessionStatus());
     warmDashboardCache(apiBase);
     // 延后验签，先让首屏大盘出来（避免启动瞬间再起无头 Chrome）
-    setTimeout(() => scheduleBackgroundVerify(apiBase, getDataDir(), { startup: true }), 12000);
+    setTimeout(() => scheduleBackgroundVerify(apiBase, ownDataDir, { startup: true }), 12000);
     return apiStatus;
   }
 
   await recoverStalePort(apiBase);
-  if (await checkHealth(apiBase)) {
+  if (await checkHealth(apiBase, ownDataDir)) {
     apiStatus.ready = true;
     Object.assign(apiStatus, getMaoyanSessionStatus());
     warmDashboardCache(apiBase);
@@ -808,12 +860,12 @@ async function startMaoyanLogin(options = {}) {
 
 async function runThrottledHealthCheck(apiBase) {
   const now = Date.now();
-  if (now - lastHealthCheckAt < HEALTH_CHECK_INTERVAL_MS) {
+  if (now - lastHealthCheckAt < _healthCheckIntervalMs) {
     return lastHealthCheckOk;
   }
   if (healthCheckPromise) return healthCheckPromise;
 
-  healthCheckPromise = checkHealth(apiBase)
+  healthCheckPromise = checkHealth(apiBase, getDataDir())
     .then((alive) => {
       lastHealthCheckAt = Date.now();
       lastHealthCheckOk = alive;
@@ -857,6 +909,8 @@ function _testResetMaoyanState() {
   consecutiveHealthFails = 0;
   _spawnImpl = spawn;
   _checkHealthImpl = null;
+  _portListeningImpl = null;
+  _healthCheckIntervalMs = HEALTH_CHECK_INTERVAL_MS;
   _testWaitForPidGoneFn = null;
 }
 
@@ -893,6 +947,14 @@ function _testSetCheckHealth(fn) {
   _checkHealthImpl = fn || null;
 }
 
+function _testSetPortListening(fn) {
+  _portListeningImpl = fn || null;
+}
+
+function _testSetHealthCheckInterval(ms) {
+  _healthCheckIntervalMs = Number(ms) || HEALTH_CHECK_INTERVAL_MS;
+}
+
 function _testSetWaitForPidGone(fn) {
   _testWaitForPidGoneFn = fn || null;
 }
@@ -903,11 +965,15 @@ module.exports = {
   shutdownMaoyanService,
   shutdownMaoyanServiceAndWait,
   checkHealth,
+  healthResponseMatches,
+  recoverStalePort,
   isMaoyanLoggedIn,
   getMaoyanSessionStatus,
   startMaoyanLogin,
   buildApiBase,
   getDataDir,
+  listDataDirCandidates,
+  pickCanonicalDataDir,
   handleMaoyanChildExit,
   _testResetMaoyanState,
   _testGetState,
@@ -915,6 +981,8 @@ module.exports = {
   _testHandleChildExit,
   _testSetSpawn,
   _testSetCheckHealth,
+  _testSetPortListening,
+  _testSetHealthCheckInterval,
   _testSetWaitForPidGone,
   DATA_DIR: LEGACY_DATA_DIR,
   SERVER_DIR,

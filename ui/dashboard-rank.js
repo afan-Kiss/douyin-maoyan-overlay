@@ -4,26 +4,150 @@ export const DECODE_STATUS = {
   OK: "ok",
   FAILED: "failed",
   ENCODED: "encoded",
+  DECODE_ERROR: "decode_error",
 };
+
+export const PUA_MIN = 0xe000;
+export const PUA_MAX = 0xf8ff;
+
+export function isPuaCodePoint(code) {
+  return Number.isFinite(code) && code >= PUA_MIN && code <= PUA_MAX;
+}
+
+export function decodeHtmlEntities(text) {
+  if (text == null) return "";
+  return String(text)
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)));
+}
+
+/** 按顺序提取 HTML 实体与字面字符的 Unicode 码点（不含标签） */
+export function iterMarkupCodePoints(text) {
+  const raw = String(text || "");
+  const points = [];
+  const entityRe = /&#x([0-9a-f]+);|&#(\d+);/gi;
+  let last = 0;
+  let match;
+  while ((match = entityRe.exec(raw)) !== null) {
+    const between = raw.slice(last, match.index).replace(/<[^>]+>/g, "");
+    for (const ch of between) {
+      const cp = ch.codePointAt(0);
+      if (cp != null) points.push(cp);
+    }
+    const code = match[1] ? parseInt(match[1], 16) : parseInt(match[2], 10);
+    if (Number.isFinite(code)) points.push(code);
+    last = match.index + match[0].length;
+  }
+  const tail = raw.slice(last).replace(/<[^>]+>/g, "");
+  for (const ch of tail) {
+    const cp = ch.codePointAt(0);
+    if (cp != null) points.push(cp);
+  }
+  return points;
+}
+
+export function containsEncodedBoxMarkup(text) {
+  return iterMarkupCodePoints(text).some(isPuaCodePoint);
+}
+
+export function countEncodedBoxGlyphs(numHtml) {
+  return iterMarkupCodePoints(String(numHtml || "").replace(/<[^>]+>/g, "")).filter(isPuaCodePoint)
+    .length;
+}
 
 export function isUntrustedBoxDecode(text) {
   if (text == null) return true;
-  const s = String(text).replace(/[^\d.]/g, "");
+  const raw = String(text).trim();
+  if (!raw || raw === "--" || raw === "-") return true;
+  if (containsEncodedBoxMarkup(raw)) return true;
+  const s = raw.replace(/[^\d.]/g, "");
   if (!s) return true;
   const digits = s.replace(/\./g, "");
   if (!digits) return true;
-  if (new Set(digits.split("")).size === 1) return true;
+  // 反爬解码失败常变成 1111.1 / 111.11，不能把 88.8 等真实票房误判为不可信
+  if (digits.length >= 4 && /^1+$/.test(digits)) return true;
   const ones = (digits.match(/1/g) || []).length;
-  if (ones / digits.length >= 0.75) return true;
+  if (digits.length >= 4 && ones / digits.length >= 0.75) return true;
   return false;
 }
 
-export function isEncodedBoxHtmlNode(numHtml) {
-  const raw = String(numHtml || "");
-  if (!raw) return false;
-  if (/&#x[e-f0-9]{3,4};/i.test(raw)) return true;
-  if (/[\uE000-\uF8FF]/.test(raw)) return true;
+export function validateDecodedBoxStructure(numHtml, decodedText) {
+  if (!decodedText || decodedText === "--") return false;
+  const decoded = String(decodedText).trim();
+  if (!/^[\d.]+$/.test(decoded)) return false;
+  if ((decoded.match(/\./g) || []).length > 1) return false;
+  const glyphCount = countEncodedBoxGlyphs(numHtml);
+  const digitCount = decoded.replace(/\./g, "").length;
+  if (glyphCount > 0 && digitCount !== glyphCount) return false;
+  return digitCount >= 1 && digitCount <= 12;
+}
+
+/**
+ * 内部票房单位「万」：30000万=3亿元（非3万元）。
+ * 仅拦截 8572685.878 等明显不可能值；150亿 >> 节假日 5亿/10亿合法峰值。
+ */
+export const ABSURD_BOX_WAN_MAX = 1_500_000;
+
+export function rejectImplausibleTodayBoxWan(todayBoxWan, context = {}) {
+  if (!Number.isFinite(todayBoxWan) || todayBoxWan <= 0) return true;
+  const { nationBoxWan, sumBoxNumWan, absurdMaxWan } = context;
+  const absurdCap = Number.isFinite(absurdMaxWan) && absurdMaxWan > 0 ? absurdMaxWan : ABSURD_BOX_WAN_MAX;
+  if (todayBoxWan > absurdCap) return true;
+  if (Number.isFinite(nationBoxWan) && nationBoxWan > 0 && todayBoxWan > nationBoxWan * 1.05) {
+    return true;
+  }
+  if (Number.isFinite(sumBoxNumWan) && sumBoxNumWan > 0 && todayBoxWan > sumBoxNumWan * 1.01) {
+    return true;
+  }
   return false;
+}
+
+export function validateNationCrossCheck(nationBoxWan, context = {}) {
+  const reasons = [];
+  if (!Number.isFinite(nationBoxWan) || nationBoxWan <= 0) {
+    return { ok: false, reasons: ["non_positive"] };
+  }
+  const absurdCap =
+    Number.isFinite(context.absurdMaxWan) && context.absurdMaxWan > 0
+      ? context.absurdMaxWan
+      : ABSURD_BOX_WAN_MAX;
+  if (nationBoxWan > absurdCap) reasons.push("absurd_magnitude");
+
+  const top1BoxWan = Number(context.top1BoxWan) || 0;
+  const moviesSumWan = Number(context.moviesSumWan) || 0;
+  const top1BoxRate = Number(context.top1BoxRate) || 0;
+
+  if (top1BoxWan > 0 && nationBoxWan < top1BoxWan * 0.98) {
+    reasons.push("nation_below_top1");
+  }
+  if (moviesSumWan > 0 && nationBoxWan < moviesSumWan * 0.85) {
+    reasons.push("nation_below_movies_sum");
+  }
+  if (top1BoxRate > 0 && top1BoxWan > 0) {
+    const impliedNation = (top1BoxWan / top1BoxRate) * 100;
+    if (impliedNation > 0) {
+      const ratio = nationBoxWan / impliedNation;
+      if (ratio < 0.85 || ratio > 1.15) reasons.push("box_rate_mismatch");
+    }
+  }
+  return { ok: reasons.length === 0, reasons };
+}
+
+export function buildNationCrossCheckContext(movies = [], nation = {}) {
+  const decoded = (movies || []).filter((m) => m?.decodeStatus === "ok" && m.todayBox > 0);
+  const top1 = decoded.find((m) => Number(m.rank) === 1) || decoded[0] || null;
+  const moviesSumWan = decoded.reduce((sum, m) => sum + (Number(m.todayBox) || 0), 0);
+  return {
+    top1BoxWan: top1?.todayBox || 0,
+    top1BoxRate: top1?.boxRateNum || parseRate(top1?.boxRate),
+    moviesSumWan,
+    absurdMaxWan: ABSURD_BOX_WAN_MAX,
+    nationYesterdayWan: Number(nation?.yesterdayBoxWan) || 0,
+  };
+}
+
+export function isEncodedBoxHtmlNode(numHtml) {
+  return containsEncodedBoxMarkup(numHtml);
 }
 
 export function decodeBoxNumNode(numHtml) {
@@ -90,11 +214,35 @@ export function resolveMaoyanSumBoxWan(item = {}) {
   return parseBoxNum(desc);
 }
 
-export function resolveDecodeStatus(todayBoxHtml, todayRaw, encodedBox) {
-  if (todayRaw && todayRaw !== "0" && !isUntrustedBoxDecode(todayRaw)) {
+export function resolveDecodeStatus(todayBoxHtml, todayRaw, encodedBox, options = {}) {
+  const html = String(todayBoxHtml || "");
+  const encoded = encodedBox || isEncodedBoxHtmlNode(html) || containsEncodedBoxMarkup(html);
+  if (encoded) {
+    if (!todayRaw || todayRaw === "0" || isUntrustedBoxDecode(todayRaw)) {
+      return DECODE_STATUS.ENCODED;
+    }
+    if (!validateDecodedBoxStructure(html, todayRaw)) {
+      return DECODE_STATUS.DECODE_ERROR;
+    }
+    const todayUnit = options.todayUnit || "万";
+    const todayBoxWan = resolveTodayBoxFromRaw(todayRaw, todayUnit);
+    if (rejectImplausibleTodayBoxWan(todayBoxWan, options)) {
+      return DECODE_STATUS.DECODE_ERROR;
+    }
     return DECODE_STATUS.OK;
   }
-  if (encodedBox || isEncodedBoxHtmlNode(todayBoxHtml)) return DECODE_STATUS.ENCODED;
+  if (todayRaw && todayRaw !== "0" && !isUntrustedBoxDecode(todayRaw)) {
+    if (!validateDecodedBoxStructure(html, todayRaw)) {
+      return DECODE_STATUS.DECODE_ERROR;
+    }
+    const todayUnit = options.todayUnit || "万";
+    const todayBoxWan = resolveTodayBoxFromRaw(todayRaw, todayUnit);
+    if (todayBoxWan <= 0) return DECODE_STATUS.FAILED;
+    if (rejectImplausibleTodayBoxWan(todayBoxWan, options)) {
+      return DECODE_STATUS.DECODE_ERROR;
+    }
+    return DECODE_STATUS.OK;
+  }
   return DECODE_STATUS.FAILED;
 }
 
@@ -102,11 +250,6 @@ export function resolveTodayBoxFromRaw(todayRaw, todayUnit) {
   if (!todayRaw || isUntrustedBoxDecode(todayRaw)) return 0;
   const todayBox = parseBoxNum(todayRaw, todayUnit);
   if (todayBox > 0 && !isUntrustedBoxDecode(String(todayBox))) return todayBox;
-  const stripped = String(todayRaw).replace(/[^\d.]/g, "");
-  if (stripped && !isUntrustedBoxDecode(stripped)) {
-    const retry = parseBoxNum(stripped, todayUnit);
-    if (retry > 0 && !isUntrustedBoxDecode(String(retry))) return retry;
-  }
   return 0;
 }
 

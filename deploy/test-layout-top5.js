@@ -241,7 +241,7 @@ async function renderAndInspect(page, movies, nation) {
           }
         }
         const headers = [...table.querySelectorAll("thead th")].map((th) => th.textContent.trim());
-        const expected = ["日期", "票房(含分账)", "预测", "票房%", "排片%", "上座率"];
+        const expected = ["日期", "票房", "预测", "票房%", "排片%", "上座率"];
         if (headers.join("|") !== expected.join("|")) {
           issues.push(`第 ${rank} 名表头不匹配: ${headers.join("|")}`);
         }
@@ -277,7 +277,7 @@ async function renderAndInspect(page, movies, nation) {
       }
 
       const metricLabels = [...metrics].map((el) => el.querySelector(".metric__label")?.textContent?.trim());
-      const coreLabels = ["动态预测", "下映日期", "上映", "实时票房", "票房占比", "场均人次", "排片占比"];
+      const coreLabels = ["动态预测", "下映日期", "上映日期", "实时票房", "票房占比", "场均人次", "排片占比"];
       for (const label of coreLabels) {
         if (!metricLabels.includes(label)) {
           issues.push(`第 ${rank} 名缺少核心摘要字段: ${label}`);

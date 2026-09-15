@@ -181,6 +181,7 @@ function createWindow({ onReadyToShow } = {}) {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      backgroundThrottling: false,
       zoomFactor: 1,
     },
   });
@@ -478,7 +479,6 @@ if (!ensureSingleInstance({ onSecondInstance: focusMainWindow })) {
     const config = loadConfig();
     void startMaoyanService();
     createWindow({ onReadyToShow: () => startBackgroundServices(config) });
-    scheduleAutoStartRegistration();
 
     // A: 更新检查放到后台，不阻塞主窗口首屏
     setImmediate(() => {

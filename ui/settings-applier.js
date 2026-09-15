@@ -40,7 +40,7 @@ export function applyOverlaySettings(settings) {
   root.style.setProperty("--bubble-border", b.borderColor || "rgba(255,90,90,0.65)");
   root.style.setProperty("--bubble-shadow", b.shadowColor || "rgba(255,60,80,0.35)");
   root.style.setProperty("--bubble-glow", b.glowColor || "rgba(255,77,109,0.45)");
-  root.style.setProperty("--bubble-font-size", `${b.fontSize || 34}px`);
+  root.style.setProperty("--bubble-font-size", `${clampFont(b.fontSize, 34, 24, 48)}px`);
   root.style.setProperty("--bubble-duration", `${b.durationMs || 2000}ms`);
   root.style.setProperty("--bubble-float", `${b.floatHeight || 52}px`);
 

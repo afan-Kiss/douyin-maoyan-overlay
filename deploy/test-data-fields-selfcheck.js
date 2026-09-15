@@ -50,13 +50,13 @@ async function main() {
     assert.ok(box.hourSpeed < 5000, `sample hourSpeed too large: ${box.hourSpeed}万/h`);
     assert.ok(String(box.hourSpeedText).includes("/h"), box.hourSpeedText);
 
-    const merged = mergeMovieDetail(
-      { movieId: 1, todayBox: 100, sumBoxDesc: "1.00亿" },
-      { boxShow: box, speed: est, global: { mainland: "¥1.23亿" } },
-    );
-    assert.ok(Math.abs(merged.hourSpeed - box.hourSpeed) < 0.01);
-    assert.strictEqual(merged.hourSpeedFromApi, true);
-    assert.ok(String(merged.mainlandBox).includes("亿") || String(merged.mainlandBox).includes("万"));
+  const merged = mergeMovieDetail(
+    { movieId: 1, todayBox: 100, sumBoxDesc: "1.00亿" },
+    { boxShow: box, speed: est, global: { mainland: "¥1.23亿" } },
+  );
+  assert.ok(Math.abs(merged.hourSpeed - box.hourSpeed) < 0.01);
+  assert.strictEqual(merged.hourSpeedFromApi, true);
+  assert.strictEqual(merged.mainlandBox, "¥1.23亿");
 
     // yValue 元 → 万
     const yOnly = structuredClone(raw);

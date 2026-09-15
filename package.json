@@ -1,6 +1,6 @@
 {
   "name": "douyin-maoyan-overlay",
-  "version": "1.61.0",
+  "version": "1.64.4",
   "description": "抖音直播猫眼票房无边框展示",
   "main": "bootstrap.js",
   "scripts": {
@@ -24,6 +24,11 @@
     "test:api-errors": "node deploy/test-api-errors.js",
     "test:repo-integrity": "node deploy/test-repo-integrity.js",
     "test:layout-top5": "node deploy/test-layout-top5.js",
+    "test:bubble-cadence": "node deploy/test-bubble-cadence.js",
+    "test:display-stability": "node deploy/test-display-stability.js",
+    "test:font-session-replay": "node deploy/test-font-session-replay.js",
+    "trace:dashboard-pipeline": "node deploy/trace-dashboard-pipeline.js",
+    "test:startup-pipeline": "node deploy/test-startup-pipeline.js",
     "test:stability": "node deploy/test-stability-round4.js",
     "test:browser-state": "node deploy/test-browser-state-immutable.js",
     "test:module-load": "node deploy/test-module-load.js",
@@ -36,11 +41,17 @@
     "test:core": "node deploy/test-core.js",
     "test:extra-metrics": "node deploy/test-extra-metrics.js",
     "audit:maoyan-fields": "node deploy/audit-maoyan-fields.js",
+    "test:font-pua-mapper": "node deploy/test-font-pua-mapper.js",
+    "test:pua-entity": "node deploy/test-pua-entity.js",
+    "test:decode-refresh": "node deploy/test-decode-refresh.js",
+    "test:audit-field-mapping": "node deploy/test-audit-field-mapping.js",
+    "test:electron-font-decode": "node scripts/start-electron.js deploy/test-electron-font-decode.js",
     "test:packaged-server": "node deploy/test-packaged-server.js",
     "push:github": "node deploy/push-github.js"
   },
   "dependencies": {
     "express": "^4.21.2",
+    "opentype.js": "^2.0.0",
     "playwright": "^1.51.0"
   },
   "devDependencies": {

@@ -404,7 +404,7 @@ async function main() {
   }
 
   app.get("/health", (_req, res) => {
-    res.json({ ok: true });
+    res.json({ ok: true, dataDir: DATA_DIR });
   });
 
   app.get("/health/ready", (_req, res) => {

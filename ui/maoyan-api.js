@@ -7,7 +7,44 @@ import {
   sortDashboardMovies,
   pickOfficialDashboardMovies,
   rerankMoviesByTodayBox,
+  decodeHtmlEntities,
+  containsEncodedBoxMarkup,
+  validateDecodedBoxStructure,
+  rejectImplausibleTodayBoxWan,
+  ABSURD_BOX_WAN_MAX,
+  validateNationCrossCheck,
+  buildNationCrossCheckContext,
+  isUntrustedBoxDecode as rankUntrustedBoxDecode,
+  isPuaCodePoint,
+  iterMarkupCodePoints,
 } from "./dashboard-rank.js";
+import {
+  ensurePuaMap,
+  clearPuaMapCache,
+  decodeMarkupWithPuaMap,
+  extractFontUrls,
+  computeVersionKey,
+  computeVersionKeyAsync,
+  buildPuaMapFromFontBuffer,
+  listFontPuaEntries,
+  MAP_CONFIDENCE,
+} from "./font-pua-mapper.js";
+import {
+  registerFontFromStyle,
+  cacheMapForFont,
+  publishSession,
+  decodeHtmlWithFontKey,
+  isMapVerified,
+  isVisualReady,
+  getPublishedState,
+  waitForFontVisual,
+  collectProbeGlyphsFromRaw,
+  getMapForKey,
+  getMapForKeyLoose,
+  syncLegacyActivePointers,
+  normalizeFontIdentity,
+  resolveUrlKey,
+} from "./font-registry.js";
 
 export { DECODE_STATUS, rerankMoviesByTodayBox, resolveMaoyanSumBoxWan, pickOfficialDashboardMovies };
 
@@ -191,9 +228,49 @@ export async function fetchTechData(apiBase, movieId, parentSignal) {
 let decoderEl = null;
 let fontReady = false;
 let lastFontStyle = "";
-const puaDigitMap = new Map();
-let decodeCanvas = null;
-let decodeCtx = null;
+let activeFontFamily = "mtsi-font";
+let activePuaMap = null;
+let activePuaMapVersion = "";
+let activePuaMapMeta = null;
+const injectedFontVersions = new Set();
+
+export function fontFamilyForVersion(versionKey) {
+  const ver = String(versionKey || "").trim();
+  if (!ver) return "mtsi-font";
+  const safe = ver.replace(/[^a-zA-Z0-9:_-]/g, "_");
+  return `mtsi-font-${safe}`;
+}
+
+export function getActiveFontFamily() {
+  return activeFontFamily || "mtsi-font";
+}
+
+function versionedFontCss(fontStyle, versionKey) {
+  const family = fontFamilyForVersion(versionKey);
+  const css = normalizeFontCss(fontStyle);
+  if (!css) return "";
+  if (css.includes(`font-family: "${family}"`) || css.includes(`font-family:'${family}'`)) {
+    return css;
+  }
+  return css.replace(/font-family\s*:\s*(["']?)mtsi-font\1/gi, `font-family: "${family}"`);
+}
+
+function ensureVersionedFontStyle(versionKey, fontStyle) {
+  if (!versionKey || !fontStyle || injectedFontVersions.has(versionKey)) return;
+  const css = versionedFontCss(fontStyle, versionKey);
+  if (!css) return;
+  let registry = document.getElementById("maoyan-font-registry");
+  if (!registry) {
+    registry = document.createElement("style");
+    registry.id = "maoyan-font-registry";
+    document.head.appendChild(registry);
+  }
+  const marker = `/* mtsi-version:${versionKey} */`;
+  if (!registry.textContent.includes(marker)) {
+    registry.textContent += `${marker}\n${css}\n`;
+  }
+  injectedFontVersions.add(versionKey);
+}
 
 function ensureDecoder() {
   if (decoderEl) return decoderEl;
@@ -214,28 +291,19 @@ function normalizeFontCss(fontStyle) {
 }
 
 function hasPrivateUseChars(text) {
-  return /[\uE000-\uF8FF]/.test(text);
+  return iterMarkupCodePoints(text).some(isPuaCodePoint);
 }
 
 /** 反爬字体 canvas 解码失败时常整串变成 1（如 1111.1 / 111.11） */
 export function isUntrustedBoxDecode(text) {
-  if (text == null) return true;
-  const s = String(text).replace(/[^\d.]/g, "");
-  if (!s) return true;
-  const digits = s.replace(/\./g, "");
-  if (!digits) return true;
-  if (new Set(digits.split("")).size === 1) return true;
-  const ones = (digits.match(/1/g) || []).length;
-  if (ones / digits.length >= 0.75) return true;
-  return false;
+  return rankUntrustedBoxDecode(text);
 }
 
 /** API 常返回 &#xe6d5; 实体或 PUA 字符，均属反爬字体票房 */
 export function isEncodedBoxHtml(numHtml) {
   const raw = String(numHtml || "");
   if (!raw) return false;
-  if (/&#x[e-f0-9]{3,4};/i.test(raw)) return true;
-  if (/[\uE000-\uF8FF]/.test(raw)) return true;
+  if (containsEncodedBoxMarkup(raw)) return true;
   if (typeof document === "undefined") return false;
   const el = ensureDecoder();
   el.innerHTML = raw;
@@ -243,110 +311,182 @@ export function isEncodedBoxHtml(numHtml) {
 }
 
 export function boxHtmlUsesAntiScrapeFont(numHtml) {
-  if (!numHtml) return false;
-  if (/&#x[e-f0-9]{3,4};/i.test(String(numHtml))) return true;
-  if (typeof document === "undefined") {
-    return /[\uE000-\uF8FF]/.test(String(numHtml));
+  return isEncodedBoxHtml(numHtml);
+}
+
+export function getFontMappingVersion() {
+  const published = getPublishedState().contentKey;
+  if (published) return published;
+  if (!lastFontStyle) return "";
+  return computeVersionKey(lastFontStyle);
+}
+
+export function summarizeFontStyle(fontStyle) {
+  const css = normalizeFontCss(fontStyle || "");
+  const hash = css.match(/font\/([a-f0-9]+)\./i)?.[1] || "";
+  const host = css.match(/url\(["']?https?:\/\/([^/"']+)/i)?.[1] || "";
+  return {
+    version: hash ? `mtsi:${hash}` : "",
+    host: host ? host.replace(/\./g, "[.]") : "",
+    url: extractFontUrls(css),
+  };
+}
+
+const puaMapHelpers = {
+  validateNationCrossCheck,
+  validateDecodedBoxStructure,
+  isUntrustedBoxDecode,
+  parseBoxNum,
+  parseRate,
+};
+
+export function getActivePuaMapState() {
+  return {
+    version: activePuaMapVersion,
+    ready: fontReady === true,
+    hasMap: Boolean(activePuaMap),
+    meta: activePuaMapMeta,
+  };
+}
+
+export function buildCrossContextFromRaw(raw) {
+  const nation = raw?.movieList?.nationBoxInfo ?? {};
+  const list = raw?.movieList?.list ?? [];
+  return {
+    nationHtml: nation.nationBoxSplitUnit?.num || "",
+    nationUnit: normalizeUnit(nation.nationBoxSplitUnit?.unit),
+    nationSplitHtml: nation.nationSplitBoxSplitUnit?.num || "",
+    nationSplitUnit: normalizeUnit(nation.nationSplitBoxSplitUnit?.unit),
+    movies: list.map((item, index) => ({
+      rank: index + 1,
+      todayBoxHtml: item.boxSplitUnit?.num || "",
+      todayUnit: normalizeUnit(item.boxSplitUnit?.unit),
+      splitBoxHtml: item.splitBoxSplitUnit?.num || "",
+      splitUnit: normalizeUnit(item.splitBoxSplitUnit?.unit),
+      boxRate: item.boxRate || "",
+      boxRateNum: parseRate(item.boxRate),
+    })),
+  };
+}
+
+function syncGlobalsFromPublished(contentKey) {
+  const key = contentKey || getPublishedState().contentKey;
+  if (!key) return;
+  const ptr = syncLegacyActivePointers(key);
+  activePuaMapVersion = key;
+  activeFontFamily = ptr.family;
+  activePuaMap = getMapForKey(key);
+  activePuaMapMeta = ptr.mapMeta;
+  fontReady = ptr.visualReady;
+}
+
+export function tryPublishDashboardSession({ responseId, contentKey, businessDate, fontStyle }) {
+  const gate = publishSession({ responseId, contentKey, businessDate });
+  if (!gate.ok) return gate;
+  if (fontStyle) lastFontStyle = normalizeFontCss(fontStyle);
+  syncGlobalsFromPublished(contentKey);
+  return { ...gate, mapVerified: isMapVerified(contentKey), visualReady: isVisualReady(contentKey) };
+}
+
+export function applyBuiltPuaMap(built, fontStyle = lastFontStyle, options = {}) {
+  if (!built) return built;
+  const contentKey = built.versionKey || computeVersionKey(fontStyle);
+  const map =
+    built.map instanceof Map ? built.map : built.map ? new Map(built.map) : null;
+  cacheMapForFont(contentKey, { ...built, map });
+  if (options.publish === true) {
+    syncGlobalsFromPublished(contentKey);
   }
+  return { ...built, contentKey, map, applied: options.publish === true };
+}
+
+/** 仅注册字体并等待本轮 PUA 探针字形可用，不发布映射 */
+export async function prepareDashboardFont(raw) {
+  const fontStyle = raw?.fontStyle || lastFontStyle;
+  if (!fontStyle || typeof document === "undefined") {
+    return { ok: false, reason: "no_font_style" };
+  }
+  const probeGlyphs = collectProbeGlyphsFromRaw(raw);
+  const reg = await registerFontFromStyle(normalizeFontCss(fontStyle), { probeGlyphs });
+  await waitForFontVisual(reg.contentKey, probeGlyphs);
+  return {
+    ok: true,
+    urlKey: reg.urlKey,
+    contentKey: reg.contentKey,
+    versionKey: reg.contentKey,
+    fontFamily: reg.family,
+    fontReady: isVisualReady(reg.contentKey),
+  };
+}
+
+/** 后台 Worker 构建 PUA 映射；结果仅写入版本缓存，不污染当前活动映射 */
+export async function scheduleDashboardPuaMap(raw, options = {}) {
+  const fontStyle = raw?.fontStyle || lastFontStyle;
+  if (!fontStyle || typeof document === "undefined") {
+    return { ok: false, reason: "no_font_style" };
+  }
+  const { schedulePuaMapBuild } = await import("./font-pipeline.js");
+  const built = await schedulePuaMapBuild(normalizeFontCss(fontStyle), buildCrossContextFromRaw(raw), {
+    force: options.force === true,
+    budget: options.budget,
+    simulateDelayMs: options.simulateDelayMs || 0,
+  });
+  let mapBuilt = built;
+  if (built?.map && Array.isArray(built.map)) {
+    mapBuilt = { ...built, map: new Map(built.map) };
+  }
+  const contentKey = mapBuilt?.versionKey || computeVersionKey(fontStyle);
+  cacheMapForFont(contentKey, mapBuilt);
+  return { ...mapBuilt, contentKey, applied: false };
+}
+
+export async function loadPuaMapForDashboard(raw, options = {}) {
+  const fontStyle = raw?.fontStyle || lastFontStyle;
+  if (!fontStyle || typeof document === "undefined") {
+    return { ok: false, reason: "no_font_style" };
+  }
+  if (options.background === true) {
+    return scheduleDashboardPuaMap(raw, options);
+  }
+  const built = await ensurePuaMap(normalizeFontCss(fontStyle), {
+    force: options.force === true,
+    crossContext: buildCrossContextFromRaw(raw),
+    helpers: puaMapHelpers,
+    fontBuffer: options.fontBuffer,
+  });
+  return applyBuiltPuaMap(built, fontStyle);
+}
+
+function measureFontProbeWidth(fontFamily) {
   const el = ensureDecoder();
-  el.innerHTML = String(numHtml);
-  return hasPrivateUseChars(el.textContent || "");
+  const probe = "\uE6D5\uE6D6";
+  el.style.fontFamily = `"${fontFamily}", monospace`;
+  el.textContent = probe;
+  const encodedWidth = el.getBoundingClientRect().width;
+  el.style.fontFamily = "monospace";
+  el.textContent = probe;
+  const fallbackWidth = el.getBoundingClientRect().width;
+  return { encodedWidth, fallbackWidth };
 }
 
-function ensureDecodeCanvas() {
-  if (!decodeCanvas) {
-    decodeCanvas = document.createElement("canvas");
-    decodeCanvas.width = 100;
-    decodeCanvas.height = 100;
-    decodeCtx = decodeCanvas.getContext("2d", { willReadFrequently: true });
-    decodeCtx.textBaseline = "top";
-  }
-  return decodeCtx;
-}
-
-function getGlyphBitmap(font, text, fillStyle = "#000") {
-  const ctx = ensureDecodeCanvas();
-  ctx.clearRect(0, 0, 100, 100);
-  ctx.fillStyle = fillStyle;
-  ctx.font = font;
-  ctx.fillText(text, 10, 10);
-  const data = ctx.getImageData(0, 0, 100, 100).data;
-  const bitmap = new Uint8Array(data.length / 4);
-  for (let i = 0; i < data.length; i += 4) {
-    bitmap[i / 4] = data[i] || data[i + 1] || data[i + 2] || data[i + 3] ? 1 : 0;
-  }
-  return bitmap;
-}
-
-function bitmapSimilarity(a, b) {
-  let same = 0;
-  const len = Math.min(a.length, b.length);
-  for (let i = 0; i < len; i++) {
-    if (a[i] === b[i]) same++;
-  }
-  return same;
-}
-
-function glyphInk(bitmap) {
-  let ink = 0;
-  for (let i = 0; i < bitmap.length; i++) {
-    if (bitmap[i]) ink += 1;
-  }
-  return ink;
-}
-
-function guessDigitFromPua(charCode) {
-  if (puaDigitMap.has(charCode)) return puaDigitMap.get(charCode);
-  const ch = String.fromCharCode(charCode);
-  const target = getGlyphBitmap('80px "mtsi-font"', ch);
-  const ink = glyphInk(target);
-  if (ink < 80) {
-    puaDigitMap.set(charCode, -1);
-    return -1;
-  }
-  let max = 0;
-  let second = 0;
-  let digit = 0;
-  for (let d = 0; d < 10; d++) {
-    const guess = getGlyphBitmap('72px Arial, Helvetica, sans-serif', String(d), "#ff0000");
-    const score = bitmapSimilarity(target, guess);
-    if (score > max) {
-      second = max;
-      max = score;
-      digit = d;
-    } else if (score > second) {
-      second = score;
+async function waitForMtsiFont(fontFamily = activeFontFamily, probeGlyphs = [], retries = 8) {
+  const family = fontFamily || "mtsi-font";
+  const contentKey = activePuaMapVersion || getPublishedState().contentKey;
+  if (contentKey) {
+    const ready = await waitForFontVisual(contentKey, probeGlyphs, retries);
+    if (ready) {
+      activeFontFamily = family;
+      if (getPublishedState().contentKey === contentKey) fontReady = true;
+      return true;
     }
+    return Boolean(getPublishedState().contentKey === contentKey && isVisualReady(contentKey));
   }
-  if (max < 120 || max - second < 12) {
-    puaDigitMap.set(charCode, -1);
-    return -1;
-  }
-  puaDigitMap.set(charCode, digit);
-  return digit;
-}
-
-function decodePuaString(text) {
-  let out = "";
-  for (const ch of text) {
-    const code = ch.charCodeAt(0);
-    if (code >= 0xe000 && code <= 0xf8ff) {
-      const digit = guessDigitFromPua(code);
-      if (digit < 0) return "";
-      out += digit;
-    } else {
-      out += ch;
-    }
-  }
-  return out;
-}
-
-async function waitForMtsiFont(retries = 5) {
   for (let i = 0; i < retries; i++) {
     try {
-      await document.fonts.load('16px "mtsi-font"');
+      await document.fonts.load(`16px "${family}"`);
       await document.fonts.ready;
-      if (document.fonts.check('16px "mtsi-font"')) {
+      if (document.fonts.check(`16px "${family}"`)) {
+        activeFontFamily = family;
         fontReady = true;
         return true;
       }
@@ -355,54 +495,124 @@ async function waitForMtsiFont(retries = 5) {
     }
     await new Promise((r) => setTimeout(r, 200 * (i + 1)));
   }
-  fontReady = false;
-  return false;
-}
-
-export function isMaoyanFontReady() {
   return fontReady === true;
 }
 
-export async function injectFontStyle(fontStyle) {
-  const remoteCss = normalizeFontCss(fontStyle);
-  // CSS 未变：绝不重置 fontReady / 重写 style，避免每轮轮询闪空白
-  if (remoteCss && remoteCss === lastFontStyle) {
-    if (!fontReady) await waitForMtsiFont();
-    return;
-  }
-  if (remoteCss) {
-    let el = document.getElementById("maoyan-font-style");
-    if (!el) {
-      el = document.createElement("style");
-      el.id = "maoyan-font-style";
-      document.head.appendChild(el);
-    }
-    puaDigitMap.clear();
-    el.textContent = remoteCss;
-    lastFontStyle = remoteCss;
-    fontReady = false;
-    await waitForMtsiFont();
-  } else if (!fontReady) {
-    await waitForMtsiFont();
-  }
+export function isMaoyanFontReady(fontContentKey) {
+  const key = fontContentKey || getPublishedState().contentKey || activePuaMapVersion;
+  if (key) return isVisualReady(key);
+  return fontReady === true;
 }
 
-export function decodeFontNum(numHtml) {
+async function resolveFontVersionKey(fontStyle, fontBuffer = null, fastOnly = false) {
+  if (fontBuffer) return computeVersionKeyAsync(fontStyle, fontBuffer);
+  const css = normalizeFontCss(fontStyle);
+  if (!css) return activePuaMapVersion || "";
+  const urlKey = computeVersionKey(css);
+  if (fastOnly && urlKey && !urlKey.startsWith("mtsi:css:")) return urlKey;
+  const url = extractFontUrls(css);
+  if (!url) return urlKey;
+  try {
+    const normalizedUrl = url.startsWith("//") ? `https:${url}` : url;
+    const resp = await fetch(normalizedUrl);
+    if (resp.ok) {
+      const buffer = await resp.arrayBuffer();
+      return computeVersionKeyAsync(css, buffer);
+    }
+  } catch {
+    /* fallback below */
+  }
+  return urlKey || computeVersionKey(css);
+}
+
+export async function injectFontStyle(fontStyle, options = {}) {
+  const remoteCss = normalizeFontCss(fontStyle);
+  if (!remoteCss || typeof document === "undefined") {
+    return { versionKey: activePuaMapVersion, fontFamily: activeFontFamily, changed: false };
+  }
+  const probeGlyphs = options.probeGlyphs || [];
+  const reg = await registerFontFromStyle(remoteCss, {
+    fontBuffer: options.fontBuffer,
+    probeGlyphs,
+    fetchBuffer: options.fastVersion !== true && !options.fontBuffer,
+  });
+  const contentKey = options.versionKey || reg.contentKey;
+  await waitForFontVisual(contentKey, probeGlyphs);
+  const sameIdentity =
+    normalizeFontIdentity(contentKey) === normalizeFontIdentity(activePuaMapVersion);
+  lastFontStyle = remoteCss;
+  activeFontFamily = reg.family;
+  if (!sameIdentity) {
+    activePuaMapVersion = contentKey;
+  }
+  if (getPublishedState().contentKey === contentKey) {
+    fontReady = isVisualReady(contentKey);
+  }
+  return {
+    versionKey: contentKey,
+    urlKey: reg.urlKey,
+    fontFamily: reg.family,
+    changed: !sameIdentity,
+  };
+}
+
+export function decodeFontNum(numHtml, fontContentKey) {
   if (!numHtml) return "";
+  const contentKey = fontContentKey || getPublishedState().contentKey;
+  if (contentKey) {
+    const result = decodeHtmlWithFontKey(numHtml, contentKey);
+    return result.verified ? result.text : "";
+  }
+  const rawInput = String(numHtml).replace(/<[^>]+>/g, "").trim();
+  if (containsEncodedBoxMarkup(rawInput)) {
+    if (
+      typeof document === "undefined" ||
+      !fontReady ||
+      !activePuaMap ||
+      activePuaMapMeta?.confidence !== MAP_CONFIDENCE.VERIFIED
+    ) {
+      return "";
+    }
+    const decoded = decodeMarkupWithPuaMap(numHtml, activePuaMap);
+    if (!decoded.complete || !decoded.text) return "";
+    if (!validateDecodedBoxStructure(numHtml, decoded.text) || isUntrustedBoxDecode(decoded.text)) {
+      return "";
+    }
+    return decoded.text;
+  }
   if (typeof document === "undefined") {
-    const plain = String(numHtml).replace(/<[^>]+>/g, "").trim();
-    return isUntrustedBoxDecode(plain) ? "" : plain;
+    const decoded = decodeHtmlEntities(rawInput);
+    if (containsEncodedBoxMarkup(decoded)) return "";
+    return isUntrustedBoxDecode(decoded) ? "" : decoded;
   }
   const el = ensureDecoder();
   el.innerHTML = numHtml;
   const text = (el.textContent || "").trim();
   if (!text) return "";
   if (hasPrivateUseChars(text)) {
-    if (!fontReady) return "";
-    const decoded = decodePuaString(text);
-    return decoded && !isUntrustedBoxDecode(decoded) ? decoded : "";
+    if (!fontReady || !activePuaMap || activePuaMapMeta?.confidence !== MAP_CONFIDENCE.VERIFIED) return "";
+    const decoded = decodeMarkupWithPuaMap(numHtml, activePuaMap);
+    if (!decoded.complete || !decoded.text) return "";
+    if (!validateDecodedBoxStructure(numHtml, decoded.text) || isUntrustedBoxDecode(decoded.text)) {
+      return "";
+    }
+    return decoded.text;
   }
   return isUntrustedBoxDecode(text) ? "" : text;
+}
+
+export function decodeFontNumWithTrace(numHtml) {
+  const encoded = containsEncodedBoxMarkup(numHtml) || isEncodedBoxHtml(numHtml);
+  const raw = decodeFontNum(numHtml);
+  return {
+    rawHtml: numHtml || "",
+    encoded,
+    fontVersion: activePuaMapVersion,
+    fontMeta: activePuaMapMeta,
+    decodedString: raw,
+    mapReady: Boolean(activePuaMap),
+    fontReady: fontReady === true,
+  };
 }
 
 export function parseRate(rateStr) {
@@ -431,13 +641,8 @@ export function parseBoxNum(text, unit = "万") {
 
 function resolveTodayBox(todayRaw, todayUnit) {
   if (!todayRaw || isUntrustedBoxDecode(todayRaw)) return 0;
-  let todayBox = parseBoxNum(todayRaw, todayUnit);
+  const todayBox = parseBoxNum(todayRaw, todayUnit);
   if (todayBox > 0 && !isUntrustedBoxDecode(String(todayBox))) return todayBox;
-  const stripped = String(todayRaw).replace(/[^\d.]/g, "");
-  if (stripped && !isUntrustedBoxDecode(stripped)) {
-    const retry = parseBoxNum(stripped, todayUnit);
-    if (retry > 0 && !isUntrustedBoxDecode(String(retry))) return retry;
-  }
   return 0;
 }
 
@@ -466,34 +671,23 @@ function formatAvgAttendance(avg) {
 }
 
 export function resolveNationSeatMetric(nation = {}) {
-  // 已解析好的 seatValue（含测试/缓存）优先
   if (!isEmptyMetricValue(nation.seatValue)) {
     const raw = String(nation.seatValue).trim();
-    const label = String(nation.seatLabel || "上座率").trim() || "上座率";
+    const label = String(nation.seatLabel || "场均人次").trim() || "场均人次";
     if (/上座/.test(label)) {
       return {
         label,
         value: raw.includes("%") ? raw : `${raw.replace(/%$/g, "")}%`,
         seatRaw: raw,
+        source: nation.seatSource || "preset",
       };
     }
-    return { label, value: raw, seatRaw: raw };
-  }
-
-  const seatRaw = pickNonemptyNationField(nation, [
-    "viewSeatRate",
-    "avgSeatView",
-    "seatRate",
-    "viewSeatRateDesc",
-  ]);
-  if (seatRaw) {
-    const value = seatRaw.includes("%") ? seatRaw : `${seatRaw.replace(/%$/, "")}%`;
-    return { label: "上座率", value, seatRaw };
+    return { label, value: raw, seatRaw: raw, source: nation.seatSource || "preset" };
   }
 
   const avgShow = pickNonemptyNationField(nation, ["avgShowView", "avgShowViewDesc"]);
   if (avgShow) {
-    return { label: "场均人次", value: avgShow, seatRaw: avgShow };
+    return { label: "场均人次", value: avgShow, seatRaw: avgShow, source: "avgShowView" };
   }
 
   const views = parseDescNumber(nation.viewCountDesc);
@@ -501,11 +695,22 @@ export function resolveNationSeatMetric(nation = {}) {
   if (Number.isFinite(views) && Number.isFinite(shows) && shows > 0) {
     const formatted = formatAvgAttendance(views / shows);
     if (formatted) {
-      return { label: "场均人次", value: formatted, seatRaw: `views/shows:${formatted}` };
+      return {
+        label: "场均人次",
+        value: formatted,
+        seatRaw: `views/shows:${formatted}`,
+        source: "computed",
+      };
     }
   }
 
-  return { label: "上座率", value: "--", seatRaw: "" };
+  const seatRaw = pickNonemptyNationField(nation, ["viewSeatRate", "seatRate", "viewSeatRateDesc"]);
+  if (seatRaw) {
+    const value = seatRaw.includes("%") ? seatRaw : `${seatRaw.replace(/%$/, "")}%`;
+    return { label: "上座率", value, seatRaw, source: "avgSeatView" };
+  }
+
+  return { label: "场均人次", value: "--", seatRaw: "", source: "none" };
 }
 
 export function resolveChampionBoxWan(movie) {
@@ -523,61 +728,203 @@ export function resolveChampionBoxWan(movie) {
   return 0;
 }
 
-export function refreshMovieBoxFields(movie) {
-  if (!movie) return movie;
-  const todayBoxHtml = movie.todayBoxHtml || "";
-  const todayUnit = normalizeUnit(movie.todayUnit);
+function buildRefreshDecodeContext(entity, options = {}) {
+  return {
+    todayUnit: normalizeUnit(entity?.todayUnit || options.todayUnit),
+    nationBoxWan: Number(options.nationBoxWan) > 0 ? Number(options.nationBoxWan) : 0,
+    sumBoxNumWan:
+      Number(options.sumBoxNumWan) > 0
+        ? Number(options.sumBoxNumWan)
+        : Number(entity?.sumBoxNum) > 0
+          ? Number(entity.sumBoxNum)
+          : resolveMaoyanSumBoxWan(entity),
+    fontMappingVersion: options.fontMappingVersion || getFontMappingVersion(),
+  };
+}
+
+export function finalizeRefreshBoxFields(
+  entity,
+  todayBoxHtml,
+  ctx,
+  decodeStatus,
+  todayRaw,
+  todayBox,
+  rejectionReason = "",
+) {
   const encodedBox = isEncodedBoxHtml(todayBoxHtml);
-  const todayRaw = encodedBox && !fontReady ? "" : decodeFontNum(todayBoxHtml);
-  const prevText = String(movie.todayBoxText || "").trim();
-  const prevBox = movie.todayBox;
-  const prevTrusted =
-    prevBox > 0 &&
-    prevText !== "--" &&
-    !isUntrustedBoxDecode(prevText || String(prevBox));
-
-  if (!todayRaw) {
-    if (prevTrusted) {
-      return {
-        ...movie,
-        todayUnit,
-        decodeStatus: DECODE_STATUS.OK,
-      };
-    }
+  const fontVer = ctx.fontMappingVersion || getFontMappingVersion();
+  if (decodeStatus === DECODE_STATUS.OK && todayBox > 0) {
     return {
-      ...movie,
-      todayBoxText: "--",
-      todayBox: 0,
-      todayUnit,
-      decodeStatus: encodedBox ? DECODE_STATUS.ENCODED : DECODE_STATUS.FAILED,
+      ...entity,
+      todayBoxHtml,
+      todayUnit: ctx.todayUnit,
+      todayBoxText: todayRaw,
+      todayBox,
+      decodeStatus: DECODE_STATUS.OK,
+      fontMappingVersion: fontVer,
+      rejectionReason: "",
+      decodeKeepPrevious: false,
     };
   }
-
-  const todayBox = resolveTodayBox(todayRaw, todayUnit);
-  if (todayBox <= 0) {
-    if (prevTrusted) {
-      return {
-        ...movie,
-        todayUnit,
-        decodeStatus: DECODE_STATUS.OK,
-      };
-    }
-    return {
-      ...movie,
-      todayBoxText: "--",
-      todayBox: 0,
-      todayUnit,
-      decodeStatus: encodedBox ? DECODE_STATUS.ENCODED : DECODE_STATUS.FAILED,
-    };
+  let status = decodeStatus;
+  if (status === DECODE_STATUS.FAILED && encodedBox) {
+    status = fontReady && activePuaMap ? DECODE_STATUS.DECODE_ERROR : DECODE_STATUS.ENCODED;
   }
+  if (status === DECODE_STATUS.OK) status = DECODE_STATUS.DECODE_ERROR;
+
+  // decode 失败：保留上一轮有效票房，禁止用 0/"--" 覆盖
+  const prevBox = Number(entity?.todayBox) || 0;
+  const prevText = String(entity?.todayBoxText || "").trim();
+  const keepPrev = prevBox > 0 && !isUntrustedBoxDecode(String(prevBox));
 
   return {
-    ...movie,
-    todayBoxText: todayRaw,
-    todayBox,
-    todayUnit,
-    decodeStatus: DECODE_STATUS.OK,
+    ...entity,
+    todayBoxHtml,
+    todayUnit: ctx.todayUnit,
+    todayBoxText: keepPrev
+      ? prevText && prevText !== "--" && !isUntrustedBoxDecode(prevText)
+        ? prevText
+        : String(prevBox)
+      : "--",
+    todayBox: keepPrev ? prevBox : 0,
+    decodeStatus: status,
+    fontMappingVersion: fontVer,
+    rejectionReason: rejectionReason || activePuaMapMeta?.reason || "",
+    decodeKeepPrevious: keepPrev,
   };
+}
+
+function resolveRefreshDecodeStatus(todayBoxHtml, todayRaw, encodedBox, ctx, { isNation = false } = {}) {
+  const plausibility = isNation
+    ? { nationBoxWan: 0, sumBoxNumWan: 0, absurdMaxWan: ABSURD_BOX_WAN_MAX }
+    : { nationBoxWan: ctx.nationBoxWan, sumBoxNumWan: ctx.sumBoxNumWan };
+  return resolveDecodeStatus(todayBoxHtml, todayRaw, encodedBox, {
+    todayUnit: ctx.todayUnit,
+    ...plausibility,
+  });
+}
+
+export function refreshMovieBoxFields(movie, options = {}) {
+  if (!movie) return movie;
+  const todayBoxHtml = movie.todayBoxHtml || "";
+  const ctx = buildRefreshDecodeContext(movie, options);
+  const contentKey =
+    ctx.fontContentKey || ctx.fontMappingVersion || getPublishedState().contentKey;
+  const encodedBox = isEncodedBoxHtml(todayBoxHtml);
+  const mapReady = contentKey ? isMapVerified(contentKey) : Boolean(activePuaMap);
+  const visualReady = contentKey ? isVisualReady(contentKey) : fontReady;
+  const todayRaw =
+    encodedBox && (!visualReady || !mapReady) ? "" : decodeFontNum(todayBoxHtml, contentKey);
+  const decodeStatus = resolveRefreshDecodeStatus(todayBoxHtml, todayRaw, encodedBox, ctx);
+
+  if (decodeStatus === DECODE_STATUS.OK) {
+    const todayBox = resolveTodayBox(todayRaw, ctx.todayUnit);
+    if (todayBox <= 0) {
+      return finalizeRefreshBoxFields(
+        movie,
+        todayBoxHtml,
+        ctx,
+        DECODE_STATUS.DECODE_ERROR,
+        "",
+        0,
+        "non_positive",
+      );
+    }
+    return finalizeRefreshBoxFields(movie, todayBoxHtml, ctx, DECODE_STATUS.OK, todayRaw, todayBox);
+  }
+
+  if (
+    decodeStatus === DECODE_STATUS.ENCODED &&
+    (!visualReady || !mapReady) &&
+    movie.decodeStatus === DECODE_STATUS.OK &&
+    movie.todayBox > 0
+  ) {
+    return {
+      ...movie,
+      todayUnit: ctx.todayUnit,
+      fontMappingVersion: contentKey || ctx.fontMappingVersion || getFontMappingVersion(),
+      fontContentKey: contentKey || "",
+    };
+  }
+
+  return finalizeRefreshBoxFields(movie, todayBoxHtml, ctx, decodeStatus, "", 0);
+}
+
+export function refreshNationBoxFields(nation, options = {}) {
+  if (!nation) return nation;
+  const todayBoxHtml = nation.todayBoxHtml || "";
+  const ctx = buildRefreshDecodeContext(nation, options);
+  const contentKey =
+    ctx.fontContentKey || ctx.fontMappingVersion || getPublishedState().contentKey;
+  const encodedBox = isEncodedBoxHtml(todayBoxHtml);
+  const mapReady = contentKey ? isMapVerified(contentKey) : Boolean(activePuaMap);
+  const visualReady = contentKey ? isVisualReady(contentKey) : fontReady;
+  const todayRaw =
+    encodedBox && (!visualReady || !mapReady) ? "" : decodeFontNum(todayBoxHtml, contentKey);
+  const decodeStatus = resolveRefreshDecodeStatus(todayBoxHtml, todayRaw, encodedBox, ctx, {
+    isNation: true,
+  });
+
+  if (decodeStatus === DECODE_STATUS.OK) {
+    const todayBox = resolveTodayBox(todayRaw, ctx.todayUnit);
+    if (todayBox <= 0) {
+      return finalizeRefreshBoxFields(
+        nation,
+        todayBoxHtml,
+        ctx,
+        DECODE_STATUS.DECODE_ERROR,
+        "",
+        0,
+        "non_positive",
+      );
+    }
+    if (
+      !validateDecodedBoxStructure(todayBoxHtml, todayRaw) ||
+      isUntrustedBoxDecode(todayRaw) ||
+      rejectImplausibleTodayBoxWan(todayBox, { absurdMaxWan: ABSURD_BOX_WAN_MAX })
+    ) {
+      return finalizeRefreshBoxFields(
+        nation,
+        todayBoxHtml,
+        ctx,
+        DECODE_STATUS.DECODE_ERROR,
+        "",
+        0,
+        "structure_or_absurd",
+      );
+    }
+    const crossCtx =
+      options.crossCheck || buildNationCrossCheckContext(options.movies || [], nation);
+    const cross = validateNationCrossCheck(todayBox, crossCtx);
+    if (!cross.ok) {
+      return finalizeRefreshBoxFields(
+        nation,
+        todayBoxHtml,
+        ctx,
+        DECODE_STATUS.DECODE_ERROR,
+        "",
+        0,
+        cross.reasons.join("|"),
+      );
+    }
+    return finalizeRefreshBoxFields(nation, todayBoxHtml, ctx, DECODE_STATUS.OK, todayRaw, todayBox);
+  }
+
+  if (
+    decodeStatus === DECODE_STATUS.ENCODED &&
+    !fontReady &&
+    nation.decodeStatus === DECODE_STATUS.OK &&
+    nation.todayBox > 0
+  ) {
+    return {
+      ...nation,
+      todayUnit: ctx.todayUnit,
+      decodeStatus: nation.decodeStatus,
+      fontMappingVersion: ctx.fontMappingVersion || getFontMappingVersion(),
+    };
+  }
+
+  return finalizeRefreshBoxFields(nation, todayBoxHtml, ctx, decodeStatus, "", 0);
 }
 
 export function computeMovieBoxDeltaWan(prevAmount, nextAmount) {
@@ -625,13 +972,60 @@ export function traceDashboardData(parsed, raw, { enabled = false } = {}) {
 }
 
 function normalizeUnit(unit) {
-  const decoded = decodeFontNum(unit) || String(unit || "").trim();
-  if (!decoded || decoded === "万") return "万";
-  return decoded;
+  const decoded = String(decodeFontNum(unit) || unit || "").trim();
+  if (!decoded) return "万";
+  if (decoded.includes("亿")) return "亿";
+  if (decoded.includes("万")) return "万";
+  // 反爬 PUA / 未识别字符不能当单位，实时票房默认「万」
+  if (/[\uE000-\uF8FF]/.test(decoded)) return "万";
+  return "万";
 }
 
 export function decodeBoxFromHtml(numHtml, unit = "万") {
   return resolveTodayBox(decodeFontNum(numHtml), unit);
+}
+
+/** 气泡追踪：有 PUA 映射即可解码，不要求 VERIFIED */
+export function decodeBoxHtmlLoose(numHtml, unit = "万", fontContentKey = "") {
+  if (!numHtml) return 0;
+  const safeUnit = normalizeUnit(unit);
+  const contentKey = fontContentKey || getPublishedState().contentKey || activePuaMapVersion;
+
+  const strictRaw = decodeFontNum(numHtml, contentKey);
+  if (strictRaw && !isUntrustedBoxDecode(strictRaw)) {
+    const strict = resolveTodayBox(strictRaw, safeUnit);
+    if (strict > 0) return strict;
+  }
+
+  const tryMap = (map) => {
+    if (!map?.size) return 0;
+    const decoded = decodeMarkupWithPuaMap(numHtml, map);
+    const raw = String(decoded?.text || "").trim();
+    if (!raw || isUntrustedBoxDecode(raw)) return 0;
+    const n = resolveTodayBox(raw, safeUnit);
+    return n > 0 ? n : 0;
+  };
+
+  const fromRegistry = tryMap(getMapForKeyLoose(contentKey));
+  if (fromRegistry > 0) return fromRegistry;
+
+  // 显式指定了当前字体时，只能使用同一字体身份的 active map。
+  // 禁止拿上一轮已发布字体去解这一轮新字体，避免错误数字污染高水位。
+  const sameAsActive =
+    !fontContentKey ||
+    (contentKey &&
+      activePuaMapVersion &&
+      normalizeFontIdentity(contentKey) === normalizeFontIdentity(activePuaMapVersion));
+  if (sameAsActive) {
+    const fromActive = tryMap(activePuaMap);
+    if (fromActive > 0) return fromActive;
+  }
+
+  for (const entry of [getMapForKey(contentKey)]) {
+    const n = tryMap(entry);
+    if (n > 0) return n;
+  }
+  return 0;
 }
 
 function formatTimestamp(ts) {
@@ -719,28 +1113,41 @@ function collectBoxDatasRows(inner) {
   );
 }
 
-function mapShowDateRowsToDaily(rows, todayStr, { forecastFields = [] } = {}) {
-  if (!Array.isArray(rows) || !rows.length) return [];
-  const sorted = [...rows]
-    .filter((row) => normalizeShowDateKey(row?.showDate) > 0)
-    .sort((a, b) => normalizeShowDateKey(a.showDate) - normalizeShowDateKey(b.showDate));
-  if (!sorted.length) return [];
+function parseYmdKeyToDate(key) {
+  const digits = String(key).replace(/\D/g, "").slice(0, 8);
+  if (digits.length !== 8) return null;
+  return new Date(Number(digits.slice(0, 4)), Number(digits.slice(4, 6)) - 1, Number(digits.slice(6, 8)));
+}
 
-  const todayKey = normalizeShowDateKey(todayStr);
-  let todayIdx = todayKey
-    ? sorted.findIndex((row) => normalizeShowDateKey(row.showDate) === todayKey)
-    : -1;
-  if (todayIdx < 0 && todayKey) {
-    // 今日行缺失时，取第一天 >= 今日，避免误把最后一天当「今日」导致明日/后天全空
-    todayIdx = sorted.findIndex((row) => normalizeShowDateKey(row.showDate) >= todayKey);
-  }
-  if (todayIdx < 0) todayIdx = 0;
+function dayOffsetFromBusinessDate(showDate, businessDateStr) {
+  const showKey = normalizeShowDateKey(showDate);
+  const bizKey = normalizeShowDateKey(businessDateStr);
+  if (!showKey || !bizKey) return null;
+  const show = parseYmdKeyToDate(showKey);
+  const biz = parseYmdKeyToDate(bizKey);
+  if (!show || !biz) return null;
+  return Math.round((show.getTime() - biz.getTime()) / 86400000);
+}
 
+function mapRowsByBusinessDateOffsets(rows, businessDateStr, mapRowFn) {
   const labels = ["今日", "明日", "后天"];
-  const result = [];
-  for (let i = 0; i < 3; i++) {
-    const row = sorted[todayIdx + i];
-    if (!row) break;
+  const byOffset = new Map();
+  for (const row of rows || []) {
+    const offset = dayOffsetFromBusinessDate(row?.showDate, businessDateStr);
+    if (offset == null || offset < 0 || offset > 2) continue;
+    if (!byOffset.has(offset)) byOffset.set(offset, row);
+  }
+  return labels.map((label, offset) => {
+    const row = byOffset.get(offset);
+    if (!row) {
+      return { label, box: "--", forecast: "--", boxRate: "--", showCountRate: "--", avgSeatView: "--" };
+    }
+    return { label, ...mapRowFn(row, offset) };
+  });
+}
+
+function mapShowDateRowsToDaily(rows, todayStr, { forecastFields = [] } = {}) {
+  return mapRowsByBusinessDateOffsets(rows, todayStr, (row) => {
     const box = pickDescValue(
       row.boxDesc,
       row.boxInfo,
@@ -758,25 +1165,46 @@ function mapShowDateRowsToDaily(rows, todayStr, { forecastFields = [] } = {}) {
       row.predictionBoxDesc,
       row.boxPredictionDesc,
     );
-    result.push({
-      label: labels[i],
+    return {
       box: box ? formatDescMoney(box) : "--",
       forecast: forecast ? formatDescMoney(forecast) : "--",
       boxRate: row.boxRate || row.boxOfficeRate || "--",
       showCountRate: row.showCountRate || "--",
       avgSeatView: row.viewSeatRate || row.avgSeatView || row.seatRate || "--",
-    });
-  }
-  return result;
+    };
+  });
 }
 
 function mapBoxShowRowsToDaily(rows, todayStr) {
-  return mapShowDateRowsToDaily(rows, todayStr);
+  // 表格「票房」：getBoxShow 按 showDate 对齐 businessDate 的 boxDesc（综合票房，样本 101.60万）
+  return mapRowsByBusinessDateOffsets(rows, todayStr, (row) => {
+    const box = pickDescValue(row.boxDesc, row.boxInfo, row.boxInfoDesc, row.boxOfficeDesc);
+    return {
+      box: box ? formatDescMoney(box) : "--",
+      forecast: "--",
+      boxRate: row.boxRate || row.boxOfficeRate || "--",
+      showCountRate: row.showCountRate || "--",
+      avgSeatView: row.viewSeatRate || row.avgSeatView || row.seatRate || "--",
+    };
+  });
 }
 
 function mapPredictionPageListToDaily(rows, todayStr) {
-  return mapShowDateRowsToDaily(rows, todayStr, {
-    forecastFields: ["boxInfo", "boxInfoDesc", "predictionDesc", "predBoxDesc"],
+  return mapRowsByBusinessDateOffsets(rows, todayStr, (row) => {
+    const forecastRaw = pickDescValue(
+      row.boxInfo,
+      row.boxInfoDesc,
+      row.predictionDesc,
+      row.predBoxDesc,
+      row.box,
+    );
+    return {
+      box: "--",
+      forecast: forecastRaw ? formatDescMoney(forecastRaw) : "--",
+      boxRate: row.boxRate || row.boxOfficeRate || "--",
+      showCountRate: row.showCountRate || "--",
+      avgSeatView: row.viewSeatRate || row.avgSeatView || row.seatRate || "--",
+    };
   });
 }
 
@@ -896,11 +1324,10 @@ function parseBoxShowMetrics(raw, todayStr = "") {
     if (item?.title) summary[item.title] = item;
   }
 
+  const totalViewsRaw =
+    summary["累计观影人次"]?.valueDesc ?? summary["观影人次"]?.valueDesc ?? null;
   const totalViews =
-    summary["累计观影人次"]?.valueDesc ||
-    summary["观影人次"]?.valueDesc ||
-    latest?.viewCountDesc ||
-    "--";
+    totalViewsRaw != null && String(totalViewsRaw).trim() !== "" ? String(totalViewsRaw).trim() : null;
 
   let yesterdayDesc = "--";
   let yesterdayBox = 0;
@@ -955,14 +1382,15 @@ function parsePredictionMetrics(raw, todayStr = "") {
   const pageDaily = mapPredictionPageListToDaily(inner.pageData?.list, todayStr);
   if (pageDaily.length) {
     result.dailyForecast = pageDaily;
-    const todayRow = pageDaily[0];
+    const todayRow = pageDaily.find((row) => row.label === "今日") || pageDaily[0];
     const todayVal = String(todayRow?.forecast || "").replace(/^¥/, "");
     if (todayVal && todayVal !== "--") {
       result.dynamicForecast = todayVal;
       result.dynamicForecastNum = parseBoxNum(todayVal);
     }
-    const summaryVal = inner.pageData?.boxSummary?.valueDesc || inner.pageData?.sumBox;
-    const summaryUnit = inner.pageData?.boxSummary?.unitDesc || "万";
+    const summary = inner.pageData?.boxSummary;
+    const summaryVal = summary?.valueDesc || inner.pageData?.sumBox;
+    const summaryUnit = summary?.unitDesc || "万";
     if (summaryVal != null && String(summaryVal).trim()) {
       const rawTotal = String(summaryVal).trim();
       const totalText =
@@ -973,6 +1401,9 @@ function parsePredictionMetrics(raw, todayStr = "") {
             : `${rawTotal}万`;
       result.totalForecast = formatDescMoney(totalText);
       result.totalForecastNum = parseBoxNum(totalText);
+    }
+    if (summary?.iMessage) {
+      result.totalForecastMessage = String(summary.iMessage);
     }
   }
 
@@ -988,48 +1419,29 @@ function parsePredictionMetrics(raw, todayStr = "") {
     [];
 
   if (!result.dailyForecast.length && Array.isArray(list)) {
-    const dayLabels = ["今日", "明日", "后天"];
-    for (let i = 0; i < Math.min(list.length, 3); i++) {
-      const item = list[i];
-      const boxRaw = pickDescValue(
-        item.realBoxDesc,
-        item.todayBoxDesc,
-        item.boxOfficeDesc,
-        item.splitBoxDesc,
-        item.boxDesc
-      );
+    result.dailyForecast = mapRowsByBusinessDateOffsets(list, todayStr, (item) => {
       const forecastRaw = pickDescValue(
-        item.predictionDesc,
-        item.predBoxDesc,
-        item.forecastDesc,
-        item.predictionBoxDesc,
         item.boxInfo,
         item.boxInfoDesc,
-        item.valueDesc,
+        item.predictionDesc,
+        item.predBoxDesc,
         item.boxDesc,
+        item.valueDesc,
+        item.box,
       );
-      result.dailyForecast.push({
-        label: item.dateDesc || item.title || item.dayDesc || dayLabels[i] || `D+${i}`,
+      return {
+        box: "--",
         forecast: forecastRaw ? formatDescMoney(forecastRaw) : "--",
-        box: boxRaw ? formatDescMoney(boxRaw) : "--",
         boxRate: item.boxRate || item.boxOfficeRate || "--",
         showCountRate: item.showCountRate || "--",
         avgSeatView: item.viewSeatRate || item.avgSeatView || item.seatRate || "--",
-      });
-    }
-    const todayItem = list[0];
-    if (todayItem) {
-      const val = todayItem.boxDesc || todayItem.valueDesc || todayItem.predictionDesc;
-      result.dynamicForecast = val || "--";
+      };
+    });
+    const todayRow = result.dailyForecast.find((row) => row.label === "今日");
+    if (todayRow && todayRow.forecast && todayRow.forecast !== "--") {
+      const val = String(todayRow.forecast).replace(/^¥/, "");
+      result.dynamicForecast = val;
       result.dynamicForecastNum = parseBoxNum(val);
-      result.dynamicTrend = todayItem.trend || todayItem.changeTrend || "";
-    }
-    const totalItem = list.find((x) => /总/.test(x.title || x.dateDesc || "")) || list[list.length - 1];
-    if (totalItem) {
-      const val = totalItem.boxDesc || totalItem.valueDesc || totalItem.sumBoxDesc;
-      result.totalForecast = val ? formatDescMoney(val) : "--";
-      result.totalForecastNum = parseBoxNum(val);
-      result.totalTrend = totalItem.trend || totalItem.changeTrend || "";
     }
   }
 
@@ -1065,20 +1477,49 @@ function parseGlobalMetrics(raw) {
   const inner = unwrapPayload(raw);
   if (!inner) return null;
 
-  const hmt =
-    deepFind(inner, ["hmtBoxDesc", "gatBoxDesc", "chinaGatBoxDesc", "hmtSumBoxDesc"]) ||
-    findRegionBox(inner, ["港澳台", "中国港澳台", "港澳台地区"]);
-  const overseas =
-    deepFind(inner, ["overseasBoxDesc", "foreignBoxDesc", "abroadBoxDesc", "overseaBoxDesc"]) ||
-    findRegionBox(inner, ["海外", "国外", "境外"]);
-  const mainland =
-    deepFind(inner, ["chinaBoxDesc", "mainlandBoxDesc", "sumBoxDesc", "boxDesc"]) ||
-    findRegionBox(inner, ["中国内地", "大陆", "国内"]);
+  const nationData = inner.nationData || {};
+  const rankList = nationData.globalBoxRankList || inner.globalData || [];
+  if (!Array.isArray(rankList) || !rankList.length) return null;
+
+  let globalTotalBox = null;
+  if (nationData.globalBox != null && String(nationData.globalBox).trim() !== "") {
+    const unit = nationData.globalBoxUnit || "亿";
+    const val = String(nationData.globalBox).trim();
+    const text = val.includes("亿") || val.includes("万") ? val : `${val}${unit}`;
+    globalTotalBox = formatDescMoney(text);
+  }
+
+  let mainland = null;
+  let hmtWan = 0;
+  let hmtHas = false;
+  let overseasWan = 0;
+  let overseasHas = false;
+  const hmtNames = ["香港", "澳门", "台湾", "港澳台"];
+
+  for (const item of rankList) {
+    const name = String(item?.regionName || item?.name || item?.title || "").trim();
+    const info = item?.sumBoxInfo || item?.boxDesc || item?.valueDesc || "";
+    if (!name || !info) continue;
+    if (name === "中国内地" || name === "中国大陆") {
+      mainland = formatDescMoney(info);
+      continue;
+    }
+    const wan = parseBoxNum(info);
+    if (!(wan > 0)) continue;
+    if (hmtNames.some((tag) => name.includes(tag))) {
+      hmtWan += wan;
+      hmtHas = true;
+    } else {
+      overseasWan += wan;
+      overseasHas = true;
+    }
+  }
 
   return {
-    mainland: mainland ? formatDescMoney(mainland) : "--",
-    hmt: hmt ? formatDescMoney(hmt) : "--",
-    overseas: overseas ? formatDescMoney(overseas) : "--",
+    mainland: mainland || "--",
+    hmt: hmtHas ? formatMoneyWan(hmtWan) : "--",
+    overseas: overseasHas ? formatMoneyWan(overseasWan) : "--",
+    globalTotalBox: globalTotalBox || "--",
   };
 }
 
@@ -1165,17 +1606,23 @@ function formatTechYmd(value) {
   return dateRaw.slice(0, 16);
 }
 
-function remainingDaysFromYmd(endDateStr) {
+function remainingDaysFromYmd(endDateStr, businessDateStr) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(endDateStr || ""));
   if (!m) return "--";
   const end = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  let today = null;
+  if (businessDateStr && /^\d{4}-\d{2}-\d{2}$/.test(String(businessDateStr))) {
+    const [y, mo, d] = String(businessDateStr).split("-").map(Number);
+    today = new Date(y, mo - 1, d);
+  } else {
+    const now = new Date();
+    today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  }
   if (Number.isNaN(end.getTime())) return "--";
   return String(Math.max(0, Math.round((end - today) / 86400000)));
 }
 
-function parseTechMetrics(raw) {
+function parseTechMetrics(raw, businessDateStr = "") {
   if (isFailedApiPayload(raw)) return null;
   const inner = unwrapPayload(raw);
   if (!inner) return null;
@@ -1215,7 +1662,7 @@ function parseTechMetrics(raw) {
 
   if (endDate != null && String(endDate).trim() !== "") {
     endDateStr = formatTechYmd(endDate);
-    remainingDays = remainingDaysFromYmd(endDateStr);
+    remainingDays = remainingDaysFromYmd(endDateStr, businessDateStr);
   } else if (inner.remainingDays != null && String(inner.remainingDays).trim() !== "") {
     remainingDays = String(inner.remainingDays).trim();
     const desc = inner.endDateDesc || inner.offlineDateDesc;
@@ -1272,36 +1719,32 @@ function logDashboardRankDebug(movies) {
   }
 }
 
-function mapDashboardItem(item, index) {
+function mapDashboardItemStructure(item, index) {
   const info = item.movieInfo || {};
   const todayBoxHtml = item.boxSplitUnit?.num || "";
   const todayUnit = normalizeUnit(item.boxSplitUnit?.unit);
   const encodedBox = isEncodedBoxHtml(todayBoxHtml);
-  const todayRaw = decodeFontNum(todayBoxHtml);
-  const decodeStatus = resolveDecodeStatus(todayBoxHtml, todayRaw, encodedBox);
-  const todayBox =
-    decodeStatus === DECODE_STATUS.OK ? resolveTodayBox(todayRaw, todayUnit) : 0;
   const splitHtml = item.splitBoxSplitUnit?.num || "";
   const splitUnit = normalizeUnit(item.splitBoxSplitUnit?.unit);
-  const splitRaw = decodeFontNum(splitHtml);
 
   return {
     _apiIndex: index,
     originalRank: index + 1,
-    decodeStatus,
+    decodeStatus: encodedBox ? DECODE_STATUS.ENCODED : DECODE_STATUS.FAILED,
     movieId: info.movieId ?? `unknown-${index}`,
     name: info.movieName || "未知",
     releaseInfo: info.releaseInfo || "",
-    todayBox,
+    releaseDate: info.releaseDate || info.showDate || "",
+    todayBox: 0,
     todayBoxHtml,
     todayUnit,
-    todayBoxText: decodeStatus === DECODE_STATUS.OK ? todayRaw : "--",
+    todayBoxText: "--",
     boxRate: item.boxRate || "--",
     boxRateNum: parseRate(item.boxRate),
     splitBoxRate: item.splitBoxRate || "--",
     splitBoxRateNum: parseRate(item.splitBoxRate),
     splitBoxHtml: splitHtml,
-    splitBoxText: splitRaw || "--",
+    splitBoxText: "--",
     splitBoxUnit: splitUnit,
     showCount: item.showCount ?? 0,
     showCountRate: item.showCountRate || "--",
@@ -1310,29 +1753,161 @@ function mapDashboardItem(item, index) {
     sumBoxDesc: item.sumBoxDesc || "--",
     sumSplitBoxDesc: item.sumSplitBoxDesc || "--",
     sumBoxNum: resolveMaoyanSumBoxWan(item),
+    listItem: item,
+    decodeVerified: false,
   };
 }
 
-export function parseDashboard(raw, topCount = 5) {
+function mapDashboardItem(item, index, context = {}) {
+  const structural = mapDashboardItemStructure(item, index);
+  const todayBoxHtml = structural.todayBoxHtml;
+  const todayUnit = structural.todayUnit;
+  const encodedBox = isEncodedBoxHtml(todayBoxHtml);
+  const contentKey = context.fontContentKey || getPublishedState().contentKey;
+  const todayRaw = decodeFontNum(todayBoxHtml, contentKey);
+  const decodeStatus = resolveDecodeStatus(todayBoxHtml, todayRaw, encodedBox, {
+    todayUnit,
+    nationBoxWan: context.nationBoxWan,
+    sumBoxNumWan: structural.sumBoxNum,
+  });
+  const todayBox =
+    decodeStatus === DECODE_STATUS.OK ? resolveTodayBox(todayRaw, todayUnit) : 0;
+  const splitRaw = decodeFontNum(structural.splitBoxHtml, contentKey);
+
+  return {
+    ...structural,
+    decodeStatus,
+    todayBox,
+    todayBoxText: decodeStatus === DECODE_STATUS.OK ? todayRaw : "--",
+    splitBoxText: splitRaw || "--",
+    fontContentKey: contentKey || "",
+    decodeVerified: decodeStatus === DECODE_STATUS.OK,
+  };
+}
+
+function decodeMovieBoxFields(movie, fontContentKey, nationBoxWan = 0) {
+  if (!movie || !fontContentKey) return movie;
+  const todayBoxHtml = movie.todayBoxHtml || "";
+  const todayUnit = movie.todayUnit || "万";
+  const encodedBox = isEncodedBoxHtml(todayBoxHtml);
+  const mapReady = isMapVerified(fontContentKey);
+  const todayRaw =
+    encodedBox && !mapReady ? "" : decodeFontNum(todayBoxHtml, fontContentKey);
+  const decodeStatus = resolveDecodeStatus(todayBoxHtml, todayRaw, encodedBox, {
+    todayUnit,
+    nationBoxWan,
+    sumBoxNumWan: movie.sumBoxNum || resolveMaoyanSumBoxWan(movie.listItem || movie),
+  });
+  const todayBox =
+    decodeStatus === DECODE_STATUS.OK ? resolveTodayBox(todayRaw, todayUnit) : movie.todayBox || 0;
+  const splitRaw = decodeFontNum(movie.splitBoxHtml, fontContentKey);
+  return {
+    ...movie,
+    todayBox,
+    todayBoxText: decodeStatus === DECODE_STATUS.OK ? todayRaw : movie.todayBoxText || "--",
+    splitBoxText: splitRaw || movie.splitBoxText || "--",
+    decodeStatus,
+    fontContentKey,
+    fontMappingVersion: fontContentKey,
+    decodeVerified: decodeStatus === DECODE_STATUS.OK,
+  };
+}
+
+function decodeNationBoxFields(nation, fontContentKey, movies = []) {
+  if (!nation || !fontContentKey) return nation;
+  const todayBoxHtml = nation.todayBoxHtml || "";
+  const todayUnit = nation.todayUnit || "万";
+  const encodedBox = isEncodedBoxHtml(todayBoxHtml);
+  const mapReady = isMapVerified(fontContentKey);
+  const todayRaw =
+    encodedBox && !mapReady ? "" : decodeFontNum(todayBoxHtml, fontContentKey);
+  const decodeStatus = resolveDecodeStatus(todayBoxHtml, todayRaw, encodedBox, {
+    todayUnit,
+  });
+  let todayBox = nation.todayBox || 0;
+  if (decodeStatus === DECODE_STATUS.OK) {
+    todayBox = resolveTodayBox(todayRaw, todayUnit);
+    if (
+      !validateDecodedBoxStructure(todayBoxHtml, todayRaw) ||
+      isUntrustedBoxDecode(todayRaw) ||
+      rejectImplausibleTodayBoxWan(todayBox, { absurdMaxWan: ABSURD_BOX_WAN_MAX })
+    ) {
+      return { ...nation, decodeStatus: DECODE_STATUS.DECODE_ERROR, decodeVerified: false };
+    }
+    const crossCtx = buildNationCrossCheckContext(movies, nation);
+    const cross = validateNationCrossCheck(todayBox, crossCtx);
+    if (!cross.ok) {
+      return {
+        ...nation,
+        decodeStatus: DECODE_STATUS.DECODE_ERROR,
+        decodeVerified: false,
+        rejectionReason: cross.reasons.join("|"),
+      };
+    }
+  }
+  const nationSplitRaw = decodeFontNum(nation.splitBoxHtml, fontContentKey);
+  return {
+    ...nation,
+    todayBox,
+    todayBoxText: decodeStatus === DECODE_STATUS.OK ? todayRaw : nation.todayBoxText || "--",
+    splitBoxText: nationSplitRaw || nation.splitBoxText || "--",
+    decodeStatus,
+    fontContentKey,
+    fontMappingVersion: fontContentKey,
+    decodeVerified: decodeStatus === DECODE_STATUS.OK && todayBox > 0,
+  };
+}
+
+export function decodeDashboardFields(parsed, fontContentKey, options = {}) {
+  if (!parsed || !fontContentKey) return parsed;
+  const movies = (parsed.movies || []).map((movie) =>
+    decodeMovieBoxFields(movie, fontContentKey, 0),
+  );
+  const nation = decodeNationBoxFields(
+    parsed.nation,
+    fontContentKey,
+    options.crossCheckMovies || movies,
+  );
+  const nationBoxWan = nation?.todayBox > 0 ? nation.todayBox : 0;
+  const decodedMovies = movies.map((movie) =>
+    decodeMovieBoxFields(movie, fontContentKey, nationBoxWan),
+  );
+  const ranked = pickOfficialDashboardMovies(
+    rerankMoviesByTodayBox(decodedMovies),
+    decodedMovies.length,
+  );
+  logDashboardRankDebug(ranked);
+  return {
+    ...parsed,
+    movies: ranked,
+    nation,
+    fontContentKey,
+  };
+}
+
+export function parseDashboardStructure(raw, topCount = 5) {
   const limit = resolveDisplayMovieCount(topCount);
   const list = raw?.movieList?.list ?? [];
   const nation = raw?.movieList?.nationBoxInfo ?? {};
   const updateInfo = raw?.movieList?.updateInfo ?? {};
   const calendar = raw?.calendar ?? {};
-  const mapped = list.map((item, index) => mapDashboardItem(item, index));
-  // 猫眼官方：先取当日榜 TOP N，再按累计总票房排显示顺序
-  const movies = pickOfficialDashboardMovies(mapped, limit);
-  logDashboardRankDebug(movies);
 
   const nationBoxHtml = nation.nationBoxSplitUnit?.num || "";
   const nationUnit = normalizeUnit(nation.nationBoxSplitUnit?.unit);
-  const nationToday = decodeFontNum(nationBoxHtml);
-  const nationBox = resolveTodayBox(nationToday, nationUnit);
+  const nationEncoded = isEncodedBoxHtml(nationBoxHtml);
+  const nationDecodeStatus = nationEncoded ? DECODE_STATUS.ENCODED : DECODE_STATUS.FAILED;
+
+  const fontUrlKey = resolveUrlKey(raw?.fontStyle || "");
+  // 结构阶段还没有内容 sha256，但必须把“本轮字体身份”带到每条记录上。
+  // 这样气泡 loose decode 在映射未准备好时会等待，而不是误用上一轮映射。
+  const mapped = list.map((item, index) => ({
+    ...mapDashboardItemStructure(item, index),
+    fontMappingVersion: fontUrlKey,
+  }));
+  const movies = pickOfficialDashboardMovies(mapped, limit);
 
   const nationSplitHtml = nation.nationSplitBoxSplitUnit?.num || "";
   const nationSplitUnit = normalizeUnit(nation.nationSplitBoxSplitUnit?.unit);
-  const nationSplitRaw = decodeFontNum(nationSplitHtml);
-
   const globalTrends = parseTrends(raw?.movieInfo?.boxTrends, calendar.today);
   const seatMetric = resolveNationSeatMetric(nation);
 
@@ -1342,17 +1917,21 @@ export function parseDashboard(raw, topCount = 5) {
       title: nation.title || "实时大盘",
       todayBoxHtml: nationBoxHtml,
       todayUnit: nationUnit,
-      todayBoxText: nationToday || "--",
-      todayBox: nationBox,
+      todayBoxText: "--",
+      todayBox: 0,
+      decodeStatus: nationDecodeStatus,
       splitBoxHtml: nationSplitHtml,
-      splitBoxText: nationSplitRaw || "--",
+      splitBoxText: "--",
       splitBoxUnit: nationSplitUnit,
       showCountDesc: nation.showCountDesc || "--",
       viewCountDesc: nation.viewCountDesc || "--",
+      avgShowView: nation.avgShowView || "",
       seatLabel: seatMetric.label,
       seatValue: seatMetric.value,
       seatRaw: seatMetric.seatRaw,
-      avgShowView: nation.avgShowView || "",
+      seatSource: seatMetric.source,
+      decodeVerified: false,
+      fontMappingVersion: fontUrlKey,
     },
     calendar: {
       today: calendar.today || "",
@@ -1361,9 +1940,19 @@ export function parseDashboard(raw, topCount = 5) {
     updateTimestamp: updateInfo.updateTimestamp || Date.now(),
     updateTimeText: formatTimestamp(updateInfo.updateTimestamp) || "",
     fontStyle: raw?.fontStyle || "",
+    fontUrlKey,
     updatedAt: Date.now(),
     globalTrends,
   };
+}
+
+export function parseDashboard(raw, topCount = 5) {
+  const structural = parseDashboardStructure(raw, topCount);
+  const contentKey = getPublishedState().contentKey;
+  if (contentKey && isMapVerified(contentKey)) {
+    return decodeDashboardFields(structural, contentKey);
+  }
+  return structural;
 }
 
 function isEmptyMetricValue(val) {
@@ -1422,7 +2011,9 @@ export function mergeMovieDetail(base, detail = {}) {
     merged.yesterdayHourSpeedText = boxShow.yesterdayHourSpeedText;
   }
   mergeOverwriteField(merged, "yesterdaySamePeriodText", boxShow.yesterdaySamePeriodText);
-  mergeOverwriteField(merged, "totalViews", boxShow.totalViews);
+  if (boxShow.totalViews != null && String(boxShow.totalViews).trim() !== "") {
+    mergeOverwriteField(merged, "totalViews", boxShow.totalViews);
+  }
 
   mergePreserveField(merged, "dynamicForecast", prediction.dynamicForecast);
   if (prediction.dynamicForecastNum > 0) {
@@ -1437,11 +2028,10 @@ export function mergeMovieDetail(base, detail = {}) {
 
   if (!isEmptyMetricValue(global.mainland)) {
     merged.mainlandBox = global.mainland;
-  } else if (isEmptyMetricValue(merged.mainlandBox) && !isEmptyMetricValue(base.sumBoxDesc)) {
-    merged.mainlandBox = formatDescMoney(base.sumBoxDesc);
   }
   mergePreserveField(merged, "hmtBox", global.hmt);
   mergePreserveField(merged, "overseasBox", global.overseas);
+  mergePreserveField(merged, "globalTotalBox", global.globalTotalBox);
 
   mergePreserveField(merged, "endDate", tech.endDate);
   mergePreserveField(merged, "remainingDays", tech.remainingDays);
@@ -1487,7 +2077,8 @@ function metricValuesEquivalent(a, b) {
 function formatShowCountDesc(movie) {
   if (!isEmptyMetricValue(movie.showCountDesc) && movie.showCountDesc !== "--") {
     const text = String(movie.showCountDesc).trim();
-    return text.endsWith("场") ? text : `${text}场`;
+    if (/场$/.test(text) || /万/.test(text)) return text;
+    return `${text}场`;
   }
   if (movie.showCount > 0) {
     return movie.showCount >= 10000
@@ -1592,7 +2183,7 @@ export const EXTRA_METRIC_FIELD_MAP = [
   { label: "剩余天数", key: "remainingDays", source: "getTechData", raw: "from endDate" },
   { label: "分账票房", key: "sumSplitBoxDesc", source: "dashboard", raw: "sumSplitBoxDesc" },
   { label: "分账占比", key: "splitBoxRate", source: "dashboard", raw: "splitBoxRate" },
-  { label: "内地票房", key: "mainlandBox", source: "getBoxShowna", raw: "chinaBoxDesc" },
+  { label: "内地票房", key: "mainlandBox", source: "getBoxShowna", raw: "nationData.globalBoxRankList[中国内地].sumBoxInfo" },
   { label: "港澳台票房", key: "hmtBox", source: "getBoxShowna", raw: "hmtBoxDesc" },
   { label: "海外票房", key: "overseasBox", source: "getBoxShowna", raw: "overseasBoxDesc" },
 ];
@@ -1864,56 +2455,27 @@ function buildDailyTable(base, prediction, detail) {
   const labels = ["今日", "明日", "后天"];
   const forecasts = prediction.dailyForecast || [];
   const boxShowRows = detail.boxShow?.dailyRows || [];
+  const forecastByLabel = new Map(forecasts.map((row) => [String(row.label || "").trim(), row]));
+  const boxByLabel = new Map(boxShowRows.map((row) => [String(row.label || "").trim(), row]));
   const rows = [];
 
-  for (let i = 0; i < 3; i++) {
-    const pf = forecasts[i] || {};
-    const bs = boxShowRows[i] || {};
-    const isToday = i === 0;
-    const trustedText =
-      base.todayBoxText !== "--" && !isUntrustedBoxDecode(base.todayBoxText)
-        ? String(base.todayBoxText)
-        : "";
-    const trustedBox =
-      base.todayBox > 0 && !isUntrustedBoxDecode(String(base.todayBoxText || base.todayBox))
-        ? base.todayBox
-        : 0;
-    const todayBoxPlain = trustedBox > 0
-      ? `${trustedBox.toFixed(2)}万`
-      : trustedText
-        ? `${trustedText}万`
-        : "";
+  for (const label of labels) {
+    const pf = forecastByLabel.get(label) || {};
+    const bs = boxByLabel.get(label) || {};
+    const isToday = label === "今日";
     rows.push({
-      label: pf.label || bs.label || labels[i],
-      box: isToday
-        ? todayBoxPlain || mergeDailyRowField(pf.box, bs.box, false, "")
-        : mergeDailyRowField(pf.box, bs.box, false, ""),
-      boxHtml: isToday ? base.todayBoxHtml : "",
-      boxUnit: isToday ? base.todayUnit : "万",
-      forecast: mergeDailyRowField(
-        pf.forecast,
-        bs.forecast,
-        isToday,
-        detail.speed?.estimatedDayForecastText || base.dynamicForecast
-      ),
-      boxRate: mergeDailyRowField(
-        isToday ? base.boxRate : pf.boxRate,
-        bs.boxRate,
-        isToday,
-        base.boxRate
-      ),
-      showCountRate: mergeDailyRowField(
-        isToday ? base.showCountRate : pf.showCountRate,
-        bs.showCountRate,
-        isToday,
-        base.showCountRate
-      ),
-      avgSeatView: mergeDailyRowField(
-        isToday ? base.avgSeatView : pf.avgSeatView,
-        bs.avgSeatView,
-        isToday,
-        base.avgSeatView
-      ),
+      label,
+      // 表格票房：仅 getBoxShow 按 showDate 对齐；不与 dashboard 实时口径混用
+      box: !isEmptyMetricValue(bs.box) && bs.box !== "--" ? bs.box : "--",
+      boxHtml: "",
+      boxUnit: "万",
+      // 表格预测：仅 getPredictionBox 按 showDate 对齐
+      forecast: !isEmptyMetricValue(pf.forecast) && pf.forecast !== "--" ? pf.forecast : "--",
+      boxRate: !isEmptyMetricValue(bs.boxRate) && bs.boxRate !== "--" ? bs.boxRate : "--",
+      showCountRate:
+        !isEmptyMetricValue(bs.showCountRate) && bs.showCountRate !== "--" ? bs.showCountRate : "--",
+      avgSeatView:
+        !isEmptyMetricValue(bs.avgSeatView) && bs.avgSeatView !== "--" ? bs.avgSeatView : "--",
     });
   }
   return rows;
@@ -2024,7 +2586,7 @@ async function fetchMovieExtraDetail(apiBase, movie, todayStr, speed = {}, paren
   }
   if (parsedPrediction) detail.prediction = parsedPrediction;
   if (techRaw) {
-    const parsed = parseTechMetrics(techRaw);
+    const parsed = parseTechMetrics(techRaw, todayStr);
     if (parsed) {
       detail.tech = parsed;
       if (parsed.endDate === "--" && parsed.remainingDays === "--") {
@@ -2087,7 +2649,7 @@ export async function enrichMoviesLight(apiBase, movies, options = {}) {
   return enriched;
 }
 
-export { parsePredictionMetrics, parseBoxShowMetrics, parseTechMetrics };
+export { parsePredictionMetrics, parseBoxShowMetrics, parseTechMetrics, parseGlobalMetrics };
 
 export async function enrichMovies(apiBase, movies, options = {}) {
   const concurrency = options.concurrency || 2;

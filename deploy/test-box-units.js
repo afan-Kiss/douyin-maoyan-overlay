@@ -32,8 +32,15 @@ async function main() {
   assert.deepStrictEqual(formatWanForDisplay(9999), { valueText: "9999", unit: "万" });
   assert.deepStrictEqual(formatWanForDisplay(10000), { valueText: "1.00", unit: "亿" });
   assert.deepStrictEqual(formatWanForDisplay(12300), { valueText: "1.23", unit: "亿" });
+  assert.deepStrictEqual(formatWanForDisplay(0), { valueText: "--", unit: "万" });
   assert.strictEqual(formatWanDisplayText(12300), "1.23亿");
   assert.notStrictEqual(formatWanDisplayText(12300), "12300亿");
+
+  const { formatBoxTextForDisplay, sanitizeBoxUnit } = await import(boxDisplayPath);
+  assert.strictEqual(sanitizeBoxUnit("\uE123"), "万");
+  assert.strictEqual(sanitizeBoxUnit("亿"), "亿");
+  assert.strictEqual(formatBoxTextForDisplay("120.5", "\uE123", parseBoxNum), "120.5万");
+  assert.strictEqual(formatBoxTextForDisplay("120.5", "万", parseBoxNum), "120.5万");
 
   console.log("PASS box unit parsing & TOP5 settings migration");
   console.log(`  topCount=${migrated.topCount}, trendLimit=${migrated.enrich.trendLimit}`);

@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>猫眼字体解码审计</title>
+  <link rel="stylesheet" href="fonts/mtsi-font.css" />
+  <style>
+    .mtsi-font { font-family: "mtsi-font", sans-serif; }
+    #audit-movie-box, #audit-nation-box { font-size: 48px; padding: 16px; }
+  </style>
+</head>
+<body>
+  <div id="audit-movie-box"></div>
+  <div id="audit-nation-box"></div>
+  <script type="module">
+    import {
+      injectFontStyle,
+      parseDashboard,
+      refreshMovieBoxFields,
+      refreshNationBoxFields,
+      decodeFontNumWithTrace,
+      loadPuaMapForDashboard,
+      getActivePuaMapState,
+      DECODE_STATUS,
+      isMaoyanFontReady,
+    } from "./maoyan-api.js";
+    import { validateNationCrossCheck, buildNationCrossCheckContext } from "./dashboard-rank.js";
+
+    async function runFontDecodeAudit(auditDoc) {
+      const dashboardRaw = {
+        calendar: auditDoc.nation?.calendar || { today: auditDoc.businessDate },
+        fontStyle: auditDoc.nation?.fontStyle || "",
+        movieList: {
+          list: (auditDoc.movies || []).map((m) => m.listItem).filter(Boolean),
+          nationBoxInfo: auditDoc.nation?.nationBoxInfo,
+          updateInfo: auditDoc.nation?.updateInfo,
+        },
+        movieInfo: { boxTrends: auditDoc.nation?.globalBoxTrends },
+      };
+
+      if (dashboardRaw.fontStyle) {
+        await injectFontStyle(dashboardRaw.fontStyle);
+        await loadPuaMapForDashboard(dashboardRaw);
+      }
+
+      const parsed = parseDashboard(dashboardRaw, 5);
+      const mapState = getActivePuaMapState();
+      const nation = refreshNationBoxFields(parsed.nation, { movies: parsed.movies });
+      const movie = parsed.movies[0]
+        ? refreshMovieBoxFields(parsed.movies[0], {
+            nationBoxWan: nation?.todayBox || 0,
+            sumBoxNumWan: parsed.movies[0].sumBoxNum,
+          })
+        : null;
+
+      const nationTrace = decodeFontNumWithTrace(nation?.todayBoxHtml || parsed.nation?.todayBoxHtml);
+      const movieTrace = movie ? decodeFontNumWithTrace(movie.todayBoxHtml) : null;
+      const cross = validateNationCrossCheck(
+        nation?.todayBox || 0,
+        buildNationCrossCheckContext(parsed.movies, nation),
+      );
+
+      const report = {
+        fontReady: isMaoyanFontReady(),
+        fontVersion: mapState.version,
+        fontMeta: mapState.meta,
+        mapping: mapState.meta?.permutation || null,
+        nation: {
+          rawEntities: nationTrace.rawHtml,
+          decodedString: nationTrace.decodedString,
+          todayBoxWan: nation?.todayBox || 0,
+          decodeStatus: nation?.decodeStatus,
+          rejectionReason: nation?.rejectionReason || "",
+        },
+        movie: movie
+          ? {
+              rawEntities: movieTrace.rawHtml,
+              decodedString: movieTrace.decodedString,
+              todayBoxWan: movie.todayBox,
+              decodeStatus: movie.decodeStatus,
+              rejectionReason: movie.rejectionReason || "",
+            }
+          : null,
+        crossCheck: cross,
+        sumBoxDesc: movie?.sumBoxDesc || "",
+        sumBoxNumWan: movie?.sumBoxNum || 0,
+      };
+
+      const movieEl = document.getElementById("audit-movie-box");
+      const nationEl = document.getElementById("audit-nation-box");
+      if (movieEl && movie?.todayBoxHtml) {
+        movieEl.innerHTML = `<span class="mtsi-font">${movie.todayBoxHtml}</span><span class="unit">${movie.todayUnit || "万"}</span>`;
+      }
+      if (nationEl && nation?.todayBoxHtml) {
+        nationEl.innerHTML = `<span class="mtsi-font">${nation.todayBoxHtml}</span><span class="unit">${nation.todayUnit || "万"}</span>`;
+      }
+
+      window.__fontDecodeAudit = report;
+      return report;
+    }
+
+    window.runFontDecodeAudit = runFontDecodeAudit;
+  </script>
+</body>
+</html>

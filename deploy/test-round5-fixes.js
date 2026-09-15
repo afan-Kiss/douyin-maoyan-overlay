@@ -424,16 +424,18 @@ function testBubbleDurationCss() {
   assert.strictEqual(DEFAULT_SETTINGS.bubble.durationMs, 2000);
   assert.strictEqual(sanitizeSettings({}).bubble.durationMs, 2000);
   assert.strictEqual(sanitizeSettings({ bubble: { durationMs: 1800 } }).bubble.durationMs, 1800);
-  assert.strictEqual(sanitizeSettings({ bubble: { durationMs: 3000 } }).bubble.durationMs, 2000);
-  assert.strictEqual(sanitizeSettings({ pollIntervalMs: 3000 }).pollIntervalMs, 2000);
+  assert.strictEqual(sanitizeSettings({ bubble: { durationMs: 3000 } }).bubble.durationMs, 3000);
+  assert.strictEqual(sanitizeSettings({ pollIntervalMs: 3000 }).pollIntervalMs, 3000);
+  assert.strictEqual(DEFAULT_SETTINGS.pollIntervalMs, 3000);
 
   assert.match(css, /--bubble-duration:\s*2000ms/);
   assert.match(css, /animation:\s*inlineDeltaFloat\s+var\(--bubble-duration/);
   assert.doesNotMatch(css, /animation:\s*inlineDeltaFloat\s+3s/);
   assert.match(appJs, /getBubbleDurationMs\(\)/);
+  assert.match(appJs, /BUBBLE_INTERVAL_MS\s*=\s*3000/);
   assert.doesNotMatch(appJs, /DELTA_ANIM_MS/);
 
-  console.log("PASS bubble duration default 2000ms + settings timer");
+  console.log("PASS bubble duration default 2000ms + 3s poll/tick cadence");
 }
 
 async function main() {
