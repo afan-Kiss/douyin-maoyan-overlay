@@ -72,6 +72,8 @@ import {
   formatWanDisplayText,
   formatBoxTextForDisplay,
   sanitizeBoxUnit,
+  resolveChinaCumulativeBox,
+  boxTextToWanApprox,
 } from "./box-display.js";
 import {
   createEnrichScheduleState,
@@ -210,6 +212,34 @@ function formatMainlandDisplay(movie) {
   if (text.startsWith("¥")) return text;
   if (text.includes("亿") || text.includes("万")) return `¥${text}`;
   return `¥${text}`;
+}
+
+/** 卡片右上角「中国内地」：累计总票房，来源 sumBoxDesc（禁止 global mainlandBox） */
+function mainlandValue(movie) {
+  return resolveChinaCumulativeBox(movie).text;
+}
+
+const chinaBoxTraceKeys = new Set();
+
+function logChinaBoxFieldTrace(movie) {
+  const resolved = resolveChinaCumulativeBox(movie);
+  if (!resolved.text) return;
+  const name = String(movie?.name || movie?.movieId || "");
+  const key = `${movie?.movieId || ""}|${resolved.sourceField}|${resolved.text}`;
+  if (chinaBoxTraceKeys.has(key)) return;
+  chinaBoxTraceKeys.add(key);
+  if (chinaBoxTraceKeys.size > 200) {
+    const first = chinaBoxTraceKeys.values().next().value;
+    chinaBoxTraceKeys.delete(first);
+  }
+  const oldWan = boxTextToWanApprox(movie?.mainlandBox);
+  const newWan =
+    resolved.valueWan > 0 ? resolved.valueWan : boxTextToWanApprox(resolved.text);
+  const oldLabel = oldWan > 0 ? `${Math.round(oldWan)}万` : String(movie?.mainlandBox || "--");
+  const newLabel = newWan > 0 ? `${Math.round(newWan)}万` : resolved.text;
+  console.log(
+    `[BOX_FIELD_TRACE] movie=${name} displayChinaBox: old: ${oldLabel} new: ${newLabel} sourceField: ${resolved.sourceField}`,
+  );
 }
 
 function mainlandLabel() {
@@ -2048,10 +2078,6 @@ function fitNowrapEl(el, { minSize = 20, allowWrap = false } = {}) {
   }
 }
 
-function mainlandValue(movie) {
-  return movie.mainlandBox || "";
-}
-
 function buildSummaryMetricHtml(def, movie) {
   const bubble =
     def.key === "dailyBox"
@@ -2419,6 +2445,7 @@ function formatDisplayBox(movie) {
 
 function raceCardTemplate(movie) {
   const mainland = formatMainlandDisplay(movie);
+  logChinaBoxFieldTrace(movie);
   const summary = buildSummaryHtml(movie);
   const tableRows = ensureDailyTable(movie);
   const table = dailyTableHtml(tableRows);
@@ -2548,6 +2575,7 @@ function updateRaceCard(card, movie, isNew = false, options = {}) {
   const titleChanged = setTextIfChanged(card.querySelector(".race-card__title"), `《${movie.name}》`);
 
   const mainland = formatMainlandDisplay(movie);
+  logChinaBoxFieldTrace(movie);
   const mainlandWrap = card.querySelector(".race-card__mainland");
   const mainlandEl = card.querySelector(".js-mainland");
   const mainlandLabelEl = card.querySelector(".js-mainland-label");

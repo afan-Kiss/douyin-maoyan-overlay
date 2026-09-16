@@ -64,3 +64,43 @@ export function formatBoxTextForDisplay(text, unit = "万", parseBoxNum) {
   if (!cleaned.includes("万") && !cleaned.includes("亿")) return `${cleaned}${safeUnit}`;
   return cleaned;
 }
+
+/**
+ * 卡片「中国内地」累计票房展示文本。
+ * 唯一来源：dashboard 的 sumBoxDesc / sumBoxNum（与专业版累计一致）。
+ * 禁止：mainlandBox（全球分区 getBoxShowna）、todayBox、boxDesc、预测、昨日。
+ * @returns {{ text: string, sourceField: string, valueWan: number }}
+ */
+export function resolveChinaCumulativeBox(movie) {
+  const desc = String(movie?.sumBoxDesc || "").trim().replace(/^[¥￥]/, "");
+  if (desc && desc !== "--" && desc !== "-") {
+    return {
+      text: desc,
+      sourceField: "sumBoxDesc",
+      valueWan: boxTextToWanApprox(desc),
+    };
+  }
+  const num = Number(movie?.sumBoxNum);
+  if (Number.isFinite(num) && num > 0) {
+    return {
+      text: formatWanDisplayText(num),
+      sourceField: "sumBoxNum",
+      valueWan: num,
+    };
+  }
+  return { text: "", sourceField: "", valueWan: 0 };
+}
+
+/** 仅用于 trace：把「3.39亿 / 33900万」粗转为万（不参与排名） */
+export function boxTextToWanApprox(text) {
+  const s = String(text || "")
+    .trim()
+    .replace(/[¥￥,\s]/g, "");
+  if (!s || s === "--" || s === "-") return 0;
+  const m = s.match(/^([\d.]+)(亿|万)?$/);
+  if (!m) return 0;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || !(n > 0)) return 0;
+  if (m[2] === "亿") return n * 10000;
+  return n;
+}

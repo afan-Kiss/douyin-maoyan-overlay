@@ -444,6 +444,7 @@ async function main() {
           todayBox: 12300,
           todayUnit: "亿",
           mainlandBox: "1.23亿",
+          sumBoxDesc: "1.23亿",
           dailyTable: [
             {
               label: "今日",
