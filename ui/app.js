@@ -57,6 +57,10 @@ import {
 import { boxStore } from "./box-store.js";
 import { formatRiseTextWithArrow } from "./rise-engine.js";
 import {
+  createBubbleAutoScheduler,
+  AUTO_BUBBLE_INTERVAL_MS,
+} from "./bubble-auto-scheduler.js";
+import {
   createBoxPipeline,
   projectSnapshotForRender,
   BOX_POLL_MS,
@@ -674,7 +678,16 @@ function resetLastGoodIfDayChanged(calendarToday) {
     for (const timer of inlineDeltaTimers.values()) clearTimeout(timer);
     inlineDeltaTimers.clear();
     document.querySelectorAll(".race-card__delta-bubble, #nation-delta").forEach((el) => {
-      el.classList.remove("is-visible", "is-animating", "is-idle", "is-rise");
+      el.classList.remove(
+        "is-visible",
+        "is-animating",
+        "is-idle",
+        "is-rise",
+        "bubble-real",
+        "bubble-random",
+        "bubble-tone-gold",
+        "bubble-tone-blue",
+      );
       el.textContent = "";
     });
   }
@@ -1032,7 +1045,16 @@ function isBubbleVisible(key) {
 function hideBubble(el, key) {
   if (!el) return;
   el.textContent = "";
-  el.classList.remove("is-visible", "is-animating", "is-idle", "is-rise");
+  el.classList.remove(
+    "is-visible",
+    "is-animating",
+    "is-idle",
+    "is-rise",
+    "bubble-real",
+    "bubble-random",
+    "bubble-tone-gold",
+    "bubble-tone-blue",
+  );
   el.style.color = "";
   el.style.textShadow = "";
   el.style.animation = "";
@@ -1054,8 +1076,18 @@ function finishBubbleAnimation(el, key) {
   }
 }
 
-/** 仅上涨：红色 +数字 ↑，约 2 秒后隐藏。无「暂无变化」。 */
-function playBubblePulse(el, key, mode, deltaWan = 0) {
+const BUBBLE_STYLE = {
+  real: { color: "#22c55e", shadow: "0 0 8px rgba(34, 197, 94, 0.5)" },
+  randomGold: { color: "#f5c542", shadow: "0 0 8px rgba(245, 197, 66, 0.55)" },
+  randomBlue: { color: "#3b82f6", shadow: "0 0 8px rgba(59, 130, 246, 0.55)" },
+};
+
+/**
+ * 仅上涨：+数字 ↑，约 2 秒后隐藏。无「暂无变化」。
+ * @param {"real"|"random"} [options.type]
+ * @param {"gold"|"blue"} [options.tone] 仅 random 使用
+ */
+function playBubblePulse(el, key, mode, deltaWan = 0, options = {}) {
   const bubble = getOverlaySettings()?.bubble;
   if (!el || bubble?.enabled === false) return false;
   if (mode !== "rise") return false;
@@ -1063,15 +1095,33 @@ function playBubblePulse(el, key, mode, deltaWan = 0) {
   const text = formatDeltaWithArrow(deltaWan);
   if (!text) return false;
 
+  const type = options.type === "random" ? "random" : "real";
+  const tone = options.tone === "blue" ? "blue" : "gold";
+  const style =
+    type === "random"
+      ? tone === "blue"
+        ? BUBBLE_STYLE.randomBlue
+        : BUBBLE_STYLE.randomGold
+      : BUBBLE_STYLE.real;
+
   el.style.display = "inline-flex";
   if (inlineDeltaTimers.has(key)) clearTimeout(inlineDeltaTimers.get(key));
 
   const durationMs = getBubbleDurationMs();
   el.textContent = text;
-  el.style.color = "#ff4d4d";
-  el.style.textShadow = "0 0 8px rgba(255, 77, 109, 0.45)";
-  el.classList.remove("is-idle");
-  el.classList.add("is-rise");
+  el.style.color = style.color;
+  el.style.textShadow = style.shadow;
+  el.classList.remove(
+    "is-idle",
+    "bubble-real",
+    "bubble-random",
+    "bubble-tone-gold",
+    "bubble-tone-blue",
+  );
+  el.classList.add("is-rise", type === "random" ? "bubble-random" : "bubble-real");
+  if (type === "random") {
+    el.classList.add(tone === "blue" ? "bubble-tone-blue" : "bubble-tone-gold");
+  }
 
   el.style.animation = "none";
   el.style.animationDuration = `${durationMs}ms`;
@@ -1086,8 +1136,8 @@ function playBubblePulse(el, key, mode, deltaWan = 0) {
   return true;
 }
 
-function pulseInlineDelta(el, deltaWan, timerKey) {
-  return playBubblePulse(el, timerKey || el, "rise", deltaWan);
+function pulseInlineDelta(el, deltaWan, timerKey, options = {}) {
+  return playBubblePulse(el, timerKey || el, "rise", deltaWan, options);
 }
 
 function pulseNoChangeBubble() {
@@ -1114,6 +1164,7 @@ window.addEventListener("beforeunload", () => {
   clearInterval(bubbleTimer);
   bubbleTimer = null;
   bubbleTimerScheduled = false;
+  bubbleAutoScheduler?.stop();
   for (const timer of inlineDeltaTimers.values()) clearTimeout(timer);
 });
 
@@ -3190,6 +3241,55 @@ function logBubbleUi(payload) {
   console.log("[BUBBLE_UI]", payload);
 }
 
+function ensureMovieBubbleElement(movieId) {
+  const card = cardPool.get(String(movieId));
+  if (!card) return null;
+  const dailyBoxMetric = card.querySelector('[data-metric="dailyBox"]');
+  if (!dailyBoxMetric) return null;
+  let bubbleEl = card.querySelector(".race-card__delta-bubble");
+  if (!bubbleEl || bubbleEl.parentElement !== dailyBoxMetric) {
+    if (bubbleEl) bubbleEl.remove();
+    bubbleEl = document.createElement("span");
+    bubbleEl.className = "race-card__delta-bubble race-card__delta-float";
+    bubbleEl.setAttribute("aria-hidden", "true");
+    const valueEl = dailyBoxMetric.querySelector(".metric__value");
+    if (valueEl) dailyBoxMetric.insertBefore(bubbleEl, valueEl);
+    else dailyBoxMetric.appendChild(bubbleEl);
+  }
+  return bubbleEl;
+}
+
+/** 随机直播动态气泡：只改 UI，不写任何票房字段 */
+function playRandomAutoBubble({ movieId, amountYuan, tone }) {
+  const id = String(movieId || "");
+  const yuan = Number(amountYuan);
+  if (!id || !(yuan > 0)) return false;
+  const bubbleEl = ensureMovieBubbleElement(id);
+  if (!bubbleEl) return false;
+  // yuan → wan，复用真实气泡同一套 formatRiseTextWithArrow
+  return pulseInlineDelta(bubbleEl, yuan / 10000, `movie-${id}`, {
+    type: "random",
+    tone: tone === "blue" ? "blue" : "gold",
+  });
+}
+
+function getTopRenderedMovieIds() {
+  const fromDom = [...document.querySelectorAll(".race-card[data-movie-id]")]
+    .map((el) => String(el.dataset.movieId || ""))
+    .filter(Boolean);
+  if (fromDom.length) return fromDom.slice(0, RACE_TOP_COUNT);
+  return (latestMovies || [])
+    .slice(0, RACE_TOP_COUNT)
+    .map((m) => String(m?.movieId || ""))
+    .filter(Boolean);
+}
+
+const bubbleAutoScheduler = createBubbleAutoScheduler({
+  intervalMs: AUTO_BUBBLE_INTERVAL_MS,
+  getTopMovieIds: getTopRenderedMovieIds,
+  playRandomBubble: playRandomAutoBubble,
+});
+
 /**
  * Store onRise → 入队；paint 完成后再 flush，避免 snapshot 未渲染时找不到 DOM。
  */
@@ -3205,6 +3305,8 @@ function queueRiseEvent(evt) {
     return false;
   }
   pendingV2RiseEvents.set(movieId, evt);
+  // 真实优先：本周期禁止随机气泡
+  bubbleAutoScheduler.markRealRise();
   console.log("[BUBBLE_QUEUE]", {
     movieId,
     name: evt.name || "",
@@ -3275,13 +3377,18 @@ function applyV2RiseEvent(evt) {
       return result;
     }
     base.text = text;
-    const ok = pulseInlineDelta(nationDeltaEl, evt.deltaWan, "__nation__");
+    const ok = pulseInlineDelta(nationDeltaEl, evt.deltaWan, "__nation__", { type: "real" });
     if (ok && dedupKey) {
       playedV2RiseEventKeys.add(dedupKey);
       if (playedV2RiseEventKeys.size > 200) {
         const first = playedV2RiseEventKeys.values().next().value;
         playedV2RiseEventKeys.delete(first);
       }
+    }
+    if (ok) {
+      console.log(
+        `[BUBBLE_AUTO] type=real movieId=${base.movieId} deltaYuan=${evt.deltaYuan}`,
+      );
     }
     const result = { ok: Boolean(ok), reason: ok ? "played" : "empty_text", ...base, played: Boolean(ok) };
     logBubbleUi(result);
@@ -3304,16 +3411,7 @@ function applyV2RiseEvent(evt) {
   }
   base.metricFound = true;
 
-  let bubbleEl = card.querySelector(".race-card__delta-bubble");
-  if (!bubbleEl || bubbleEl.parentElement !== dailyBoxMetric) {
-    if (bubbleEl) bubbleEl.remove();
-    bubbleEl = document.createElement("span");
-    bubbleEl.className = "race-card__delta-bubble race-card__delta-float";
-    bubbleEl.setAttribute("aria-hidden", "true");
-    const valueEl = dailyBoxMetric.querySelector(".metric__value");
-    if (valueEl) dailyBoxMetric.insertBefore(bubbleEl, valueEl);
-    else dailyBoxMetric.appendChild(bubbleEl);
-  }
+  let bubbleEl = ensureMovieBubbleElement(evt.movieId);
   if (!bubbleEl) {
     const result = { ok: false, reason: "bubble_element_not_found", ...base };
     logBubbleUi(result);
@@ -3329,13 +3427,18 @@ function applyV2RiseEvent(evt) {
   }
   base.text = text;
 
-  const ok = pulseInlineDelta(bubbleEl, evt.deltaWan, `movie-${evt.movieId}`);
+  const ok = pulseInlineDelta(bubbleEl, evt.deltaWan, `movie-${evt.movieId}`, { type: "real" });
   if (ok && dedupKey) {
     playedV2RiseEventKeys.add(dedupKey);
     if (playedV2RiseEventKeys.size > 200) {
       const first = playedV2RiseEventKeys.values().next().value;
       playedV2RiseEventKeys.delete(first);
     }
+  }
+  if (ok) {
+    console.log(
+      `[BUBBLE_AUTO] type=real movieId=${String(evt.movieId)} deltaYuan=${evt.deltaYuan}`,
+    );
   }
   const result = {
     ok: Boolean(ok),
@@ -4141,6 +4244,13 @@ async function init() {
       boxStore,
       getPendingRiseCount: () => pendingV2RiseEvents.size,
       getPlayedRiseCount: () => playedV2RiseEventKeys.size,
+      bubbleAutoScheduler,
+      startBubbleAutoScheduler: () => bubbleAutoScheduler.start(),
+      stopBubbleAutoScheduler: () => bubbleAutoScheduler.stop(),
+      tickBubbleAutoScheduler: () => bubbleAutoScheduler.tick(),
+      markRealRiseForAutoBubble: () => bubbleAutoScheduler.markRealRise(),
+      playRandomAutoBubble,
+      getTopRenderedMovieIds,
       commitAndPaint(candidate, meta = {}) {
         const result = boxStore.commit(candidate);
         if (result.ok) {
@@ -4157,6 +4267,7 @@ async function init() {
         return result;
       },
     };
+    bubbleAutoScheduler.start();
     setStatus("ok", "");
     return;
   }
@@ -4171,6 +4282,7 @@ async function init() {
 
   if (apiStatus.apiBase) config.apiBase = apiStatus.apiBase;
   setStatus("loading", "服务已就绪，正在拉取票房数据…");
+  bubbleAutoScheduler.start();
   startPolling();
   setTimeout(() => flushStartupReport(), 90_000);
 }
