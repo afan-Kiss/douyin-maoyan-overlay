@@ -144,17 +144,26 @@ async function main() {
   });
   void keepAlive;
 
-  // Hook console.log objects for reliable BOX_V2 payload capture
+  // Hook console.log objects for reliable BOX_V2 / bubble bridge capture
   try {
     await win.webContents.executeJavaScript(`(() => {
       if (window.__boxV2Hooked) return true;
       window.__boxV2Hooked = true;
       window.__boxV2Events = [];
+      window.__bubbleBridge = { boxRise: 0, bubbleQueue: 0, bubbleUiPlayed: 0, bubbleUiFail: 0 };
       const orig = console.log.bind(console);
       console.log = (...args) => {
         if (args[0] === "[BOX_V2]") {
           const payload = args[1] && typeof args[1] === "object" ? args[1] : { raw: args.slice(1) };
           window.__boxV2Events.push({ at: Date.now(), ...payload });
+        }
+        if (args[0] === "[BOX_RISE]") window.__bubbleBridge.boxRise += 1;
+        if (args[0] === "[BUBBLE_QUEUE]" && args[1] && args[1].queued) {
+          window.__bubbleBridge.bubbleQueue += 1;
+        }
+        if (args[0] === "[BUBBLE_UI]") {
+          if (args[1] && args[1].played) window.__bubbleBridge.bubbleUiPlayed += 1;
+          else window.__bubbleBridge.bubbleUiFail += 1;
         }
         return orig(...args);
       };
@@ -211,6 +220,12 @@ async function main() {
       const bubbles = [...document.querySelectorAll(".race-card__delta-bubble, #nation-delta")]
         .map((el) => (el.textContent || "").trim())
         .filter(Boolean);
+      const bridge = window.__bubbleBridge || {
+        boxRise: 0,
+        bubbleQueue: 0,
+        bubbleUiPlayed: 0,
+        bubbleUiFail: 0,
+      };
       return {
         at: Date.now(),
         cardCount: cards.length,
@@ -221,6 +236,7 @@ async function main() {
         hasData: document.body.classList.contains("is-ready"),
         bubbles,
         events,
+        bridge: { ...bridge },
       };
     })()`);
     } catch (err) {
@@ -348,6 +364,7 @@ async function main() {
       publishCount,
       rejectCount,
       bubbles: snap.bubbles || [],
+      bridge: snap.bridge || null,
     });
 
     console.log("[SOAK_SAMPLE]", {
@@ -358,6 +375,7 @@ async function main() {
       top5,
       publishCount,
       rejectCount,
+      bridge: snap.bridge || null,
       lastRejects: (snap.events || [])
         .filter((e) => e.publish === false)
         .map((e) => e.rejectReason || e.reason || "?")
@@ -371,6 +389,12 @@ async function main() {
   const totalGate = publishCount + rejectCount;
   const publishRate = totalGate > 0 ? publishCount / totalGate : 0;
   const rankSources = [...new Set(boxV2Events.map((e) => e.rankSource).filter(Boolean))];
+  const lastBridge = samples[samples.length - 1]?.bridge || {
+    boxRise: 0,
+    bubbleQueue: 0,
+    bubbleUiPlayed: 0,
+    bubbleUiFail: 0,
+  };
   const report = {
     at: new Date().toISOString(),
     observeMs: OBSERVE_MS,
@@ -395,13 +419,21 @@ async function main() {
     rankSources,
     boxV2EventCount: boxV2Events.length,
     recentBoxV2: boxV2Events.slice(-30),
+    bubbleBridge: lastBridge,
+    bubbleBridgeOk:
+      lastBridge.boxRise === lastBridge.bubbleQueue &&
+      lastBridge.boxRise === lastBridge.bubbleUiPlayed &&
+      lastBridge.bubbleUiFail === 0,
     ok:
       firstGoodAt > 0 &&
       flashDashCount === 0 &&
       champMissingCount === 0 &&
       top5MissingCount === 0 &&
       publishCount > 0 &&
-      rankSources.every((s) => s === "dashboard-rank"),
+      rankSources.every((s) => s === "dashboard-rank") &&
+      lastBridge.boxRise === lastBridge.bubbleQueue &&
+      lastBridge.boxRise === lastBridge.bubbleUiPlayed &&
+      lastBridge.bubbleUiFail === 0,
   };
 
   const outFile = path.join(OUT_DIR, `soak-electron-${Date.now()}.json`);

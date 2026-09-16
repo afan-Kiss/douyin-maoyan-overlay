@@ -1,6 +1,8 @@
 /**
- * UI 渲染稳定性：空值不覆盖、卡片 DOM 复用、气泡不被刷新打断。
+ * UI 渲染稳定性：空值不覆盖、卡片 DOM 复用、真实 RiseEvent→气泡链路。
  * node deploy/test-ui-stability.js
+ *
+ * 气泡断言禁止手工调用 pulseInlineDelta / playBubblePulse / applyV2RiseEvent。
  */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -121,7 +123,17 @@ async function main() {
         ({ candidate }) => {
           const result = window.__racePreview.commitAndPaint(candidate);
           if (!result?.ok) throw new Error(`commit failed: ${result?.reason || "unknown"}`);
-          return result;
+          return {
+            ok: result.ok,
+            rises: (result.rises || []).map((r) => ({
+              movieId: r.movieId,
+              deltaWan: r.deltaWan,
+              deltaYuan: r.deltaYuan,
+              oldWan: r.oldWan,
+              newWan: r.newWan,
+            })),
+            displayBoxWan: window.__racePreview.boxStore.getMovie("1001")?.displayBoxWan,
+          };
         },
         { candidate: toCandidate(movies, { ...nation, ...nationPatch }, day) },
       );
@@ -149,6 +161,22 @@ async function main() {
           );
         },
         { movieId, metric },
+      );
+
+    const readBubble = (movieId) =>
+      page.evaluate(
+        ({ movieId }) => {
+          const card = document.querySelector(`.race-card[data-movie-id="${movieId}"]`);
+          const bubble = card?.querySelector(".race-card__delta-bubble");
+          return {
+            text: bubble?.textContent?.trim() || "",
+            visible: bubble?.classList.contains("is-visible") || false,
+            animating: bubble?.classList.contains("is-animating") || false,
+            connected: bubble?.isConnected === true,
+            el: Boolean(bubble),
+          };
+        },
+        { movieId },
       );
 
     const readNation = () =>
@@ -225,39 +253,91 @@ async function main() {
     );
     assert.equal(sameNode, true, "same movieId must reuse DOM node");
 
-    // 5) 触发 bubble 后刷新 snapshot：气泡仍正常结束
+    // 5) 真实生产链气泡：清空 Store 后 40.10 → 40.13（禁止手工 pulse）
+    // 先等上一步涨幅气泡结束，避免残留干扰断言
+    await page.waitForTimeout(2200);
     await page.evaluate(() => {
-      const card = window.__racePreview.getCardNode("1001");
-      const bubble = card?.querySelector(".race-card__delta-bubble");
-      window.__bubbleEl = bubble;
-      window.__racePreview.pulseInlineDelta(bubble, 0.12, "movie-1001");
+      window.__racePreview.boxStore.clear();
+      window.__racePreview.boxStore.resetBaselines();
+      document.querySelectorAll(".race-card__delta-bubble, #nation-delta").forEach((el) => {
+        const key =
+          el.id === "nation-delta"
+            ? "__nation__"
+            : `movie-${el.closest(".race-card")?.dataset?.movieId || ""}`;
+        window.__racePreview.hideBubble(el, key);
+      });
     });
-    const bubbleText = await page.evaluate(() => window.__bubbleEl?.textContent?.trim() || "");
-    assert.ok(bubbleText.includes("+"), `bubble text=${bubbleText}`);
+
+    const first = await commitPaint(
+      top5({
+        "1001": {
+          name: "功夫女足",
+          todayBox: 40.1,
+          todayBoxText: "40.10",
+          displayBoxWan: 40.1,
+          lastValidBoxWan: 40.1,
+        },
+      }),
+    );
+    assert.equal(first.rises.length, 0, "first accept must not rise");
+    assert.equal(first.displayBoxWan, 40.1);
+    assert.ok((await readMetric("1001", "dailyBox")).includes("40.1"), "baseline dailyBox");
+    const bubbleBefore = await readBubble("1001");
+    assert.equal(bubbleBefore.text, "", "no bubble on first accept");
+    assert.equal(bubbleBefore.visible, false);
+
+    const second = await commitPaint(
+      top5({
+        "1001": {
+          name: "功夫女足",
+          todayBox: 40.13,
+          todayBoxText: "40.13",
+          displayBoxWan: 40.13,
+          lastValidBoxWan: 40.13,
+        },
+      }),
+    );
+    assert.equal(second.displayBoxWan, 40.13, "Store displayBoxWan === 40.13");
+    assert.equal(second.rises.length, 1, "must emit one RiseEvent");
+    assert.equal(second.rises[0].deltaWan, 0.03);
+    assert.equal(second.rises[0].deltaYuan, 300);
+    assert.ok((await readMetric("1001", "dailyBox")).includes("40.13"), "DOM shows 40.13");
+
+    const bubbleAfterRise = await readBubble("1001");
+    assert.equal(bubbleAfterRise.text, "+300元 ↑", `bubble text=${bubbleAfterRise.text}`);
+    assert.equal(bubbleAfterRise.visible, true, "is-visible");
+    assert.equal(bubbleAfterRise.animating, true, "is-animating");
     assert.equal(
       await page.evaluate(() => window.__racePreview.isBubbleVisible("movie-1001")),
       true,
     );
 
+    await page.evaluate(() => {
+      window.__bubbleEl = window.__racePreview
+        .getCardNode("1001")
+        ?.querySelector(".race-card__delta-bubble");
+    });
+
+    // 6) 气泡生命周期内普通 snapshot 刷新：节点/文字/timer 不丢
     await commitPaint(
       top5({
         "1001": {
-          todayBox: 42.7,
-          todayBoxText: "42.7",
-          displayBoxWan: 42.7,
-          lastValidBoxWan: 42.7,
+          name: "功夫女足",
+          todayBox: 40.13,
+          todayBoxText: "40.13",
+          displayBoxWan: 40.13,
+          lastValidBoxWan: 40.13,
           boxRate: "15.4%",
         },
       }),
     );
-
     const afterRefresh = await page.evaluate(() => ({
       sameEl: window.__bubbleEl?.isConnected === true,
       text: window.__bubbleEl?.textContent?.trim() || "",
       visible: window.__racePreview.isBubbleVisible("movie-1001"),
     }));
     assert.equal(afterRefresh.sameEl, true, "bubble node must survive refresh");
-    assert.ok(afterRefresh.text.includes("+"), `bubble kept text=${afterRefresh.text}`);
+    assert.equal(afterRefresh.text, "+300元 ↑", `bubble kept text=${afterRefresh.text}`);
     assert.equal(afterRefresh.visible, true, "bubble timer must still be active");
 
     await page.waitForTimeout(2200);
@@ -270,7 +350,7 @@ async function main() {
     assert.equal(afterHide.text, "", "bubble text cleared after hide");
     assert.equal(afterHide.animating, false);
 
-    console.log("PASS ui stability (keep-valid / card reuse / bubble lifecycle)");
+    console.log("PASS ui stability (keep-valid / card reuse / real RiseEvent bubble)");
   } finally {
     await browser?.close();
     server.close();

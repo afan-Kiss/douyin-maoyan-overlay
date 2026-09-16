@@ -147,6 +147,10 @@ let lastAppliedLoginAttemptId = 0;
 let lastUiTraceMovieIds = [];
 const lastUiTraceSignatures = new Map();
 let uiRenderSeq = 0;
+/** V2 RiseEvent → UI：Store emit 时入队，paint 完成后再播（避免 DOM 未就绪） */
+const pendingV2RiseEvents = new Map();
+/** 去重：同一次上涨只播一次（movieId|oldWan|newWan|at） */
+const playedV2RiseEventKeys = new Set();
 
 function isEmptyField(val) {
   if (val == null) return true;
@@ -1053,15 +1057,17 @@ function finishBubbleAnimation(el, key) {
 /** 仅上涨：红色 +数字 ↑，约 2 秒后隐藏。无「暂无变化」。 */
 function playBubblePulse(el, key, mode, deltaWan = 0) {
   const bubble = getOverlaySettings()?.bubble;
-  if (!el || bubble?.enabled === false) return;
-  if (mode !== "rise") return;
-  if (!Number.isFinite(deltaWan) || deltaWan <= 0 || !formatDelta(deltaWan)) return;
+  if (!el || bubble?.enabled === false) return false;
+  if (mode !== "rise") return false;
+
+  const text = formatDeltaWithArrow(deltaWan);
+  if (!text) return false;
 
   el.style.display = "inline-flex";
   if (inlineDeltaTimers.has(key)) clearTimeout(inlineDeltaTimers.get(key));
 
   const durationMs = getBubbleDurationMs();
-  el.textContent = formatDeltaWithArrow(deltaWan);
+  el.textContent = text;
   el.style.color = "#ff4d4d";
   el.style.textShadow = "0 0 8px rgba(255, 77, 109, 0.45)";
   el.classList.remove("is-idle");
@@ -1077,10 +1083,11 @@ function playBubblePulse(el, key, mode, deltaWan = 0) {
   el.classList.add("is-visible", "is-animating");
 
   inlineDeltaTimers.set(key, setTimeout(() => finishBubbleAnimation(el, key), durationMs));
+  return true;
 }
 
 function pulseInlineDelta(el, deltaWan, timerKey) {
-  playBubblePulse(el, timerKey || el, "rise", deltaWan);
+  return playBubblePulse(el, timerKey || el, "rise", deltaWan);
 }
 
 function pulseNoChangeBubble() {
@@ -3174,18 +3181,131 @@ function scheduleDecodeRetry(requestPollGen, requestFontVer, requestBusinessDate
   }, 800);
 }
 
-function applyV2RiseEvent(evt) {
-  if (!evt || !(evt.deltaWan > 0)) return;
-  if (getOverlaySettings()?.bubble?.enabled === false) return;
-  if (evt.kind === "nation" || evt.movieId === "__nation__") {
-    if (nationDeltaEl) pulseInlineDelta(nationDeltaEl, evt.deltaWan, "__nation__");
-    return;
+function riseEventDedupKey(evt) {
+  if (!evt) return "";
+  return `${evt.movieId}|${evt.oldWan}|${evt.newWan}|${evt.at}`;
+}
+
+function logBubbleUi(payload) {
+  console.log("[BUBBLE_UI]", payload);
+}
+
+/**
+ * Store onRise → 入队；paint 完成后再 flush，避免 snapshot 未渲染时找不到 DOM。
+ */
+function queueRiseEvent(evt) {
+  if (!BOX_PIPELINE_V2) return false;
+  if (!evt || !(Number(evt.deltaWan) > 0)) {
+    console.log("[BUBBLE_QUEUE]", { queued: false, reason: "invalid_event", movieId: evt?.movieId || "" });
+    return false;
   }
+  const movieId = String(evt.movieId || "");
+  if (!movieId) {
+    console.log("[BUBBLE_QUEUE]", { queued: false, reason: "missing_movie_id" });
+    return false;
+  }
+  pendingV2RiseEvents.set(movieId, evt);
+  console.log("[BUBBLE_QUEUE]", {
+    movieId,
+    name: evt.name || "",
+    deltaWan: evt.deltaWan,
+    deltaYuan: evt.deltaYuan,
+    queued: true,
+    pending: pendingV2RiseEvents.size,
+  });
+  return true;
+}
+
+function flushPendingRiseEvents() {
+  if (!pendingV2RiseEvents.size) return [];
+  const events = [...pendingV2RiseEvents.values()];
+  pendingV2RiseEvents.clear();
+  const results = [];
+  for (const evt of events) {
+    results.push(applyV2RiseEvent(evt));
+  }
+  return results;
+}
+
+/**
+ * @returns {{ ok: boolean, reason: string, movieId?: string, name?: string, deltaWan?: number, deltaYuan?: number, cardFound?: boolean, metricFound?: boolean, bubbleFound?: boolean, text?: string, played?: boolean }}
+ */
+function applyV2RiseEvent(evt) {
+  const base = {
+    movieId: evt?.movieId != null ? String(evt.movieId) : "",
+    name: evt?.name || "",
+    deltaWan: evt?.deltaWan,
+    deltaYuan: evt?.deltaYuan,
+    cardFound: false,
+    metricFound: false,
+    bubbleFound: false,
+    text: "",
+    played: false,
+  };
+
+  if (!evt || !(Number(evt.deltaWan) > 0)) {
+    const result = { ok: false, reason: "invalid_event", ...base };
+    logBubbleUi(result);
+    return result;
+  }
+  if (getOverlaySettings()?.bubble?.enabled === false) {
+    const result = { ok: false, reason: "bubble_disabled", ...base };
+    logBubbleUi(result);
+    return result;
+  }
+
+  const dedupKey = riseEventDedupKey(evt);
+  if (dedupKey && playedV2RiseEventKeys.has(dedupKey)) {
+    const result = { ok: false, reason: "played", ...base };
+    logBubbleUi(result);
+    return result;
+  }
+
+  if (evt.kind === "nation" || evt.movieId === "__nation__") {
+    if (!nationDeltaEl) {
+      const result = { ok: false, reason: "bubble_element_not_found", ...base, bubbleFound: false };
+      logBubbleUi(result);
+      return result;
+    }
+    base.bubbleFound = true;
+    const text = formatDeltaWithArrow(evt.deltaWan);
+    if (!text) {
+      const result = { ok: false, reason: "empty_text", ...base };
+      logBubbleUi(result);
+      return result;
+    }
+    base.text = text;
+    const ok = pulseInlineDelta(nationDeltaEl, evt.deltaWan, "__nation__");
+    if (ok && dedupKey) {
+      playedV2RiseEventKeys.add(dedupKey);
+      if (playedV2RiseEventKeys.size > 200) {
+        const first = playedV2RiseEventKeys.values().next().value;
+        playedV2RiseEventKeys.delete(first);
+      }
+    }
+    const result = { ok: Boolean(ok), reason: ok ? "played" : "empty_text", ...base, played: Boolean(ok) };
+    logBubbleUi(result);
+    return result;
+  }
+
   const card = cardPool.get(String(evt.movieId));
-  if (!card) return;
-  let bubbleEl = card.querySelector(".race-card__delta-bubble");
+  if (!card) {
+    const result = { ok: false, reason: "card_not_found", ...base };
+    logBubbleUi(result);
+    return result;
+  }
+  base.cardFound = true;
+
   const dailyBoxMetric = card.querySelector('[data-metric="dailyBox"]');
-  if (dailyBoxMetric && (!bubbleEl || bubbleEl.parentElement !== dailyBoxMetric)) {
+  if (!dailyBoxMetric) {
+    const result = { ok: false, reason: "daily_metric_not_found", ...base };
+    logBubbleUi(result);
+    return result;
+  }
+  base.metricFound = true;
+
+  let bubbleEl = card.querySelector(".race-card__delta-bubble");
+  if (!bubbleEl || bubbleEl.parentElement !== dailyBoxMetric) {
     if (bubbleEl) bubbleEl.remove();
     bubbleEl = document.createElement("span");
     bubbleEl.className = "race-card__delta-bubble race-card__delta-float";
@@ -3194,7 +3314,37 @@ function applyV2RiseEvent(evt) {
     if (valueEl) dailyBoxMetric.insertBefore(bubbleEl, valueEl);
     else dailyBoxMetric.appendChild(bubbleEl);
   }
-  if (bubbleEl) pulseInlineDelta(bubbleEl, evt.deltaWan, `movie-${evt.movieId}`);
+  if (!bubbleEl) {
+    const result = { ok: false, reason: "bubble_element_not_found", ...base };
+    logBubbleUi(result);
+    return result;
+  }
+  base.bubbleFound = true;
+
+  const text = formatDeltaWithArrow(evt.deltaWan);
+  if (!text) {
+    const result = { ok: false, reason: "empty_text", ...base };
+    logBubbleUi(result);
+    return result;
+  }
+  base.text = text;
+
+  const ok = pulseInlineDelta(bubbleEl, evt.deltaWan, `movie-${evt.movieId}`);
+  if (ok && dedupKey) {
+    playedV2RiseEventKeys.add(dedupKey);
+    if (playedV2RiseEventKeys.size > 200) {
+      const first = playedV2RiseEventKeys.values().next().value;
+      playedV2RiseEventKeys.delete(first);
+    }
+  }
+  const result = {
+    ok: Boolean(ok),
+    reason: ok ? "played" : "empty_text",
+    ...base,
+    played: Boolean(ok),
+  };
+  logBubbleUi(result);
+  return result;
 }
 
 function paintFromStoreSnapshot(projected, meta = {}) {
@@ -3232,9 +3382,8 @@ function paintFromStoreSnapshot(projected, meta = {}) {
     scheduleBackgroundEnrich(meta.pollId || pollGeneration, latestParsedMeta, latestSpeedMap);
   }
 
-  for (const rise of meta.rises || []) {
-    applyV2RiseEvent(rise);
-  }
+  // 唯一生产播放路径：pending queue → flush（meta.rises 仅诊断，不再直接播，防双播）
+  flushPendingRiseEvents();
 }
 
 const boxPipeline = createBoxPipeline({
@@ -3249,8 +3398,8 @@ const boxPipeline = createBoxPipeline({
 });
 
 boxStore.onRise((evt) => {
-  // onPublish 已播放 rises；此处兜底（例如仅 detail 合并不触发）
   if (!BOX_PIPELINE_V2) return;
+  queueRiseEvent(evt);
 });
 
 function buildMoviesForRender(parsed, fontContentKey) {
@@ -3989,15 +4138,20 @@ async function init() {
       isBubbleVisible,
       getCardPoolSize: () => cardPool.size,
       getCardNode: (movieId) => cardPool.get(String(movieId)) || null,
+      boxStore,
+      getPendingRiseCount: () => pendingV2RiseEvents.size,
+      getPlayedRiseCount: () => playedV2RiseEventKeys.size,
       commitAndPaint(candidate, meta = {}) {
         const result = boxStore.commit(candidate);
         if (result.ok) {
           const projected = projectSnapshotForRender(result.snapshot || boxStore.getSnapshot());
+          // rises 由 boxStore.onRise → pending queue → paint 内 flush；此处不再二次播放
           paintFromStoreSnapshot(projected, {
-            rises: result.rises || [],
             skipEnrichSchedule: true,
             pollId: meta.pollId || Date.now(),
             ...meta,
+            // 保留诊断数据，禁止覆盖为播放源
+            risesDiagnostic: result.rises || [],
           });
         }
         return result;
