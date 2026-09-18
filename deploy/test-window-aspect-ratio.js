@@ -1,9 +1,10 @@
 /**
- * 窗口 9:16 比例归一化
+ * 窗口 9:16 比例归一化 + viewport 铺满/letterbox 判定
  * node deploy/test-window-aspect-ratio.js
  */
 const assert = require("assert");
 const path = require("path");
+const { pathToFileURL } = require("url");
 
 // electron 的 screen 在纯 Node 下不可用；为测试注入假 display
 const Module = require("module");
@@ -45,7 +46,26 @@ function nearlyAspect(w, h) {
   return Math.abs(got - expect) < 0.01;
 }
 
-function main() {
+async function testViewportFitAspect() {
+  const mod = await import(pathToFileURL(path.join(__dirname, "..", "ui", "viewport-fit.js")).href);
+  const { isNearDesignAspect } = mod;
+
+  // 真正 9:16 → 铺满（无 letterbox）
+  assert.strictEqual(isNearDesignAspect(540, 960), true, "540×960 should fill (no letterbox)");
+  assert.strictEqual(isNearDesignAspect(600, 1067), true, "600×1067 should fill (no letterbox)");
+  assert.strictEqual(isNearDesignAspect(1080, 1920), true, "1080×1920 should fill");
+
+  // 非 9:16 → 必须 letterbox，禁止裁底
+  assert.strictEqual(isNearDesignAspect(590, 1000), false, "590×1000 must letterbox");
+  assert.strictEqual(isNearDesignAspect(1000, 900), false, "1000×900 must letterbox");
+  assert.strictEqual(isNearDesignAspect(525, 1080), false, "525×1080 must letterbox");
+
+  console.log("  viewport-fit isNearDesignAspect:");
+  console.log("    540×960 / 600×1067 → fill");
+  console.log("    590×1000 / 1000×900 → letterbox");
+}
+
+function testWindowSize() {
   // 默认 540×960
   const def = resolveWindowSize(DEFAULT_WIDTH, DEFAULT_HEIGHT);
   assert.strictEqual(def.width, 540, "default width 540");
@@ -101,11 +121,20 @@ function main() {
   assert.ok(clamped.height <= 500 - 60, "height within work area");
   assert.ok(nearlyAspect(clamped.width, clamped.height), "clamped still 9:16");
 
-  console.log("test-window-aspect-ratio: OK");
-  console.log(`  540×960 default`);
-  console.log(`  525×1080 → ${bad.width}×${bad.height}`);
-  console.log(`  600×1067 → ${wide.width}×${wide.height}`);
-  console.log(`  liveOutput ${live.width}×${live.height}`);
+  console.log("  window-size resolve:");
+  console.log(`    540×960 default`);
+  console.log(`    525×1080 → ${bad.width}×${bad.height}`);
+  console.log(`    600×1067 → ${wide.width}×${wide.height}`);
+  console.log(`    liveOutput ${live.width}×${live.height}`);
 }
 
-main();
+async function main() {
+  testWindowSize();
+  await testViewportFitAspect();
+  console.log("test-window-aspect-ratio: OK");
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

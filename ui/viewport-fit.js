@@ -2,7 +2,10 @@ export const DESIGN_W = 1080;
 export const DESIGN_H = 1920;
 
 const SIZE_TOLERANCE = 6;
-const ASPECT_TOLERANCE = 0.03;
+/** 相对比例兜底；真正是否 9:16 以像素误差为准 */
+const ASPECT_TOLERANCE = 0.003;
+/** 相对 1080×1920 等比缩放后的宽/高误差超过该值则视为非 9:16 */
+const ASPECT_PIXEL_TOLERANCE = 2;
 
 /** Pick the largest simple fraction <= raw so transform:scale stays sharp */
 export function snapCrispScale(raw) {
@@ -22,9 +25,20 @@ function near(value, target, tolerance = SIZE_TOLERANCE) {
   return Math.abs(value - target) <= tolerance;
 }
 
-function nearAspect(vw, vh) {
+/**
+ * 判断窗口是否真正接近设计 9:16。
+ * 以「按宽度/高度分别等比缩放后的像素误差 ≤ 2」为主；
+ * 比例容差仅作快速否定。
+ */
+export function isNearDesignAspect(vw, vh) {
   if (!(vw > 0) || !(vh > 0)) return false;
-  return Math.abs(vw / vh - DESIGN_W / DESIGN_H) <= ASPECT_TOLERANCE;
+  if (Math.abs(vw / vh - DESIGN_W / DESIGN_H) > ASPECT_TOLERANCE) return false;
+  const heightFromWidth = (vw * DESIGN_H) / DESIGN_W;
+  const widthFromHeight = (vh * DESIGN_W) / DESIGN_H;
+  return (
+    Math.abs(heightFromWidth - vh) <= ASPECT_PIXEL_TOLERANCE &&
+    Math.abs(widthFromHeight - vw) <= ASPECT_PIXEL_TOLERANCE
+  );
 }
 
 function clearViewportFitStyles(viewport) {
@@ -76,7 +90,7 @@ export function fitDesignViewport() {
   }
 
   // Electron 正式窗口已是 9:16 时：按宽度铺满，避免左右 letterbox
-  if (nearAspect(vw, vh)) {
+  if (isNearDesignAspect(vw, vh)) {
     const scale = snapCrispScale(Math.max(vw / DESIGN_W, 0.05));
     applyScaledViewport(viewport, scale);
     return;

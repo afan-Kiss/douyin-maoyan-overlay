@@ -44,6 +44,8 @@
     "test:box-units": "node deploy/test-box-units.js",
     "test:box-pipeline-v2": "node deploy/test-box-pipeline-v2.js",
     "test:box-pipeline-v2-e2e": "node deploy/test-box-pipeline-v2-e2e.js",
+    "test:window-aspect": "node deploy/test-window-aspect-ratio.js",
+    "test:window-aspect-electron": "node scripts/start-electron.js deploy/verify-window-aspect-electron.js",
     "test:core": "node deploy/test-core.js",
     "test:extra-metrics": "node deploy/test-extra-metrics.js",
     "audit:maoyan-fields": "node deploy/audit-maoyan-fields.js",

@@ -22,6 +22,7 @@ const TESTS = [
   { name: "movie-interaction-bridge", script: "deploy/test-movie-interaction-bridge.js", needsChrome: true },
   { name: "data-consistency", script: "deploy/test-data-consistency.js", needsChrome: false },
   { name: "extra-metrics", script: "deploy/test-extra-metrics.js", needsChrome: false },
+  { name: "window-aspect", script: "deploy/test-window-aspect-ratio.js", needsChrome: false },
 ];
 
 function runTest(test) {
