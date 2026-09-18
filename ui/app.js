@@ -2605,6 +2605,14 @@ function resolveRowPoster(movie) {
 
 let posterResolveJob = 0;
 
+function wantsPosterRetry() {
+  try {
+    return new URLSearchParams(location.search).has("posterRetry");
+  } catch {
+    return false;
+  }
+}
+
 function schedulePosterResolve(list) {
   const resolve = window.overlay?.resolvePosters;
   if (typeof resolve !== "function" || !list?.length) return;
@@ -2619,7 +2627,8 @@ function schedulePosterResolve(list) {
   }
   if (!missing.length) return;
   const job = ++posterResolveJob;
-  Promise.resolve(resolve(missing))
+  const resolveOpts = wantsPosterRetry() ? { posterRetry: 1 } : undefined;
+  Promise.resolve(resolve(missing, resolveOpts))
     .then((rows) => {
       if (job !== posterResolveJob) return;
       for (const row of rows || []) {

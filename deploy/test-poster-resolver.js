@@ -8,6 +8,7 @@ const os = require("os");
 const path = require("path");
 const {
   resolveMissingPosters,
+  clearPosterFailureCooldown,
   isAcceptablePoster,
   isBannedCandidateUrl,
   readImageSize,
@@ -106,6 +107,80 @@ async function main() {
   assert.strictEqual(cooled[0].status, "cooldown");
   assert.strictEqual(failCalls, 0, "失败冷却期内不重试");
   assert.ok(FAIL_COOLDOWN_MS >= 30 * 60 * 1000);
+
+  const cleared = clearPosterFailureCooldown("9", { cacheDir: failDir });
+  assert.ok(cleared.cleared >= 1, "应清除 fail 冷却");
+  failCalls = 0;
+  const afterClear = await resolveMissingPosters([{ movieId: "9", movieName: "验证码片" }], {
+    cacheDir: failDir,
+    searchImpl: async (name) => {
+      failCalls += 1;
+      return { ...good, query: `${name} 电影 官方海报` };
+    },
+  });
+  assert.strictEqual(failCalls, 1, "清除 fail 冷却后应重新搜索");
+  assert.strictEqual(afterClear[0].status, "ok");
+  assert.strictEqual(afterClear[0].posterSource, "google-new");
+
+  // 成功缓存不能被 clearPosterFailureCooldown 删掉
+  const clearedOk = clearPosterFailureCooldown("9", { cacheDir: failDir });
+  assert.strictEqual(clearedOk.cleared, 0);
+  const stillCached = await resolveMissingPosters([{ movieId: "9", movieName: "验证码片" }], {
+    cacheDir: failDir,
+    searchImpl: async () => {
+      throw new Error("should not search");
+    },
+  });
+  assert.strictEqual(stillCached[0].fromCache, true);
+
+  // chrome_missing：Chrome 可用时应绕过冷却
+  const chromeDir = fs.mkdtempSync(path.join(os.tmpdir(), "poster-chrome-miss-"));
+  await resolveMissingPosters([{ movieId: "77", movieName: "缺Chrome片" }], {
+    cacheDir: chromeDir,
+    searchImpl: async () => {
+      const err = new Error("chrome missing");
+      err.code = "CHROME_MISSING";
+      throw err;
+    },
+  });
+  let chromeRetry = 0;
+  const bypassed = await resolveMissingPosters([{ movieId: "77", movieName: "缺Chrome片" }], {
+    cacheDir: chromeDir,
+    searchImpl: async (name) => {
+      chromeRetry += 1;
+      return { ...good, query: `${name} 电影 官方海报` };
+    },
+  });
+  // 本机若无 Chrome，仍会 cooldown；有 Chrome 则应立即重试
+  const { findChrome } = require("../lib/poster-search");
+  if (findChrome()) {
+    assert.strictEqual(chromeRetry, 1, "chrome_missing + Chrome已找到 → 立即重试");
+    assert.strictEqual(bypassed[0].status, "ok");
+  } else {
+    assert.strictEqual(bypassed[0].status, "cooldown");
+  }
+
+  // posterRetry 只清 fail
+  const retryDir = fs.mkdtempSync(path.join(os.tmpdir(), "poster-retry-"));
+  await resolveMissingPosters([{ movieId: "88", movieName: "冷却片" }], {
+    cacheDir: retryDir,
+    searchImpl: async () => {
+      const err = new Error("net");
+      err.code = "NETWORK";
+      throw err;
+    },
+  });
+  let retryCalls = 0;
+  const retried = await resolveMissingPosters([{ movieId: "88", movieName: "冷却片" }], {
+    cacheDir: retryDir,
+    posterRetry: true,
+    searchImpl: async (name) => {
+      retryCalls += 1;
+      return { ...good, query: `${name} 电影 官方海报` };
+    },
+  });
+  assert.strictEqual(retryCalls, 1);
+  assert.strictEqual(retried[0].status, "ok");
 
   console.log("PASS poster-resolver (unit/mock only)");
 }

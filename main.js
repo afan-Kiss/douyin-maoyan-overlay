@@ -447,10 +447,18 @@ function registerIpcHandlers() {
 
   ipcMain.handle("get-config", () => loadConfig());
   ipcMain.handle("get-poster-cache-dir", () => getPosterCacheDir());
-  ipcMain.handle("resolve-posters", (_event, movies) => {
+  ipcMain.handle("clear-poster-fail-cooldown", (_event, movieId) => {
+    const { clearPosterFailureCooldown } = require("./lib/poster-resolver");
+    return clearPosterFailureCooldown(movieId || "", { cacheDir: getPosterCacheDir() });
+  });
+  ipcMain.handle("resolve-posters", (_event, movies, options = {}) => {
     const { resolveMissingPosters } = require("./lib/poster-resolver");
+    const opts = options && typeof options === "object" ? options : {};
     return resolveMissingPosters(Array.isArray(movies) ? movies : [], {
       cacheDir: getPosterCacheDir(),
+      posterRetry: Boolean(opts.posterRetry),
+      clearFailCooldown: Boolean(opts.clearFailCooldown),
+      clearMovieId: opts.clearMovieId || "",
     });
   });
   ipcMain.handle("get-overlay-settings", () => loadSettings());

@@ -9,7 +9,7 @@ const path = require("path");
 const { resolveMissingPosters } = require("../lib/poster-resolver");
 const { searchOfficialPoster, findChrome } = require("../lib/poster-search");
 
-const MOVIE_NAME = process.env.POSTER_E2E_MOVIE || "蒸死比尔：血色全传";
+const MOVIE_NAME = process.env.POSTER_E2E_MOVIE || "杀死比尔：血色全传";
 const MOVIE_ID = process.env.POSTER_E2E_ID || "e2e-kill-bill";
 
 async function main() {

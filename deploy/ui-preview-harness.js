@@ -9,11 +9,7 @@ const { chromium } = require("playwright");
 const ROOT = path.join(__dirname, "..");
 const UI_DIR = path.join(ROOT, "ui");
 
-const CHROME_CANDIDATES = [
-  "C:\\Users\\Administrator\\AppData\\Local\\Google\\Chrome\\Bin\\chrome.exe",
-  "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-  "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-];
+const { findChrome } = require("../lib/poster-search");
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -30,7 +26,7 @@ const MIME = {
 };
 
 function resolveChrome() {
-  return CHROME_CANDIDATES.find((p) => fs.existsSync(p));
+  return findChrome() || undefined;
 }
 
 function mockMovies(count = 10) {
