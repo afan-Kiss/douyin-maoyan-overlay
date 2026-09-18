@@ -47,6 +47,11 @@ body {
 body {
   display: flex;
   align-items: flex-start;
+  justify-content: flex-start;
+}
+
+/* 仅非 9:16 嵌入（浏览器测试）时居中 letterbox */
+html.viewport-host--letterbox body {
   justify-content: center;
 }
 

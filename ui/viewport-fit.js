@@ -2,6 +2,7 @@ export const DESIGN_W = 1080;
 export const DESIGN_H = 1920;
 
 const SIZE_TOLERANCE = 6;
+const ASPECT_TOLERANCE = 0.03;
 
 /** Pick the largest simple fraction <= raw so transform:scale stays sharp */
 export function snapCrispScale(raw) {
@@ -21,8 +22,14 @@ function near(value, target, tolerance = SIZE_TOLERANCE) {
   return Math.abs(value - target) <= tolerance;
 }
 
+function nearAspect(vw, vh) {
+  if (!(vw > 0) || !(vh > 0)) return false;
+  return Math.abs(vw / vh - DESIGN_W / DESIGN_H) <= ASPECT_TOLERANCE;
+}
+
 function clearViewportFitStyles(viewport) {
-  viewport.classList.remove("viewport--native", "viewport--half", "viewport--scaled");
+  viewport.classList.remove("viewport--native", "viewport--half", "viewport--scaled", "viewport--letterbox");
+  document.documentElement.classList.remove("viewport-host--letterbox");
   viewport.style.transform = "";
   viewport.style.width = "";
   viewport.style.height = "";
@@ -68,6 +75,16 @@ export function fitDesignViewport() {
     return;
   }
 
+  // Electron 正式窗口已是 9:16 时：按宽度铺满，避免左右 letterbox
+  if (nearAspect(vw, vh)) {
+    const scale = snapCrispScale(Math.max(vw / DESIGN_W, 0.05));
+    applyScaledViewport(viewport, scale);
+    return;
+  }
+
+  // 浏览器 / 非 9:16 嵌入：等比居中，允许两侧黑边
+  viewport.classList.add("viewport--letterbox");
+  document.documentElement.classList.add("viewport-host--letterbox");
   const raw = Math.min(vw / DESIGN_W, vh / DESIGN_H);
   const scale = snapCrispScale(Math.max(raw, 0.05));
   applyScaledViewport(viewport, scale);

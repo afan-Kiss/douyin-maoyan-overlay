@@ -123,23 +123,63 @@ function loadConfig() {
   }
 }
 
+function persistResolvedWindowSize(size, liveOutput) {
+  try {
+    const { loadSettings, saveSettings } = getMods().settings;
+    const cur = loadSettings().window || {};
+    if (
+      cur.width === size.width &&
+      cur.height === size.height &&
+      Boolean(cur.liveOutput) === Boolean(liveOutput)
+    ) {
+      return;
+    }
+    saveSettings({
+      window: {
+        width: size.width,
+        height: size.height,
+        liveOutput: Boolean(liveOutput),
+      },
+    });
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 始终锁定 9:16；liveOutput 固定 1080×1920 且不可拉宽/最大化 */
+function lockWindowAspect(win, size, liveOutput) {
+  if (!win || win.isDestroyed()) return;
+  const { ASPECT_RATIO, MIN_WIDTH, MIN_HEIGHT } = getMods().windowSize;
+  const ratio = ASPECT_RATIO || 9 / 16;
+
+  win.setMinimumSize(liveOutput ? size.width : MIN_WIDTH || 360, liveOutput ? size.height : MIN_HEIGHT || 640);
+  if (liveOutput) {
+    win.setMaximumSize(size.width, size.height);
+    win.setResizable(false);
+  } else {
+    // 解除 liveOutput 的锁高；仍靠 setAspectRatio 保持 9:16
+    const work = screen.getPrimaryDisplay()?.workAreaSize || { width: 1920, height: 1080 };
+    win.setMaximumSize(Math.max(work.width, 1200), Math.max(work.height, 1920));
+    win.setResizable(true);
+  }
+  win.setMaximizable(false);
+  win.setFullScreenable(false);
+  win.setContentSize(size.width, size.height);
+  win.setAspectRatio(ratio);
+}
+
 function applyWindowSettings(win) {
   if (!win) return;
   const { loadSettings } = getMods().settings;
-  const { resolveWindowSize, ASPECT_RATIO } = getMods().windowSize;
+  const { resolveWindowSize } = getMods().windowSize;
   const overlay = loadSettings();
   const w = overlay.window || {};
   const liveOutput = w.liveOutput === true;
   const size = resolveWindowSize(w.width, w.height, screen.getDisplayMatching(win.getBounds()), {
     liveOutput,
   });
-  win.setContentSize(size.width, size.height);
-  if (!liveOutput) {
-    win.setAspectRatio(ASPECT_RATIO || 9 / 16);
-  } else {
-    // liveOutput 固定 1080×1920，解除手动拉伸比例锁
-    win.setAspectRatio(0);
-  }
+  lockWindowAspect(win, size, liveOutput);
+  persistResolvedWindowSize(size, liveOutput);
   win.setAlwaysOnTop(w.alwaysOnTop === true);
   win.webContents.send("window-mode-changed", {
     liveOutput: size.liveOutput === true,
@@ -163,26 +203,32 @@ function focusMainWindow() {
 }
 
 function createWindow({ onReadyToShow } = {}) {
-  const { resolveWindowSize, ASPECT_RATIO, MIN_WIDTH, MIN_HEIGHT } = getMods().windowSize;
+  const { resolveWindowSize, MIN_WIDTH, MIN_HEIGHT } = getMods().windowSize;
   const { confirmUpdateHealth } = getMods().update;
   const config = loadConfig();
   const winCfg = config.window || {};
   const liveOutput = winCfg.liveOutput === true;
-  const size = resolveWindowSize(winCfg.width, winCfg.height, null, {
+  const size = resolveWindowSize(winCfg.width, winCfg.height, screen.getPrimaryDisplay(), {
     liveOutput,
   });
+  // 启动时写回纠正后的 9:16，避免下次继续读到横向/错误比例
+  persistResolvedWindowSize(size, liveOutput);
 
   mainWindow = new BrowserWindow({
     width: size.width,
     height: size.height,
-    minWidth: MIN_WIDTH || 360,
-    minHeight: MIN_HEIGHT || 640,
+    minWidth: liveOutput ? size.width : MIN_WIDTH || 360,
+    minHeight: liveOutput ? size.height : MIN_HEIGHT || 640,
+    maxWidth: liveOutput ? size.width : undefined,
+    maxHeight: liveOutput ? size.height : undefined,
     frame: false,
     autoHideMenuBar: true,
     title: "",
     transparent: winCfg.transparent === true,
     alwaysOnTop: winCfg.alwaysOnTop === true,
-    resizable: true,
+    resizable: !liveOutput,
+    maximizable: false,
+    fullscreenable: false,
     hasShadow: true,
     useContentSize: true,
     backgroundColor: winCfg.transparent === true ? "#00000000" : "#050a0b",
@@ -196,10 +242,7 @@ function createWindow({ onReadyToShow } = {}) {
     },
   });
 
-  mainWindow.setContentSize(size.width, size.height);
-  if (!liveOutput) {
-    mainWindow.setAspectRatio(ASPECT_RATIO || 9 / 16);
-  }
+  lockWindowAspect(mainWindow, size, liveOutput);
   mainWindow.setAlwaysOnTop(winCfg.alwaysOnTop === true);
   mainWindow.setMenu(null);
   mainWindow.setMenuBarVisibility(false);
@@ -215,6 +258,8 @@ function createWindow({ onReadyToShow } = {}) {
   mainWindow.once("ready-to-show", async () => {
     splashController?.close();
     splashController = null;
+    // show 后再锁一次，避免 Windows 在展示时丢掉 aspect / 尺寸
+    lockWindowAspect(mainWindow, size, liveOutput);
     mainWindow.show();
     onReadyToShow?.();
     try {
@@ -224,6 +269,18 @@ function createWindow({ onReadyToShow } = {}) {
     } catch (error) {
       console.warn("更新健康确认失败:", error.message);
     }
+  });
+
+  // 兜底：系统仍触发最大化时立刻还原为当前 9:16 内容尺寸
+  mainWindow.on("maximize", () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.unmaximize();
+    applyWindowSettings(mainWindow);
+  });
+  mainWindow.on("enter-full-screen", () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.setFullScreen(false);
+    applyWindowSettings(mainWindow);
   });
 
   mainWindow.on("closed", () => {

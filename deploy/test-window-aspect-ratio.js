@@ -34,6 +34,7 @@ const {
   ASPECT_RATIO,
   DESIGN_WIDTH,
   DESIGN_HEIGHT,
+  isNearAspect,
 } = require(path.join(__dirname, "..", "lib", "window-size.js"));
 
 Module._load = originalLoad;
@@ -52,28 +53,32 @@ function main() {
   assert.ok(nearlyAspect(def.width, def.height), "default 9:16");
   assert.strictEqual(def.liveOutput, false);
 
-  // 525×1080 输入 → 归一成 9:16（约 525×933）
+  // 525×1080 错误比例 → 回退默认可视 540×960（不再沿用错误宽度）
   const bad = resolveWindowSize(525, 1080);
-  assert.strictEqual(bad.width, 525, "525 width kept");
-  assert.strictEqual(bad.height, Math.round((525 * 16) / 9), "525 → height 933");
-  assert.strictEqual(bad.height, 933);
-  assert.ok(nearlyAspect(bad.width, bad.height), "525 normalized to 9:16");
-  assert.ok(Math.abs(bad.width / bad.height - 1080 / 1920) < 0.01);
+  assert.strictEqual(bad.width, 540, "bad aspect resets to default width");
+  assert.strictEqual(bad.height, 960, "bad aspect resets to default height");
+  assert.ok(nearlyAspect(bad.width, bad.height), "525×1080 normalized to 9:16");
+  assert.ok(!isNearAspect(525, 1080), "525×1080 is not near 9:16");
 
-  // 600×900 输入 → 归一成 9:16（工作区足够时保持宽 600）
+  // 1000×900 / 1920×1080 横向错误尺寸 → 同样回退默认
+  const landscape = resolveWindowSize(1000, 900);
+  assert.strictEqual(landscape.width, 540);
+  assert.strictEqual(landscape.height, 960);
+
+  // 已是 9:16 的 600×1067：工作区足够时保持宽 600
   const tallDisplay = {
     workArea: { width: 1920, height: 1400, x: 0, y: 0 },
   };
-  const wide = resolveWindowSize(600, 900, tallDisplay);
+  const wide = resolveWindowSize(600, Math.round((600 * 16) / 9), tallDisplay);
   assert.strictEqual(wide.width, 600);
   assert.strictEqual(wide.height, Math.round((600 * 16) / 9)); // 1067
-  assert.ok(nearlyAspect(wide.width, wide.height), "600×900 → 9:16");
+  assert.ok(nearlyAspect(wide.width, wide.height), "600×1067 stays 9:16");
 
   // 工作区不够高时：限高后反推宽度，仍保持 9:16
   const shortDisplay = {
     workArea: { width: 1920, height: 1040, x: 0, y: 0 },
   };
-  const wideClamped = resolveWindowSize(600, 900, shortDisplay);
+  const wideClamped = resolveWindowSize(600, Math.round((600 * 16) / 9), shortDisplay);
   assert.ok(wideClamped.height <= 1040 - 60, "600 height clamped to work area");
   assert.ok(nearlyAspect(wideClamped.width, wideClamped.height), "600 clamped still 9:16");
   assert.ok(Math.abs(wideClamped.width / wideClamped.height - 1080 / 1920) < 0.01);
@@ -99,7 +104,7 @@ function main() {
   console.log("test-window-aspect-ratio: OK");
   console.log(`  540×960 default`);
   console.log(`  525×1080 → ${bad.width}×${bad.height}`);
-  console.log(`  600×900 → ${wide.width}×${wide.height}`);
+  console.log(`  600×1067 → ${wide.width}×${wide.height}`);
   console.log(`  liveOutput ${live.width}×${live.height}`);
 }
 
