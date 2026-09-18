@@ -38,7 +38,7 @@ async function main() {
 
   if (!direct || !direct.buffer) {
     // 无候选但非验证码：按外网不稳定处理，禁止冒充成功
-    if (direct?.reason === "no-candidate" || direct?.reason === "quality") {
+    if (direct?.reason === "no-candidate" || direct?.reason === "no_candidate" || direct?.reason === "quality" || direct?.reason === "quality_rejected") {
       console.log(`SKIP poster-google-e2e: Google returned no acceptable poster (${direct.reason})`);
       console.log(direct);
       process.exit(2);

@@ -51,6 +51,7 @@
     "test:poster-resolver": "node deploy/test-poster-resolver.js",
     "test:poster-packaged-path": "node deploy/test-poster-packaged-path.js",
     "test:poster-google-e2e": "node deploy/test-poster-google-e2e.js",
+    "test:poster-provider-fallback": "node deploy/test-poster-provider-fallback.js",
     "test:chrome-discovery": "node deploy/test-chrome-discovery.js",
     "capture:large-font-posters": "node deploy/capture-large-font-posters.js",
     "verify:poster-packaged-exe": "node deploy/verify-poster-packaged-exe.js",

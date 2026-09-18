@@ -38,6 +38,12 @@ deploy/.update-command.json
 deploy/aliyun.json
 deploy/github.json
 
+# 海报验收产物（正式运行缓存在 app userData/poster-cache，禁止入库）
+ui/tmp-posters/
+ui/_captures/
+ui/final-large-font-*.png
+ui/poster-live-resolve.png
+
 # 媒体大文件（本地保留，不入库）
 ui/trailers/*.mp4
 ui/trailers/_sample.mp4
