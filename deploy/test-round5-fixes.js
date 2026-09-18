@@ -425,8 +425,8 @@ function testBubbleDurationCss() {
   assert.strictEqual(sanitizeSettings({}).bubble.durationMs, 2000);
   assert.strictEqual(sanitizeSettings({ bubble: { durationMs: 1800 } }).bubble.durationMs, 1800);
   assert.strictEqual(sanitizeSettings({ bubble: { durationMs: 3000 } }).bubble.durationMs, 3000);
-  assert.strictEqual(sanitizeSettings({ pollIntervalMs: 3000 }).pollIntervalMs, 3000);
-  assert.strictEqual(DEFAULT_SETTINGS.pollIntervalMs, 3000);
+  assert.strictEqual(sanitizeSettings({ pollIntervalMs: 5000 }).pollIntervalMs, 5000);
+  assert.strictEqual(DEFAULT_SETTINGS.pollIntervalMs, 5000);
 
   assert.match(css, /--bubble-duration:\s*2000ms/);
   assert.match(css, /animation:\s*inlineDeltaFloat\s+var\(--bubble-duration/);

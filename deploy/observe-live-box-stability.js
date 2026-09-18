@@ -13,7 +13,7 @@ const { chromium } = require("playwright");
 const ROOT = path.resolve(__dirname, "..");
 const OUT_DIR = path.join(ROOT, "audit-data", "live-box-observe");
 const OBSERVE_MS = Number(process.env.OBSERVE_MS || 10 * 60 * 1000);
-const INTERVAL_MS = Number(process.env.OBSERVE_INTERVAL_MS || 15_000);
+const INTERVAL_MS = Number(process.env.OBSERVE_INTERVAL_MS || 5_000);
 const PUA_HTML = "&#xe6d5;&#xe701;&#xe6a2;&#xe6d5;";
 
 function chromePath() {
