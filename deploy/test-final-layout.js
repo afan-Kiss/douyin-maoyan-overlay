@@ -17,6 +17,7 @@ const OUT = {
   final: path.join(UI_DIR, "final-1080x1920.png"),
   posters: path.join(UI_DIR, "posters-resolved.png"),
   guide: path.join(UI_DIR, "interaction-guide.png"),
+  votes: path.join(UI_DIR, "final-vote-counts-1080x1920.png"),
 };
 
 async function inspectLayout(page) {
@@ -67,9 +68,11 @@ async function inspectLayout(page) {
         box: box(card.querySelector('[data-metric="dailyBox"]')),
         boxRate: box(card.querySelector('[data-field="boxRate"]')),
         showRate: box(card.querySelector('[data-field="showCountRate"]')),
+        good: box(card.querySelector("[data-good-user-count]")),
+        bad: box(card.querySelector("[data-bad-user-count]")),
         score: box(card.querySelector("[data-live-score]")),
       };
-      const order = ["rank", "film", "box", "boxRate", "showRate", "score"];
+      const order = ["rank", "film", "box", "boxRate", "showRate", "good", "bad", "score"];
       for (let i = 0; i < order.length - 1; i++) {
         const a = cells[order[i]];
         const b = cells[order[i + 1]];
@@ -142,6 +145,38 @@ async function main() {
         height: Math.min(1920 - guideClip.top + 8, guideClip.height + 16),
       },
     });
+
+    await page.evaluate((movies) => {
+      const samples = [
+        { goodUserCount: 128, badUserCount: 23 },
+        { goodUserCount: 12000, badUserCount: 999 },
+        { goodUserCount: 0, badUserCount: 0 },
+      ];
+      movies.forEach((movie, index) => {
+        const sample = samples[index] || { goodUserCount: 8, badUserCount: 1 };
+        window.__movieInteraction.setMovieStats(movie.movieId, sample);
+        window.__racePreview.renderList(movies);
+      });
+    }, movies);
+    const voteSnap = await page.evaluate(() =>
+      [...document.querySelectorAll(".race-card")].slice(0, 3).map((card) => ({
+        good: card.querySelector("[data-good-user-count]")?.textContent?.trim(),
+        bad: card.querySelector("[data-bad-user-count]")?.textContent?.trim(),
+      })),
+    );
+    assert.deepStrictEqual(voteSnap[0], { good: "128", bad: "23" });
+    assert.deepStrictEqual(voteSnap[1], { good: "1.2万", bad: "999" });
+    assert.deepStrictEqual(voteSnap[2], { good: "0", bad: "0" });
+    const afterVotes = await inspectLayout(page);
+    assert.strictEqual(afterVotes.issues.length, 0, afterVotes.issues.join("; "));
+    await page.screenshot({ path: OUT.votes, fullPage: false });
+
+    const half = await browser.newPage();
+    await openPreview(half, baseUrl, { width: 540, height: 960, liveOutput: false });
+    await paintMovies(half, movies);
+    const halfReport = await inspectLayout(half);
+    assert.strictEqual(halfReport.issues.length, 0, `540: ${halfReport.issues.join("; ")}`);
+    await half.close();
 
     console.log("PASS final-layout");
     console.log("Layout:", {

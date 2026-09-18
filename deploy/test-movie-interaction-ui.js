@@ -116,10 +116,17 @@ async function main() {
       const scores = [...document.querySelectorAll("[data-live-score]")].map((el) =>
         el.textContent.trim(),
       );
+      const goods = [...document.querySelectorAll("[data-good-user-count]")].map((el) =>
+        el.textContent.trim(),
+      );
+      const bads = [...document.querySelectorAll("[data-bad-user-count]")].map((el) =>
+        el.textContent.trim(),
+      );
       return {
         title: document.querySelector(".ix-title")?.textContent?.trim(),
         cloudCount: demoItems.length,
         scoresAllZero: scores.every((s) => s === "0"),
+        votesAllZero: goods.every((s) => s === "0") && bads.every((s) => s === "0"),
         body: document.body.innerText,
         duration: window.__movieInteraction.SCORE_BUBBLE_DURATION_MS,
         scroll: {
@@ -133,7 +140,9 @@ async function main() {
     assert.strictEqual(normal.title, "电影互动榜");
     assert.strictEqual(normal.cloudCount, 0, "正常模式不应有假弹幕");
     assert.ok(normal.scoresAllZero, "正常模式评分应为 0");
+    assert.ok(normal.votesAllZero, "正式模式禁止生成假人数");
     assert.ok(!/好看推荐|不好看啊/.test(normal.body));
+    assert.ok(/好看/.test(normal.body) && /不好看/.test(normal.body));
     assert.ok(/直播间评分/.test(normal.body));
     assert.ok(/互动方式/.test(normal.body));
     assert.ok(/1钻/.test(normal.body) && /10分/.test(normal.body));
@@ -176,9 +185,17 @@ async function main() {
       const bubble = document.querySelector(".score-bubble");
       const cloudCount = document.querySelectorAll(".ix-cloud__item").length;
       const viewer = document.getElementById("ix-viewer-count")?.textContent || "";
+      const goods = [...document.querySelectorAll("[data-good-user-count]")].map((el) =>
+        el.textContent.trim(),
+      );
+      const bads = [...document.querySelectorAll("[data-bad-user-count]")].map((el) =>
+        el.textContent.trim(),
+      );
       return {
         scores,
         hasNonZero: scores.some((s) => s !== "0"),
+        goods,
+        bads,
         bubbleText: bubble?.textContent || "",
         cloudCount,
         viewer,
@@ -188,6 +205,8 @@ async function main() {
 
     assert.ok(demo.isDemo, "demo class");
     assert.ok(demo.hasNonZero, "demo 模式应有非零评分");
+    assert.ok(demo.goods.includes("328") && demo.bads.includes("42"), `demo TOP1 人数 ${demo.goods}/${demo.bads}`);
+    assert.ok(demo.goods.includes("251") && demo.bads.includes("67"), "demo TOP2 人数");
     assert.ok(demo.cloudCount > 0, "demo 模式应有弹幕");
     assert.ok(/张三/.test(demo.bubbleText) && /300/.test(demo.bubbleText), "评分气泡文案");
     assert.ok(/万/.test(demo.viewer) || /\d/.test(demo.viewer), "在线人数");

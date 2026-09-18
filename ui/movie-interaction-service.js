@@ -88,6 +88,32 @@ export function toCatalogPayload(movies) {
     .filter((m) => m.movieId);
 }
 
+/** 好看/不好看人数：非法值 → 0，禁止负数 */
+export function normalizeUserCount(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.trunc(n));
+}
+
+/** 标准化 /scores 单条电影记录 */
+export function normalizeScoreMovie(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const movieId = String(raw.movieId ?? raw.id ?? "").trim();
+  if (!movieId) return null;
+  const scoreNum = Number(raw.score);
+  return {
+    movieId,
+    movieName: String(raw.movieName ?? raw.name ?? "").trim(),
+    score: Number.isFinite(scoreNum) ? scoreNum : 0,
+    goodUserCount: normalizeUserCount(raw.goodUserCount),
+    badUserCount: normalizeUserCount(raw.badUserCount),
+  };
+}
+
+export function normalizeScoreMovies(list) {
+  return (Array.isArray(list) ? list : []).map(normalizeScoreMovie).filter(Boolean);
+}
+
 /**
  * 将 LiveAssistant / 扁平 mock 事件统一为 UI 消费结构。
  * 生产优先读 event.data。
@@ -230,11 +256,12 @@ export function createMovieInteractionService(options = {}) {
     const url = joinUrl(baseUrl, "scores");
     try {
       const data = await requestJson(url, { timeoutMs });
-      const movies = Array.isArray(data?.movies)
+      const rawList = Array.isArray(data?.movies)
         ? data.movies
         : Array.isArray(data)
           ? data
           : [];
+      const movies = normalizeScoreMovies(rawList);
       online = true;
       logApi("info", "scores-ok", { ok: true, endpoint: "scores", count: movies.length });
       return { ok: true, online: true, movies };

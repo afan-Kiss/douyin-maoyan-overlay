@@ -1,5 +1,5 @@
 /**
- * 电影互动榜 UI：在线人数、直播间评分、评分气泡、弹幕球、LiveAssistant 轮询。
+ * 电影互动榜 UI：在线人数、直播间评分、好看/不好看人数、评分气泡、弹幕球、LiveAssistant 轮询。
  * 与票房状态机隔离。
  */
 
@@ -13,6 +13,7 @@ import {
   createMovieInteractionService,
   createMovieInteractionPoller,
   DEFAULT_MOVIE_INTERACTION_BASE,
+  normalizeUserCount,
 } from "./movie-interaction-service.js";
 
 function $(id) {
@@ -36,6 +37,15 @@ function formatViewerCount(count) {
     return `${text}万`;
   }
   return String(Math.round(n));
+}
+
+/** 好看/不好看人数展示：<1万原数字，>=1万最多1位小数+万 */
+function formatVoteCount(count) {
+  const n = normalizeUserCount(count);
+  if (n < 10000) return String(n);
+  const wan = n / 10000;
+  const text = wan >= 100 ? wan.toFixed(0) : wan.toFixed(1).replace(/\.0$/, "");
+  return `${text}万`;
 }
 
 function formatScore(score) {
@@ -82,6 +92,20 @@ function resolveInteractionBaseUrl() {
 
 const DEMO_SCORE_PRESETS = [28000, 2400, 1200, -300, 8600, 150, -1200, 42000, 980, -50];
 
+/** Demo 模拟人数（仅 interactionDemo=1）；正式模式禁止生成假人数 */
+const DEMO_VOTE_PRESETS = [
+  { goodUserCount: 328, badUserCount: 42 },
+  { goodUserCount: 251, badUserCount: 67 },
+  { goodUserCount: 128, badUserCount: 23 },
+  { goodUserCount: 12000, badUserCount: 999 },
+  { goodUserCount: 0, badUserCount: 0 },
+  { goodUserCount: 86, badUserCount: 19 },
+  { goodUserCount: 540, badUserCount: 110 },
+  { goodUserCount: 9999, badUserCount: 8 },
+  { goodUserCount: 1560, badUserCount: 220 },
+  { goodUserCount: 44, badUserCount: 12 },
+];
+
 const DEMO_DANMAKU = [
   { nickname: "小明", content: "哪吒好评" },
   { nickname: "阿杰", content: "这部电影不错" },
@@ -101,6 +125,8 @@ export function createMovieInteractionUi(options = {}) {
 
   /** @type {Map<string, number>} */
   const scores = new Map();
+  /** @type {Map<string, { goodUserCount: number, badUserCount: number }>} */
+  const movieStats = new Map();
   /** @type {Array<{ movieId: string, name: string, rank: number }>} */
   let catalog = [];
   let viewerCount = null;
@@ -172,6 +198,10 @@ export function createMovieInteractionUi(options = {}) {
     return card?.querySelector?.("[data-live-score]") || null;
   }
 
+  function findCard(movieId) {
+    return document.querySelector(`.race-card[data-movie-id="${cssEscapeAttr(String(movieId))}"]`);
+  }
+
   function paintScore(movieId, score, { pulse = false } = {}) {
     const el = findScoreEl(movieId);
     if (!el) return;
@@ -195,6 +225,44 @@ export function createMovieInteractionUi(options = {}) {
 
   function getMovieScore(movieId) {
     return scores.get(String(movieId)) || 0;
+  }
+
+  function paintMovieStats(movieId) {
+    const id = String(movieId || "");
+    if (!id) return;
+    const card = findCard(id);
+    if (!card) return;
+    const stats = movieStats.get(id) || { goodUserCount: 0, badUserCount: 0 };
+    const goodEl = card.querySelector("[data-good-user-count]");
+    const badEl = card.querySelector("[data-bad-user-count]");
+    const goodText = formatVoteCount(stats.goodUserCount);
+    const badText = formatVoteCount(stats.badUserCount);
+    if (goodEl && goodEl.textContent !== goodText) goodEl.textContent = goodText;
+    if (badEl && badEl.textContent !== badText) badEl.textContent = badText;
+  }
+
+  function setMovieStats(movieId, stats = {}) {
+    const id = String(movieId || "");
+    if (!id) return;
+    const next = {
+      goodUserCount: normalizeUserCount(stats.goodUserCount),
+      badUserCount: normalizeUserCount(stats.badUserCount),
+    };
+    const prev = movieStats.get(id);
+    if (
+      prev &&
+      prev.goodUserCount === next.goodUserCount &&
+      prev.badUserCount === next.badUserCount
+    ) {
+      return;
+    }
+    movieStats.set(id, next);
+    paintMovieStats(id);
+  }
+
+  function getMovieStats(movieId) {
+    const id = String(movieId || "");
+    return movieStats.get(id) || { goodUserCount: 0, badUserCount: 0 };
   }
 
   function matchCatalogMovie(movieId, movieName) {
@@ -226,10 +294,21 @@ export function createMovieInteractionUi(options = {}) {
           const idx = Math.max(0, (Number(m.rank) || 1) - 1);
           scores.set(m.movieId, DEMO_SCORE_PRESETS[idx % DEMO_SCORE_PRESETS.length]);
         }
+        if (!movieStats.has(m.movieId)) {
+          const idx = Math.max(0, (Number(m.rank) || 1) - 1);
+          const preset = DEMO_VOTE_PRESETS[idx % DEMO_VOTE_PRESETS.length];
+          movieStats.set(m.movieId, {
+            goodUserCount: preset.goodUserCount,
+            badUserCount: preset.badUserCount,
+          });
+        }
       }
     } else {
       for (const m of catalog) {
         if (!scores.has(m.movieId)) scores.set(m.movieId, 0);
+        if (!movieStats.has(m.movieId)) {
+          movieStats.set(m.movieId, { goodUserCount: 0, badUserCount: 0 });
+        }
       }
       // 真实 TOP10 变化时同步给 LiveAssistant（签名去重；失败不影响票房）
       if (catalog.length) {
@@ -238,6 +317,7 @@ export function createMovieInteractionUi(options = {}) {
     }
     for (const m of catalog) {
       paintScore(m.movieId, scores.get(m.movieId) || 0);
+      paintMovieStats(m.movieId);
     }
   }
 
@@ -248,9 +328,14 @@ export function createMovieInteractionUi(options = {}) {
       const id = matched?.movieId || String(item.movieId || "");
       if (!id) continue;
       const score = Number(item.score);
-      if (!Number.isFinite(score)) continue;
-      const prev = scores.get(id);
-      setMovieScore(id, score, { pulse: prev != null && prev !== Math.trunc(score) });
+      if (Number.isFinite(score)) {
+        const prev = scores.get(id);
+        setMovieScore(id, score, { pulse: prev != null && prev !== Math.trunc(score) });
+      }
+      setMovieStats(id, {
+        goodUserCount: item.goodUserCount,
+        badUserCount: item.badUserCount,
+      });
     }
   }
 
@@ -312,6 +397,8 @@ export function createMovieInteractionUi(options = {}) {
     catalog.forEach((m, index) => {
       const score = DEMO_SCORE_PRESETS[index % DEMO_SCORE_PRESETS.length];
       setMovieScore(m.movieId, score);
+      const votes = DEMO_VOTE_PRESETS[index % DEMO_VOTE_PRESETS.length];
+      setMovieStats(m.movieId, votes);
     });
   }
 
@@ -396,6 +483,9 @@ export function createMovieInteractionUi(options = {}) {
     updateMovieCatalog,
     setMovieScore,
     getMovieScore,
+    setMovieStats,
+    getMovieStats,
+    paintMovieStats,
     addDanmaku,
     showMovieScoreBubble,
     clearScoreBubbles: () => bubbleLayer.clear(),
@@ -406,6 +496,7 @@ export function createMovieInteractionUi(options = {}) {
     destroy,
     isDemo: isInteractionDemoEnabled,
     formatScore,
+    formatVoteCount,
     SCORE_BUBBLE_DURATION_MS,
     SCORE_BUBBLE_MAX_VISIBLE,
     service,
@@ -423,6 +514,7 @@ export function createMovieInteractionUi(options = {}) {
 export {
   formatClock,
   formatViewerCount,
+  formatVoteCount,
   formatScore,
   scoreTone,
   isInteractionDemoEnabled,

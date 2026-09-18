@@ -203,8 +203,20 @@ async function main() {
   const state = {
     offline: false,
     scores: [
-      { movieId: "1001", movieName: "哪吒之魔童闹海", score: 300000 },
-      { movieId: "1002", movieName: "封神第二部", score: -2000 },
+      {
+        movieId: "1001",
+        movieName: "哪吒之魔童闹海",
+        score: 300000,
+        goodUserCount: 128,
+        badUserCount: 23,
+      },
+      {
+        movieId: "1002",
+        movieName: "封神第二部",
+        score: -2000,
+        goodUserCount: 0,
+        badUserCount: 0,
+      },
     ],
     events: [],
     lastAfter: null,
@@ -310,15 +322,118 @@ async function main() {
     assert.ok(state.postedCatalogs.length > postsBefore, "变化后应重新 POST");
     assert.ok(post3.signature, "变化后签名应更新");
 
-    // scores
-    await page.evaluate(async () => {
+    // scores + good/bad normalize
+    const scoresResult = await page.evaluate(async () => {
       const result = await window.__movieInteraction.service.fetchScores();
       window.__movieInteraction.applyRemoteScores(result.movies || []);
+      return {
+        movies: result.movies,
+        stats1001: window.__movieInteraction.getMovieStats("1001"),
+        stats1002: window.__movieInteraction.getMovieStats("1002"),
+        score1001: window.__movieInteraction.getMovieScore("1001"),
+        dom: [...document.querySelectorAll(".race-card")].map((card) => ({
+          id: card.dataset.movieId,
+          good: card.querySelector("[data-good-user-count]")?.textContent?.trim(),
+          bad: card.querySelector("[data-bad-user-count]")?.textContent?.trim(),
+          score: card.querySelector("[data-live-score]")?.textContent?.trim(),
+        })),
+      };
     });
-    const scoresSnap = await page.evaluate(() =>
-      [...document.querySelectorAll("[data-live-score]")].map((el) => el.textContent.trim()),
+    assert.strictEqual(scoresResult.movies[0].goodUserCount, 128);
+    assert.strictEqual(scoresResult.movies[0].badUserCount, 23);
+    assert.strictEqual(scoresResult.movies[1].goodUserCount, 0);
+    assert.strictEqual(scoresResult.movies[1].badUserCount, 0);
+    assert.strictEqual(scoresResult.stats1001.goodUserCount, 128);
+    assert.strictEqual(scoresResult.stats1001.badUserCount, 23);
+    assert.ok(scoresResult.dom.some((d) => d.good === "128" && d.bad === "23"));
+    assert.ok(scoresResult.dom.some((d) => /300/.test(d.score || "")));
+
+    // 缺字段 / 负数 → 0；同 movie score 更新时人数一起刷新
+    state.scores = [
+      {
+        movieId: "1001",
+        movieName: "哪吒之魔童闹海",
+        score: 300500,
+        goodUserCount: undefined,
+        badUserCount: null,
+      },
+      {
+        movieId: "1002",
+        movieName: "封神第二部",
+        score: -1500,
+        goodUserCount: -9,
+        badUserCount: -3.7,
+      },
+    ];
+    const normalizedEdge = await page.evaluate(async () => {
+      const result = await window.__movieInteraction.service.fetchScores();
+      window.__movieInteraction.applyRemoteScores(result.movies || []);
+      return {
+        movies: result.movies,
+        stats1001: window.__movieInteraction.getMovieStats("1001"),
+        stats1002: window.__movieInteraction.getMovieStats("1002"),
+        score1001: window.__movieInteraction.getMovieScore("1001"),
+        score1002: window.__movieInteraction.getMovieScore("1002"),
+      };
+    });
+    assert.deepStrictEqual(
+      {
+        good: normalizedEdge.movies[0].goodUserCount,
+        bad: normalizedEdge.movies[0].badUserCount,
+      },
+      { good: 0, bad: 0 },
     );
-    assert.ok(scoresSnap.some((s) => /300/.test(s)), `scores=${scoresSnap}`);
+    assert.deepStrictEqual(
+      {
+        good: normalizedEdge.movies[1].goodUserCount,
+        bad: normalizedEdge.movies[1].badUserCount,
+      },
+      { good: 0, bad: 0 },
+    );
+    assert.strictEqual(normalizedEdge.stats1001.goodUserCount, 0);
+    assert.strictEqual(normalizedEdge.stats1002.badUserCount, 0);
+    assert.strictEqual(normalizedEdge.score1001, 300500);
+    assert.strictEqual(normalizedEdge.score1002, -1500);
+
+    // 大人数格式化
+    state.scores = [
+      {
+        movieId: "1001",
+        movieName: "哪吒之魔童闹海",
+        score: 300500,
+        goodUserCount: 9999,
+        badUserCount: 0,
+      },
+      {
+        movieId: "1002",
+        movieName: "封神第二部",
+        score: -1500,
+        goodUserCount: 12800,
+        badUserCount: 12000,
+      },
+    ];
+    const bigNums = await page.evaluate(async () => {
+      const result = await window.__movieInteraction.service.fetchScores();
+      window.__movieInteraction.applyRemoteScores(result.movies || []);
+      const format = window.__movieInteraction.formatVoteCount;
+      return {
+        t0: format(0),
+        t9999: format(9999),
+        t12800: format(12800),
+        t12000: format(12000),
+        dom: [...document.querySelectorAll(".race-card")].map((card) => ({
+          id: card.dataset.movieId,
+          good: card.querySelector("[data-good-user-count]")?.textContent?.trim(),
+          bad: card.querySelector("[data-bad-user-count]")?.textContent?.trim(),
+        })),
+      };
+    });
+    assert.strictEqual(bigNums.t0, "0");
+    assert.strictEqual(bigNums.t9999, "9999");
+    assert.ok(/^1\.3万$/.test(bigNums.t12800), `12800 → ${bigNums.t12800}`);
+    assert.strictEqual(bigNums.t12000, "1.2万");
+    assert.ok(bigNums.dom.some((d) => d.good === "9999"));
+    assert.ok(bigNums.dom.some((d) => d.good === "1.3万" && d.bad === "1.2万"));
 
     // 4/5) 真实嵌套 danmaku + movie_score
     // 先停 poller：page.clock.runFor 会推进 setInterval，否则会污染 after/cursor 断言

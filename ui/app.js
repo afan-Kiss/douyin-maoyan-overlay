@@ -2657,6 +2657,15 @@ function applyPosterSrc(img, poster) {
   img.setAttribute("src", next);
 }
 
+function formatRowVoteCount(count) {
+  if (typeof movieInteraction?.formatVoteCount === "function") {
+    return movieInteraction.formatVoteCount(count);
+  }
+  const n = Number(count);
+  if (!Number.isFinite(n) || n < 0) return "0";
+  return String(Math.trunc(n));
+}
+
 function raceCardTemplate(movie) {
   const poster = resolveRowPoster(movie);
   const score = movieInteraction?.getMovieScore?.(movie.movieId) || 0;
@@ -2665,6 +2674,12 @@ function raceCardTemplate(movie) {
       ? movieInteraction.formatScore(score)
       : String(score || 0);
   const tone = score > 0 ? "pos" : score < 0 ? "neg" : "zero";
+  const stats = movieInteraction?.getMovieStats?.(movie.movieId) || {
+    goodUserCount: 0,
+    badUserCount: 0,
+  };
+  const goodText = formatRowVoteCount(stats.goodUserCount);
+  const badText = formatRowVoteCount(stats.badUserCount);
   return `
     <span class="race-row__rank">${movie.rank}</span>
     <div class="race-row__film">
@@ -2677,6 +2692,8 @@ function raceCardTemplate(movie) {
     </div>
     <span class="race-row__rate" data-field="boxRate">${escapeHtml(formatRowRate(movie.boxRate))}</span>
     <span class="race-row__rate" data-field="showCountRate">${escapeHtml(formatRowRate(movie.showCountRate))}</span>
+    <span class="race-row__vote race-row__vote--good" data-good-user-count>${escapeHtml(goodText)}</span>
+    <span class="race-row__vote race-row__vote--bad" data-bad-user-count>${escapeHtml(badText)}</span>
     <span class="race-row__score" data-live-score data-tone="${tone}">${escapeHtml(scoreText)}</span>
   `;
 }
@@ -2767,7 +2784,11 @@ function updateRaceCard(card, movie, isNew = false, options = {}) {
     card.classList.add("is-flash");
   }
 
-  if (!card.querySelector('[data-metric="dailyBox"]')) {
+  if (
+    !card.querySelector('[data-metric="dailyBox"]') ||
+    !card.querySelector("[data-good-user-count]") ||
+    !card.querySelector("[data-bad-user-count]")
+  ) {
     card.innerHTML = raceCardTemplate(movie);
     updateRaceCardDelta(card, movie, synced);
     return;
@@ -2788,6 +2809,13 @@ function updateRaceCard(card, movie, isNew = false, options = {}) {
     formatRowRate(movie.showCountRate),
   );
 
+  const stats = movieInteraction?.getMovieStats?.(movie.movieId) || {
+    goodUserCount: 0,
+    badUserCount: 0,
+  };
+  setTextIfChanged(card.querySelector("[data-good-user-count]"), formatRowVoteCount(stats.goodUserCount));
+  setTextIfChanged(card.querySelector("[data-bad-user-count]"), formatRowVoteCount(stats.badUserCount));
+
   updateRaceCardDelta(card, movie, synced);
   trackBoxDelta();
 }
@@ -2802,7 +2830,12 @@ function ensureRaceCard(movie, options = {}) {
   movie = synced.movie;
   const key = String(movie.movieId);
   let card = cardPool.get(key);
-  if (!card || !card.classList.contains("race-card") || !card.querySelector('[data-metric="dailyBox"]')) {
+  if (
+    !card ||
+    !card.classList.contains("race-card") ||
+    !card.querySelector('[data-metric="dailyBox"]') ||
+    !card.querySelector("[data-good-user-count]")
+  ) {
     card?.remove();
     card = buildRaceCard(movie);
     cardPool.set(key, card);
@@ -2827,6 +2860,8 @@ function renderLoadingSkeleton() {
         <div class="metric race-row__box"><span class="metric__value skeleton-block">--</span></div>
         <span class="race-row__rate skeleton-block">--</span>
         <span class="race-row__rate skeleton-block">--</span>
+        <span class="race-row__vote race-row__vote--good skeleton-block">0</span>
+        <span class="race-row__vote race-row__vote--bad skeleton-block">0</span>
         <span class="race-row__score skeleton-block">0</span>
       </article>
     `;
