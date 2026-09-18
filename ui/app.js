@@ -93,9 +93,35 @@ import {
   FULL_ENRICH_GLOBAL_TIMEOUT_MS,
 } from "./enrich-scheduler.js";
 import { beginStartupSession, markStartup, flushStartupReport, getPreviousStartupReport } from "./startup-metrics.js";
+import {
+  isLoginRequiredStatus,
+  isSignatureIssueStatus,
+  shouldShowLoginButton,
+  buildStartupTimeoutMessage,
+  buildPipelineLoadingMessage,
+} from "./maoyan-startup-status.js";
 
 /** V2 主链：猫眼 → decode → Store → Renderer。旧 displayCache/prevValues 不再参与。 */
 const BOX_PIPELINE_V2 = true;
+
+/** 启动诊断：最近一次主榜失败原因（供超时文案，不含敏感信息） */
+let lastPipelineReason = "";
+let lastApiReady = false;
+let lastApiError = "";
+let earlyPaintDone = false;
+
+function logMaoyanDiag(tag, payload = {}) {
+  try {
+    const safe = {};
+    for (const [key, value] of Object.entries(payload || {})) {
+      if (/cookie|token|password|mtgsig|signKey|authorization/i.test(key)) continue;
+      safe[key] = value;
+    }
+    console.log(`[${tag}]`, safe);
+  } catch {
+    console.log(`[${tag}]`, payload);
+  }
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -3478,6 +3504,43 @@ function paintFromStoreSnapshot(projected, meta = {}) {
   flushPendingRiseEvents();
 }
 
+function paintEarlyStructuralMovies(movies, meta = {}) {
+  if (!Array.isArray(movies) || !movies.length) return false;
+  if (hasDisplayedData) return false;
+  earlyPaintDone = true;
+  const structural = movies.map((movie, index) =>
+    stabilizeMovie({
+      ...movie,
+      rank: Number(movie.rank) || index + 1,
+      todayBox: 0,
+      todayBoxText: "",
+      todayBoxHtml: "",
+      todayUnit: "万",
+      decodeStatus: DECODE_STATUS.ENCODED,
+      decodeVerified: false,
+      displayBoxWan: 0,
+    }),
+  );
+  latestMovies = structural;
+  latestParsedMeta = {
+    movies: structural,
+    nation: meta.nation || latestNation,
+    calendar: { today: meta.businessDate || "" },
+    fontContentKey: meta.fontKey || "",
+  };
+  renderList(structural, { holdBoxes: false, earlyStructural: true });
+  document.body.classList.add("is-ready");
+  // 仅退出骨架屏：票房仍为 --，hasDisplayedData 等真实 decode 发布后再置位
+  setStatus("loading", "榜单已加载，正在解码实时票房…");
+  logMaoyanDiag("MAOYAN_DASHBOARD", {
+    stage: "early_structural_paint",
+    movies: structural.length,
+    reason: meta.reason || "",
+  });
+  markStartup("firstRealFields");
+  return true;
+}
+
 const boxPipeline = createBoxPipeline({
   store: boxStore,
   pollIntervalMs: BOX_POLL_MS,
@@ -3486,6 +3549,9 @@ const boxPipeline = createBoxPipeline({
   getTopCount: () => getDisplayMovieCount(),
   onPublish: (projected, meta) => {
     paintFromStoreSnapshot(projected, meta);
+  },
+  onEarlyPaint: (payload) => {
+    paintEarlyStructuralMovies(payload?.movies || [], payload || {});
   },
 });
 
@@ -3683,37 +3749,65 @@ async function refreshData() {
     // V2：整轮由 boxPipeline 串行完成；重叠轮次内部 skip
     try {
       const apiStatus = await window.overlay?.getApiStatus?.();
+      lastApiReady = Boolean(apiStatus?.ready);
+      lastApiError = String(apiStatus?.error || "");
       if (apiStatus && !apiStatus.ready) {
         const recovered = await window.overlay?.ensureApi?.();
         if (recovered?.apiBase) config.apiBase = recovered.apiBase;
+        lastApiReady = Boolean(recovered?.ready);
+        lastApiError = String(recovered?.error || lastApiError);
         if (!recovered?.ready) {
+          lastPipelineReason = "service_down";
           if (!hasDisplayedData) setStatus("loading", "票房服务断开，正在自动恢复…");
+          logMaoyanDiag("MAOYAN_API", { ready: false, apiBase: config.apiBase, error: lastApiError });
+          await updateLoginButton();
           return;
         }
       }
       pollCount += 1;
+      logMaoyanDiag("MAOYAN_DASHBOARD", {
+        stage: "fetch_start",
+        apiBase: config.apiBase,
+        topCount: getDisplayMovieCount(),
+        pollCount,
+      });
       const result = await boxPipeline.runOnce({
         apiBase: config.apiBase,
         topCount: getDisplayMovieCount(),
       });
       if (result?.skipped) return;
+      if (result?.reason) lastPipelineReason = String(result.reason);
+      logMaoyanDiag("MAOYAN_DASHBOARD", {
+        stage: "fetch_done",
+        ok: Boolean(result?.ok),
+        reason: result?.reason || "",
+        moviesDecoded: result?.moviesDecoded ?? null,
+        moviesTotal: result?.moviesTotal ?? null,
+        httpStatus: result?.httpStatus ?? null,
+      });
       if (!result?.ok && !hasDisplayedData) {
-        if (result?.reason === "no_movies") setStatus("loading", "等待票房数据…");
-        else if (result?.reason === "map_not_ready" || result?.reason === "font_error") {
-          setStatus("loading", "正在解码票房字体…");
-        } else if (result?.reason === "fetch_error") {
-          setStatus("loading", "票房服务响应超时，正在自动恢复…");
+        const msg = buildPipelineLoadingMessage(result?.reason, true);
+        if (msg) setStatus("loading", msg);
+        if (result?.reason === "fetch_error") {
           const status = await window.overlay?.ensureApi?.();
           if (status?.apiBase) config.apiBase = status.apiBase;
         }
-      } else {
+        if (isLoginRequiredStatus(result?.session || {})) {
+          await updateLoginButton(true);
+        }
+      } else if (result?.ok) {
+        lastPipelineReason = "";
         setStatus("ok", "");
       }
       await updateLoginButton();
     } catch (e) {
       const msg = String(e.message || "");
+      lastPipelineReason = "fetch_error";
+      lastApiError = msg;
+      logMaoyanDiag("MAOYAN_DASHBOARD", { stage: "fetch_exception", error: msg.slice(0, 200) });
       if (!hasDisplayedData) setStatus("error", msg || "拉取数据失败，正在重试…");
       else setStatus("ok", "");
+      await updateLoginButton();
     }
     return;
   }
@@ -3936,61 +4030,31 @@ async function waitForApiReady() {
   }
 }
 
-function isLoginRequiredStatus(status) {
-  if (status?.loginRequired) return true;
-  const err = String(status?.lastVerifyError || "");
-  if (/^(login_required|detail_http_401|upstream_401|session_expired)$/.test(err)) return true;
-  if (
-    err === "sig_capture_failed" &&
-    status?.identityCookieExists &&
-    !status?.detailApiReady &&
-    !status?.signatureReady
-  ) {
-    return true;
-  }
-  if (err === "box_page_not_loaded" && status?.identityCookieExists && !status?.detailApiReady) {
-    return true;
-  }
-  return false;
-}
-
-function isSignatureIssueStatus(status) {
-  if (isLoginRequiredStatus(status)) return false;
-  const err = String(status?.lastVerifyError || "");
-  if (
-    /^(detail_http_403|upstream_403|403|mtgsig_not_captured|getboxshow_request_not_seen|sig_capture_failed)$/.test(
-      err,
-    ) || /mtgsig/i.test(err)
-  ) {
-    return true;
-  }
-  // 已有登录 Cookie 但签名明确不可用
-  if (
-    status?.identityCookieExists &&
-    status?.signatureReady === false &&
-    status?.sessionUsable === false
-  ) {
-    return true;
-  }
-  return false;
-}
-
 async function updateLoginButton(forceShow = false) {
   const btn = $("btn-login");
   if (!btn) return;
   const status = (await window.overlay?.getSessionStatus?.()) || {};
+  logMaoyanDiag("MAOYAN_SESSION", {
+    loginRequired: Boolean(status.loginRequired),
+    detailApiReady: Boolean(status.detailApiReady),
+    signatureReady: Boolean(status.signatureReady),
+    sessionUsable: Boolean(status.sessionUsable),
+    lastVerifyError: status.lastVerifyError || null,
+    forceShow: Boolean(forceShow),
+  });
 
   const needLogin = forceShow || isLoginRequiredStatus(status);
   const needSig = !needLogin && isSignatureIssueStatus(status);
+  const show = shouldShowLoginButton(status, forceShow);
 
-  if (needLogin || forceShow || needSig) {
+  if (show) {
     btn.classList.remove("is-hidden");
     btn.textContent = "登录";
     btn.title = needSig ? "猫眼签名不可用，点击登录或刷新签名" : "登录猫眼账号";
     return;
   }
 
-  // 已登录：弱化，不占直播画面中心
+  // 已登录或不需要登录：弱化，不占直播画面中心
   btn.classList.add("is-hidden");
   btn.textContent = "登录";
   btn.title = "登录猫眼账号";
@@ -4268,27 +4332,61 @@ async function init() {
 
   const apiStatus = await waitForApiReady();
   markStartup("serviceReady");
+  lastApiReady = Boolean(apiStatus?.ready);
+  lastApiError = String(apiStatus?.error || "");
+  logMaoyanDiag("MAOYAN_STARTUP", {
+    ready: lastApiReady,
+    apiBase: apiStatus?.apiBase || config.apiBase,
+    error: lastApiError,
+    detailApiReady: Boolean(apiStatus?.detailApiReady),
+    loginRequired: Boolean(apiStatus?.loginRequired),
+    signatureReady: Boolean(apiStatus?.signatureReady),
+  });
   if (!apiStatus?.ready) {
     setStatus("error", apiStatus?.error || "票房服务启动失败，5 秒后自动重试…");
+    await updateLoginButton(isLoginRequiredStatus(apiStatus));
     startServiceRetryLoop();
     return;
   }
 
   if (apiStatus.apiBase) config.apiBase = apiStatus.apiBase;
   setStatus("loading", "服务已就绪，正在拉取票房数据…");
+  // 主榜不依赖登录/明细：服务就绪后立即拉 dashboard
+  await updateLoginButton();
   bubbleAutoScheduler.start();
   startPolling();
   setTimeout(() => flushStartupReport(), 90_000);
 }
 
 setTimeout(() => {
-  if (hasDisplayedData) return;
-  if (statusEl?.classList.contains("status--loading")) {
-    setStatus(
-      "error",
-      "加载超时：请重启软件，或点击右上角「登录」完成猫眼登录；换电脑请先安装 Google Chrome"
-    );
-  }
+  void (async () => {
+    if (hasDisplayedData) return;
+    if (!statusEl?.classList.contains("status--loading") && !statusEl?.classList.contains("status--error")) {
+      return;
+    }
+    const session = (await window.overlay?.getSessionStatus?.()) || {};
+    const message = buildStartupTimeoutMessage({
+      hasDisplayedData,
+      apiReady: lastApiReady,
+      apiError: lastApiError,
+      pipelineReason: lastPipelineReason,
+      session,
+    });
+    if (!message) return;
+    setStatus("error", message);
+    if (isLoginRequiredStatus(session) || isSignatureIssueStatus(session)) {
+      await updateLoginButton(true);
+    } else {
+      await updateLoginButton(false);
+    }
+    logMaoyanDiag("MAOYAN_STARTUP", {
+      stage: "timeout_60s",
+      message,
+      pipelineReason: lastPipelineReason,
+      apiReady: lastApiReady,
+      earlyPaintDone,
+    });
+  })();
 }, 60_000);
 
 init().catch((err) => {

@@ -738,12 +738,18 @@ async function ensureMaoyanServiceInner(config) {
   migrateLegacyDataDir();
   const apiBase = buildApiBase(config);
   apiStatus = { ready: false, error: "", apiBase, ...getMaoyanSessionStatus() };
+  console.log("[MAOYAN_SERVICE]", {
+    stage: "ensure_start",
+    apiBase,
+    dataDir: getDataDir(),
+  });
 
   if (!hasServerDeps()) {
     apiStatus.error = isElectronPackaged()
       ? "内置依赖缺失，请重新安装或更新软件"
       : "缺少依赖，请在项目目录运行 npm run setup 完成安装";
     reportServiceIssue(apiStatus.error);
+    console.log("[MAOYAN_SERVICE]", { stage: "ensure_fail", reason: "missing_deps", apiBase });
     return apiStatus;
   }
 
@@ -752,6 +758,14 @@ async function ensureMaoyanServiceInner(config) {
     apiStatus.ready = true;
     Object.assign(apiStatus, getMaoyanSessionStatus());
     warmDashboardCache(apiBase);
+    console.log("[MAOYAN_SERVICE]", {
+      stage: "ready",
+      apiBase,
+      reused: true,
+      detailApiReady: Boolean(apiStatus.detailApiReady),
+      loginRequired: Boolean(apiStatus.loginRequired),
+    });
+    console.log("[MAOYAN_API]", { stage: "health_ok", apiBase });
     // 延后验签，先让首屏大盘出来（避免启动瞬间再起无头 Chrome）
     setTimeout(() => scheduleBackgroundVerify(apiBase, ownDataDir, { startup: true }), 12000);
     return apiStatus;
@@ -797,6 +811,14 @@ async function ensureMaoyanServiceInner(config) {
     apiStatus.error = "";
     Object.assign(apiStatus, getMaoyanSessionStatus());
     warmDashboardCache(apiBase);
+    console.log("[MAOYAN_SERVICE]", {
+      stage: "ready",
+      apiBase,
+      reused: false,
+      detailApiReady: Boolean(apiStatus.detailApiReady),
+      loginRequired: Boolean(apiStatus.loginRequired),
+    });
+    console.log("[MAOYAN_API]", { stage: "health_ok", apiBase });
     setTimeout(() => scheduleBackgroundVerify(apiBase, getDataDir(), { startup: true }), 12000);
   } else {
     const crash = summarizeChildCrash(child);
@@ -811,6 +833,11 @@ async function ensureMaoyanServiceInner(config) {
       apiStatus.error = "票房服务启动超时，请检查端口占用或浏览器是否可用";
     }
     reportServiceIssue(apiStatus.error);
+    console.log("[MAOYAN_SERVICE]", {
+      stage: "ensure_fail",
+      apiBase,
+      error: apiStatus.error,
+    });
     await shutdownMaoyanServiceAndWait();
   }
 

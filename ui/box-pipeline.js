@@ -45,6 +45,29 @@ function nowMs() {
   return typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
 }
 
+function logDashboardDiag(payload) {
+  try {
+    console.log("[MAOYAN_DASHBOARD]", payload);
+  } catch {
+    /* ignore */
+  }
+}
+
+function maybeEarlyPaint(store, onEarlyPaint, session, reason, fontKey = "") {
+  if (!onEarlyPaint) return;
+  const published = store?.getLastPublished?.();
+  if (Array.isArray(published?.movies) && published.movies.length > 0) return;
+  const movies = session?.parsed?.movies || [];
+  if (!movies.length) return;
+  onEarlyPaint({
+    movies,
+    nation: session?.parsed?.nation || null,
+    businessDate: session?.businessDate || "",
+    fontKey,
+    reason,
+  });
+}
+
 /** VERIFIED 或 INFERRED 且有映射表即可进入 V2 decode */
 export function isMapReadyForV2(contentKey) {
   const key = String(contentKey || "").trim();
@@ -718,6 +741,7 @@ export function projectSnapshotForRender(snapshot) {
  *   store?: ReturnType<typeof import('./box-store.js').createBoxStore>,
  *   fetchDashboardFn?: typeof fetchDashboard,
  *   onPublish?: (projected: object, meta: object) => void,
+ *   onEarlyPaint?: (payload: object) => void,
  *   getApiBase?: () => string,
  *   getTopCount?: () => number,
  *   pollIntervalMs?: number,
@@ -727,6 +751,7 @@ export function createBoxPipeline(options = {}) {
   const store = options.store || boxStore;
   const fetchFn = options.fetchDashboardFn || fetchDashboard;
   const onPublish = typeof options.onPublish === "function" ? options.onPublish : null;
+  const onEarlyPaint = typeof options.onEarlyPaint === "function" ? options.onEarlyPaint : null;
 
   // 生产主链固定 5000ms；options 仅测试可覆盖
   let pollIntervalMs =
@@ -781,8 +806,24 @@ export function createBoxPipeline(options = {}) {
           publish: false,
           rejectReason: "no_movies",
         });
-        return { ok: false, reason: "no_movies" };
+        logDashboardDiag({
+          stage: "parse",
+          pollId: thisPoll,
+          httpOk: true,
+          moviesParsed: 0,
+          publish: false,
+          reason: "no_movies",
+        });
+        return { ok: false, reason: "no_movies", moviesTotal: 0, moviesDecoded: 0 };
       }
+
+      logDashboardDiag({
+        stage: "parse",
+        pollId: thisPoll,
+        moviesParsed: moviesTotal,
+        hasFontStyle: Boolean(session.fontStyle),
+        businessDate,
+      });
 
       // 字体身份 + mapping（按 fontIdentity 缓存；不因 poll 作废）
       const tMap = nowMs();
@@ -836,7 +877,16 @@ export function createBoxPipeline(options = {}) {
               publish: false,
               rejectReason: "map_not_ready",
             });
-            return { ok: false, reason: "map_not_ready", fontKey };
+            logDashboardDiag({
+              stage: "decode",
+              pollId: thisPoll,
+              mapReady: false,
+              moviesParsed: moviesTotal,
+              publish: false,
+              reason: "map_not_ready",
+            });
+            maybeEarlyPaint(store, onEarlyPaint, session, "map_not_ready", fontKey);
+            return { ok: false, reason: "map_not_ready", fontKey, moviesTotal, moviesDecoded: 0 };
           }
         } catch (err) {
           mapMs = Math.round(nowMs() - tMap);
@@ -853,7 +903,16 @@ export function createBoxPipeline(options = {}) {
             publish: false,
             rejectReason: "font_error",
           });
-          return { ok: false, reason: "font_error", error: err };
+          logDashboardDiag({
+            stage: "decode",
+            pollId: thisPoll,
+            mapReady: false,
+            moviesParsed: moviesTotal,
+            publish: false,
+            reason: "font_error",
+          });
+          maybeEarlyPaint(store, onEarlyPaint, session, "font_error", fontKey);
+          return { ok: false, reason: "font_error", error: err, moviesTotal, moviesDecoded: 0 };
         }
       }
       mapMs = Math.round(nowMs() - tMap);
@@ -893,10 +952,21 @@ export function createBoxPipeline(options = {}) {
           rejectReason: gate.reason,
           rejectDetail: gate.detail || "",
         });
+        logDashboardDiag({
+          stage: "commit",
+          pollId: thisPoll,
+          publish: false,
+          reason: gate.reason,
+          moviesParsed: moviesTotal,
+          moviesDecoded: gate.moviesDecoded ?? moviesDecoded,
+          failedMovieIds: gate.failedMovieIds || [],
+        });
+        maybeEarlyPaint(store, onEarlyPaint, session, gate.reason, fontKey);
         return {
           ok: false,
           reason: gate.reason,
           candidate,
+          moviesTotal: gate.moviesTotal ?? moviesTotal,
           moviesDecoded: gate.moviesDecoded ?? moviesDecoded,
           failedMovieIds: gate.failedMovieIds || [],
         };
@@ -921,6 +991,15 @@ export function createBoxPipeline(options = {}) {
         publish: committed.ok,
         rejectReason: committed.ok ? "" : committed.reason,
       });
+      logDashboardDiag({
+        stage: "commit",
+        pollId: thisPoll,
+        publish: Boolean(committed.ok),
+        reason: committed.ok ? "published" : committed.reason,
+        moviesParsed: moviesTotal,
+        moviesDecoded,
+        renderCount: committed.ok ? (committed.snapshot?.movies || []).length : 0,
+      });
 
       if (committed.ok && onPublish) {
         const projected = projectSnapshotForRender(committed.snapshot);
@@ -935,10 +1014,11 @@ export function createBoxPipeline(options = {}) {
 
       return {
         ok: committed.ok,
-        reason: committed.reason,
+        reason: committed.ok ? "published" : committed.reason,
         snapshot: committed.snapshot,
         rises: committed.rises,
         moviesDecoded,
+        moviesTotal,
         pollId: thisPoll,
       };
     } catch (err) {
@@ -954,6 +1034,13 @@ export function createBoxPipeline(options = {}) {
         moviesDecoded,
         publish: false,
         rejectReason: "fetch_error",
+      });
+      logDashboardDiag({
+        stage: "fetch",
+        pollId: thisPoll,
+        publish: false,
+        reason: "fetch_error",
+        error: String(err?.message || err || "").slice(0, 200),
       });
       return { ok: false, reason: "fetch_error", error: err };
     } finally {

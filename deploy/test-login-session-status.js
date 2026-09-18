@@ -2,6 +2,8 @@
  * 登录态识别与按钮状态回归：node deploy/test-login-session-status.js
  */
 const assert = require("assert");
+const path = require("path");
+const { pathToFileURL } = require("url");
 const cap = require("../lib/session-capability");
 const { applySessionApiError } = require("../lib/session-status");
 
@@ -27,34 +29,14 @@ function testExpiredSessionMapsToLoginRequired() {
   console.log("PASS applySessionApiError login_required");
 }
 
-function testUiLoginRequiredHeuristic() {
-  const isLoginRequiredStatus = (status) => {
-    if (status?.loginRequired) return true;
-    const err = String(status?.lastVerifyError || "");
-    if (/^(login_required|detail_http_401|upstream_401|session_expired)$/.test(err)) return true;
-    if (
-      err === "sig_capture_failed" &&
-      status?.identityCookieExists &&
-      !status?.detailApiReady &&
-      !status?.signatureReady
-    ) {
-      return true;
-    }
-    if (err === "box_page_not_loaded" && status?.identityCookieExists && !status?.detailApiReady) {
-      return true;
-    }
-    return false;
-  };
-
-  const isSignatureIssueStatus = (status) => {
-    if (isLoginRequiredStatus(status)) return false;
-    const err = String(status?.lastVerifyError || "");
-    return (
-      /^(detail_http_403|upstream_403|403|mtgsig_not_captured|getboxshow_request_not_seen|sig_capture_failed)$/.test(
-        err,
-      ) || /mtgsig/i.test(err)
-    );
-  };
+async function testUiLoginRequiredHeuristic() {
+  const href = pathToFileURL(path.join(__dirname, "..", "ui", "maoyan-startup-status.js")).href;
+  const {
+    isLoginRequiredStatus,
+    isSignatureIssueStatus,
+    shouldShowLoginButton,
+    buildStartupTimeoutMessage,
+  } = await import(href);
 
   const expired = {
     identityCookieExists: true,
@@ -65,6 +47,7 @@ function testUiLoginRequiredHeuristic() {
   };
   assert.strictEqual(isLoginRequiredStatus(expired), true);
   assert.strictEqual(isSignatureIssueStatus(expired), false);
+  assert.strictEqual(shouldShowLoginButton(expired), true);
 
   const sigOnly = {
     identityCookieExists: true,
@@ -75,6 +58,7 @@ function testUiLoginRequiredHeuristic() {
   };
   assert.strictEqual(isLoginRequiredStatus(sigOnly), false);
   assert.strictEqual(isSignatureIssueStatus(sigOnly), true);
+  assert.strictEqual(shouldShowLoginButton(sigOnly), true);
 
   const loginRedirect = {
     identityCookieExists: true,
@@ -84,14 +68,25 @@ function testUiLoginRequiredHeuristic() {
   };
   assert.strictEqual(isLoginRequiredStatus(loginRedirect), true);
   assert.strictEqual(isSignatureIssueStatus(loginRedirect), false);
+
+  const noLoginBlame = buildStartupTimeoutMessage({
+    apiReady: false,
+    apiError: "票房服务启动失败",
+    session: { loginRequired: false },
+  });
+  assert.ok(!/点击.*登录/.test(noLoginBlame), noLoginBlame);
+
   console.log("PASS UI login vs signature button heuristics");
 }
 
-function main() {
+async function main() {
   testLoginRedirectDetection();
   testExpiredSessionMapsToLoginRequired();
-  testUiLoginRequiredHeuristic();
+  await testUiLoginRequiredHeuristic();
   console.log("\nALL PASSED (login session status)");
 }
 
-main();
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

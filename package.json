@@ -19,6 +19,7 @@
     "test:updater-health": "node deploy/test-updater-health-rollback.js",
     "test:update-push": "node deploy/test-update-push-singleflight.js",
     "test:maoyan-lifecycle": "node deploy/test-maoyan-service-lifecycle.js",
+    "test:maoyan-startup-ux": "node deploy/test-maoyan-startup-ux.js",
     "test:storage-auth": "node deploy/test-storage-auth.js",
     "test:sig-errors": "node deploy/test-sig-errors.js",
     "test:api-errors": "node deploy/test-api-errors.js",

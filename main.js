@@ -242,15 +242,29 @@ async function startMaoyanService() {
   const { getApiStatus, ensureMaoyanService } = getMods().maoyan;
   const current = await getApiStatus();
   if (current.ready) {
+    console.log("[MAOYAN_STARTUP]", {
+      stage: "already_ready",
+      apiBase: current.apiBase,
+      detailApiReady: Boolean(current.detailApiReady),
+      loginRequired: Boolean(current.loginRequired),
+    });
     return current;
   }
 
   if (servicePromise) return servicePromise;
 
+  console.log("[MAOYAN_STARTUP]", { stage: "ensure_begin", apiBase: loadConfig().apiBase });
   servicePromise = ensureMaoyanService(loadConfig())
     .then((status) => {
       mainWindow?.webContents.send("api-ready", status);
       if (!status.ready) servicePromise = null;
+      console.log("[MAOYAN_STARTUP]", {
+        stage: status.ready ? "service_ready" : "service_fail",
+        apiBase: status.apiBase,
+        error: status.error || "",
+        detailApiReady: Boolean(status.detailApiReady),
+        loginRequired: Boolean(status.loginRequired),
+      });
       return status;
     })
     .catch((err) => {
@@ -260,6 +274,11 @@ async function startMaoyanService() {
         error: err?.message || "票房服务启动失败",
         apiBase: loadConfig().apiBase,
       };
+      console.log("[MAOYAN_STARTUP]", {
+        stage: "service_exception",
+        apiBase: status.apiBase,
+        error: status.error,
+      });
       mainWindow?.webContents.send("api-ready", status);
       return status;
     });
