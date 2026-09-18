@@ -43,14 +43,18 @@ function joinUrl(base, path, query) {
 
 export function readEventCursor(storage = globalThis.localStorage) {
   try {
-    return String(storage?.getItem?.(CURSOR_STORAGE_KEY) || "").trim();
+    const raw = String(storage?.getItem?.(CURSOR_STORAGE_KEY) || "").trim();
+    if (!raw) return "";
+    // 生产 cursor 为数字 seq；兼容历史字符串
+    if (/^\d+$/.test(raw)) return raw;
+    return raw;
   } catch {
     return "";
   }
 }
 
 export function writeEventCursor(cursor, storage = globalThis.localStorage) {
-  const value = String(cursor || "").trim();
+  const value = cursor == null || cursor === "" ? "" : String(cursor).trim();
   try {
     if (!value) storage?.removeItem?.(CURSOR_STORAGE_KEY);
     else storage?.setItem?.(CURSOR_STORAGE_KEY, value);
@@ -60,16 +64,122 @@ export function writeEventCursor(cursor, storage = globalThis.localStorage) {
   return value;
 }
 
-async function fetchJson(url, options = {}) {
+/** movieId + movieName + rank 签名，用于避免无脑 POST */
+export function buildCatalogSignature(movies) {
+  const list = (movies || [])
+    .map((m) => ({
+      movieId: String(m.movieId ?? m.id ?? "").trim(),
+      movieName: String(m.movieName ?? m.name ?? "").trim(),
+      rank: Number(m.rank) || 0,
+    }))
+    .filter((m) => m.movieId)
+    .sort((a, b) => a.rank - b.rank || a.movieId.localeCompare(b.movieId));
+  return list.map((m) => `${m.movieId}|${m.movieName}|${m.rank}`).join(";");
+}
+
+export function toCatalogPayload(movies) {
+  return (movies || [])
+    .map((m, index) => ({
+      movieId: String(m.movieId ?? m.id ?? "").trim(),
+      movieName: String(m.movieName ?? m.name ?? "").trim(),
+      aliases: [],
+      rank: Number(m.rank) || index + 1,
+    }))
+    .filter((m) => m.movieId);
+}
+
+/**
+ * 将 LiveAssistant / 扁平 mock 事件统一为 UI 消费结构。
+ * 生产优先读 event.data。
+ */
+export function normalizeInteractionEvent(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const type = String(raw.type || "").toLowerCase();
+  const data = raw.data && typeof raw.data === "object" ? raw.data : null;
+  const src = data || raw;
+  const seq = raw.seq ?? src.seq ?? null;
+  const createdAt = raw.createdAt ?? src.createdAt ?? "";
+  const platform = src.platform ?? raw.platform ?? "";
+  const roomId = src.roomId ?? raw.roomId ?? "";
+
+  if (type === "danmaku" || type === "comment") {
+    const msgId = String(src.msgId || src.eventId || raw.msgId || raw.eventId || seq || "").trim();
+    return {
+      seq,
+      type: "danmaku",
+      msgId: msgId || `dm-${seq ?? Date.now()}`,
+      userId: src.userId ?? raw.userId ?? "",
+      nickname: src.nickname ?? raw.nickname ?? "观众",
+      content: src.content ?? raw.content ?? "",
+      createdAt,
+      platform,
+      roomId,
+    };
+  }
+
+  if (type === "movie_score" || type === "score") {
+    const eventId = String(src.eventId || raw.eventId || seq || "").trim();
+    return {
+      seq,
+      type: "movie_score",
+      eventId: eventId || `score-${seq ?? Date.now()}`,
+      userId: src.userId ?? raw.userId ?? "",
+      nickname: src.nickname ?? raw.nickname ?? "观众",
+      movieId: String(src.movieId ?? raw.movieId ?? "").trim(),
+      movieName: String(src.movieName ?? raw.movieName ?? "").trim(),
+      action: src.action ?? raw.action ?? "",
+      scoreDelta: Number(src.scoreDelta ?? raw.scoreDelta) || 0,
+      totalScore: Number(src.totalScore ?? raw.totalScore),
+      createdAt,
+      platform,
+      roomId,
+    };
+  }
+
+  return null;
+}
+
+export function normalizeEventsResponse(data, fallbackAfter = "") {
+  const rawEvents = Array.isArray(data?.events)
+    ? data.events
+    : Array.isArray(data)
+      ? data
+      : [];
+  const events = rawEvents.map(normalizeInteractionEvent).filter(Boolean);
+
+  // 生产：服务器数字 cursor / 最大 seq
+  let cursor = data?.cursor;
+  if (cursor == null || cursor === "") {
+    const seqs = events.map((e) => Number(e.seq)).filter((n) => Number.isFinite(n));
+    if (seqs.length) cursor = Math.max(...seqs);
+  }
+  if (cursor == null || cursor === "") {
+    cursor = fallbackAfter || "";
+  }
+
+  return {
+    ok: data?.ok !== false,
+    after: data?.after ?? fallbackAfter ?? 0,
+    cursor,
+    events,
+  };
+}
+
+async function requestJson(url, options = {}) {
   const controller = new AbortController();
   const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 4000;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
-      method: "GET",
+      method: options.method || "GET",
       cache: "no-store",
       signal: controller.signal,
-      headers: { Accept: "application/json" },
+      headers: {
+        Accept: "application/json",
+        ...(options.body ? { "Content-Type": "application/json" } : {}),
+        ...(options.headers || {}),
+      },
+      body: options.body ? JSON.stringify(options.body) : undefined,
     });
     if (!res.ok) {
       const err = new Error(`HTTP ${res.status}`);
@@ -96,11 +206,12 @@ export function createMovieInteractionService(options = {}) {
   const baseUrl = String(options.baseUrl || DEFAULT_MOVIE_INTERACTION_BASE).replace(/\/+$/, "");
   const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 4000;
   let online = null;
+  let lastCatalogSignature = "";
 
   async function checkHealth() {
     const url = joinUrl(baseUrl, "health");
     try {
-      const data = await fetchJson(url, { timeoutMs });
+      const data = await requestJson(url, { timeoutMs });
       online = true;
       logApi("info", "health-ok", { ok: true, endpoint: "health" });
       return { ok: true, online: true, data };
@@ -118,7 +229,7 @@ export function createMovieInteractionService(options = {}) {
   async function fetchScores() {
     const url = joinUrl(baseUrl, "scores");
     try {
-      const data = await fetchJson(url, { timeoutMs });
+      const data = await requestJson(url, { timeoutMs });
       const movies = Array.isArray(data?.movies)
         ? data.movies
         : Array.isArray(data)
@@ -144,31 +255,32 @@ export function createMovieInteractionService(options = {}) {
   }
 
   async function fetchEvents(after) {
-    const cursor = after == null ? readEventCursor() : String(after || "");
-    const url = joinUrl(baseUrl, "events", cursor ? { after: cursor } : undefined);
+    const stored = after == null ? readEventCursor() : String(after ?? "").trim();
+    const query = {};
+    if (stored !== "") query.after = stored;
+    const url = joinUrl(baseUrl, "events", query);
     try {
-      const data = await fetchJson(url, { timeoutMs });
-      const events = Array.isArray(data?.events)
-        ? data.events
-        : Array.isArray(data)
-          ? data
-          : [];
-      const nextCursor =
-        data?.nextCursor ??
-        data?.cursor ??
-        data?.after ??
-        (events.length ? events[events.length - 1]?.eventId || events[events.length - 1]?.msgId : cursor) ??
-        cursor;
+      const data = await requestJson(url, { timeoutMs });
+      const normalized = normalizeEventsResponse(data, stored);
       online = true;
-      if (nextCursor && nextCursor !== cursor) writeEventCursor(nextCursor);
+      const nextCursor = normalized.cursor;
+      if (nextCursor !== "" && String(nextCursor) !== String(stored)) {
+        writeEventCursor(nextCursor);
+      }
       logApi("info", "events-ok", {
         ok: true,
         endpoint: "events",
-        count: events.length,
-        after: cursor || "",
-        nextCursor: nextCursor || "",
+        count: normalized.events.length,
+        after: stored || "0",
+        cursor: nextCursor,
       });
-      return { ok: true, online: true, events, cursor: nextCursor || cursor };
+      return {
+        ok: true,
+        online: true,
+        events: normalized.events,
+        cursor: nextCursor,
+        after: normalized.after,
+      };
     } catch (error) {
       if (error?.parseFailed) {
         logApi("error", "events-parse", { ok: false, endpoint: "events", error: "parse_failed" });
@@ -181,8 +293,69 @@ export function createMovieInteractionService(options = {}) {
           error: String(error?.message || error),
         });
       }
-      return { ok: false, online: false, events: [], cursor, error };
+      return { ok: false, online: false, events: [], cursor: stored, error };
     }
+  }
+
+  /**
+   * POST /movies — 同步猫眼真实 TOP10 目录。
+   * 相同签名跳过；失败不影响票房。
+   */
+  async function updateMovies(movies) {
+    const payloadMovies = toCatalogPayload(movies);
+    if (!payloadMovies.length) {
+      return { ok: false, skipped: true, reason: "empty" };
+    }
+    const signature = buildCatalogSignature(payloadMovies);
+    if (signature && signature === lastCatalogSignature) {
+      logApi("info", "movies-skip", { ok: true, endpoint: "movies", skipped: true, reason: "unchanged" });
+      return { ok: true, skipped: true, reason: "unchanged", signature };
+    }
+
+    const url = joinUrl(baseUrl, "movies");
+    try {
+      const data = await requestJson(url, {
+        method: "POST",
+        timeoutMs,
+        body: { movies: payloadMovies },
+      });
+      lastCatalogSignature = signature;
+      online = true;
+      logApi("info", "movies-ok", {
+        ok: true,
+        endpoint: "movies",
+        count: payloadMovies.length,
+        signature,
+      });
+      return { ok: true, skipped: false, data, signature, movies: payloadMovies };
+    } catch (error) {
+      // 目录同步失败绝不能影响票房；仅记日志
+      if (error?.parseFailed) {
+        logApi("error", "movies-parse", { ok: false, endpoint: "movies", error: "parse_failed" });
+      } else {
+        online = false;
+        logApi("warn", "movies-fail", {
+          ok: false,
+          endpoint: "movies",
+          offline: true,
+          error: String(error?.message || error),
+        });
+      }
+      return { ok: false, skipped: false, error, signature };
+    }
+  }
+
+  /** 别名：与 updateMovies 相同 */
+  async function publishCatalog(movies) {
+    return updateMovies(movies);
+  }
+
+  function getLastCatalogSignature() {
+    return lastCatalogSignature;
+  }
+
+  function resetCatalogSignature() {
+    lastCatalogSignature = "";
   }
 
   return {
@@ -190,8 +363,13 @@ export function createMovieInteractionService(options = {}) {
     checkHealth,
     fetchScores,
     fetchEvents,
+    updateMovies,
+    publishCatalog,
     readEventCursor,
     writeEventCursor,
+    buildCatalogSignature,
+    getLastCatalogSignature,
+    resetCatalogSignature,
     isOnline: () => online,
   };
 }

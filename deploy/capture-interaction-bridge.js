@@ -24,28 +24,30 @@ function startMockAssistant() {
     ];
     let events = [
       {
+        seq: 1,
         type: "danmaku",
-        eventId: "e1",
-        msgId: "d1",
-        nickname: "小明",
-        content: "哪吒好看",
+        createdAt: "2026-09-18T13:00:00.000Z",
+        data: { msgId: "d1", nickname: "小明", content: "哪吒好看", userId: "u1" },
       },
       {
+        seq: 2,
         type: "danmaku",
-        eventId: "e2",
-        msgId: "d2",
-        nickname: "阿杰",
-        content: "剧情不错",
+        createdAt: "2026-09-18T13:00:01.000Z",
+        data: { msgId: "d2", nickname: "阿杰", content: "剧情不错", userId: "u2" },
       },
       {
+        seq: 3,
         type: "movie_score",
-        eventId: "e3",
-        nickname: "张三",
-        movieId: "5000",
-        movieName: "哪吒之魔童闹海",
-        action: "good",
-        scoreDelta: 300,
-        totalScore: 300300,
+        createdAt: "2026-09-18T13:00:02.000Z",
+        data: {
+          eventId: "e3",
+          nickname: "张三",
+          movieId: "5000",
+          movieName: "哪吒之魔童闹海",
+          action: "good",
+          scoreDelta: 300,
+          totalScore: 300300,
+        },
       },
     ];
 
@@ -53,16 +55,30 @@ function startMockAssistant() {
       const url = new URL(req.url, "http://127.0.0.1");
       const pathname = url.pathname.replace(/\/+$/, "");
       res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept");
+      if (req.method === "OPTIONS") {
+        res.writeHead(204).end();
+        return;
+      }
       res.setHeader("Content-Type", "application/json; charset=utf-8");
       if (pathname.endsWith("/health")) return res.end(JSON.stringify({ ok: true }));
-      if (pathname.endsWith("/scores")) return res.end(JSON.stringify({ movies: scores }));
+      if (pathname.endsWith("/scores")) return res.end(JSON.stringify({ ok: true, movies: scores }));
+      if (pathname.endsWith("/movies") && req.method === "POST") {
+        let body = "";
+        req.on("data", (c) => {
+          body += c;
+        });
+        req.on("end", () => res.end(JSON.stringify({ ok: true })));
+        return;
+      }
       if (pathname.endsWith("/events")) {
-        const after = url.searchParams.get("after") || "";
-        const list = events.filter((e) => !after || String(e.eventId) > after);
-        const nextCursor = list.length ? list[list.length - 1].eventId : after;
-        // 只下发一次，避免截图时重复刷
+        const afterRaw = url.searchParams.get("after");
+        const after = afterRaw == null || afterRaw === "" ? 0 : Number(afterRaw) || 0;
+        const list = events.filter((e) => Number(e.seq) > after);
+        const cursor = list.length ? Number(list[list.length - 1].seq) : after;
         events = [];
-        return res.end(JSON.stringify({ events: list, nextCursor }));
+        return res.end(JSON.stringify({ ok: true, after, cursor, events: list }));
       }
       res.writeHead(404).end("{}");
     });

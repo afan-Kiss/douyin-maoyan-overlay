@@ -231,6 +231,10 @@ export function createMovieInteractionUi(options = {}) {
       for (const m of catalog) {
         if (!scores.has(m.movieId)) scores.set(m.movieId, 0);
       }
+      // 真实 TOP10 变化时同步给 LiveAssistant（签名去重；失败不影响票房）
+      if (catalog.length) {
+        void service.publishCatalog(catalog).catch(() => {});
+      }
     }
     for (const m of catalog) {
       paintScore(m.movieId, scores.get(m.movieId) || 0);
