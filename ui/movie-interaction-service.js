@@ -88,17 +88,27 @@ export function commitEventCursor(cursor, storage = globalThis.localStorage) {
   return writeEventCursor(cursor, storage);
 }
 
-/** movieId + movieName + rank 签名，用于避免无脑 POST */
+/** movieId + movieName + rank + normalized aliases 签名，用于避免无脑 POST */
 export function buildCatalogSignature(movies) {
   const list = (movies || [])
-    .map((m) => ({
-      movieId: String(m.movieId ?? m.id ?? "").trim(),
-      movieName: String(m.movieName ?? m.name ?? "").trim(),
-      rank: Number(m.rank) || 0,
-    }))
+    .map((m) => {
+      const movieId = String(m.movieId ?? m.id ?? "").trim();
+      const movieName = String(m.movieName ?? m.name ?? "").trim();
+      const aliases = normalizeAliases(m.aliases, movieName)
+        .slice()
+        .sort((a, b) => a.localeCompare(b, "zh"));
+      return {
+        movieId,
+        movieName,
+        rank: Number(m.rank) || 0,
+        aliases,
+      };
+    })
     .filter((m) => m.movieId)
     .sort((a, b) => a.rank - b.rank || a.movieId.localeCompare(b.movieId));
-  return list.map((m) => `${m.movieId}|${m.movieName}|${m.rank}`).join(";");
+  return list
+    .map((m) => `${m.movieId}|${m.movieName}|${m.rank}|${m.aliases.join(",")}`)
+    .join(";");
 }
 
 export function normalizeAliases(aliases, movieName = "") {
@@ -361,23 +371,46 @@ export function createMovieInteractionService(options = {}) {
     try {
       const data = await requestJson(url, { timeoutMs });
       let normalized = normalizeEventsResponse(data, stored);
+      let epochChanged = false;
 
-      // 服务端流重置：清本地 cursor，必要时再拉一次 from 0（防死循环只重试一次）
-      if (normalized.reset) {
+      const prevEpoch = readStreamEpoch();
+      if (
+        prevEpoch &&
+        normalized.streamEpoch &&
+        prevEpoch !== normalized.streamEpoch
+      ) {
+        epochChanged = true;
         console.warn("MOVIE_EVENT_CURSOR_RESET", {
-          after: stored,
-          serverMaxSeq: normalized.serverMaxSeq,
-          streamEpoch: normalized.streamEpoch,
+          reason: "stream_epoch_changed",
+          oldEpoch: prevEpoch,
+          newEpoch: normalized.streamEpoch,
+          oldCursor: stored,
         });
+        // 丢弃本批 events（可能是旧 cursor 对上新库的错位窗口）
         writeEventCursor("");
-        if (normalized.streamEpoch) writeStreamEpoch(normalized.streamEpoch);
+        writeStreamEpoch(normalized.streamEpoch);
         stored = "";
+      }
+
+      // 服务端流重置 / epoch 变更：清本地 cursor，再拉一次 from 0（防死循环只重试一次）
+      if (normalized.reset || epochChanged) {
+        if (normalized.reset && !epochChanged) {
+          console.warn("MOVIE_EVENT_CURSOR_RESET", {
+            after: stored || after,
+            serverMaxSeq: normalized.serverMaxSeq,
+            streamEpoch: normalized.streamEpoch,
+          });
+          writeEventCursor("");
+          if (normalized.streamEpoch) writeStreamEpoch(normalized.streamEpoch);
+          stored = "";
+        }
         const retryUrl = joinUrl(baseUrl, "events", {});
         const retryData = await requestJson(retryUrl, { timeoutMs });
         normalized = normalizeEventsResponse(retryData, "0");
-        // 若仍 reset，返回空，不要循环
+        // 若仍 reset，返回空，不要循环；epoch 再变也不二次重拉
         if (normalized.reset) {
           online = true;
+          if (normalized.streamEpoch) writeStreamEpoch(normalized.streamEpoch);
           return {
             ok: true,
             online: true,
@@ -390,19 +423,9 @@ export function createMovieInteractionService(options = {}) {
             streamEpoch: normalized.streamEpoch,
           };
         }
-      } else if (normalized.streamEpoch) {
-        const prevEpoch = readStreamEpoch();
-        if (prevEpoch && prevEpoch !== normalized.streamEpoch) {
-          console.warn("MOVIE_EVENT_CURSOR_RESET", {
-            reason: "stream_epoch_changed",
-            prevEpoch,
-            streamEpoch: normalized.streamEpoch,
-          });
-          writeEventCursor("");
-          writeStreamEpoch(normalized.streamEpoch);
-        } else if (!prevEpoch) {
-          writeStreamEpoch(normalized.streamEpoch);
-        }
+        if (normalized.streamEpoch) writeStreamEpoch(normalized.streamEpoch);
+      } else if (normalized.streamEpoch && !prevEpoch) {
+        writeStreamEpoch(normalized.streamEpoch);
       }
 
       online = true;

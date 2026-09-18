@@ -49,6 +49,88 @@ async function testAliasesPublished() {
   console.log("OK: aliases published and normalized");
 }
 
+async function testCatalogSignatureIncludesAliases() {
+  const { buildCatalogSignature, createMovieInteractionService } = await loadService();
+
+  const base = { movieId: "1", movieName: "哪吒", rank: 1 };
+  const sigOld = buildCatalogSignature([{ ...base, aliases: ["哪吒2"] }]);
+  const sigNew = buildCatalogSignature([{ ...base, aliases: ["哪吒2", "魔童"] }]);
+  assert.notStrictEqual(sigOld, sigNew, "alias 内容变化必须改变签名");
+  assert.ok(sigNew.includes("魔童"), `sig=${sigNew}`);
+
+  const sigOrderA = buildCatalogSignature([{ ...base, aliases: ["哪吒2", "魔童"] }]);
+  const sigOrderB = buildCatalogSignature([{ ...base, aliases: ["魔童", "哪吒2"] }]);
+  assert.strictEqual(sigOrderA, sigOrderB, "仅顺序变化签名应相同");
+
+  const sigNormA = buildCatalogSignature([{ ...base, aliases: ["哪吒2", "魔童"] }]);
+  const sigNormB = buildCatalogSignature([
+    { ...base, aliases: [" 哪吒2 ", "", "魔童", "哪吒2"] },
+  ]);
+  assert.strictEqual(sigNormA, sigNormB, "重复/空格 normalize 后签名应相同");
+
+  let postCount = 0;
+  globalThis.fetch = async (_url, opts) => {
+    if (String(opts?.method || "GET").toUpperCase() === "POST") {
+      postCount += 1;
+    }
+    return {
+      ok: true,
+      status: 200,
+      async text() {
+        return JSON.stringify({ ok: true });
+      },
+      async json() {
+        return { ok: true };
+      },
+    };
+  };
+
+  // 避免 log 中的 "skipped" 触发 test-core 的 /SKIP/i 误判
+  async function silent(fn) {
+    const log = console.log;
+    const info = console.info;
+    console.log = () => {};
+    console.info = () => {};
+    try {
+      return await fn();
+    } finally {
+      console.log = log;
+      console.info = info;
+    }
+  }
+
+  const service = createMovieInteractionService({
+    baseUrl: "http://127.0.0.1:9/api/movie-interaction",
+  });
+
+  await silent(() => service.updateMovies([{ ...base, aliases: ["哪吒2", "魔童"] }]));
+  assert.strictEqual(postCount, 1);
+
+  const rOrder = await silent(() =>
+    service.updateMovies([{ ...base, aliases: ["魔童", "哪吒2"] }]),
+  );
+  assert.strictEqual(rOrder.skipped, true);
+  assert.strictEqual(rOrder.reason, "unchanged");
+  assert.strictEqual(postCount, 1, "仅顺序变化不应再 POST");
+
+  const rNorm = await silent(() =>
+    service.updateMovies([{ ...base, aliases: [" 哪吒2 ", "", "魔童", "哪吒2"] }]),
+  );
+  assert.strictEqual(rNorm.skipped, true);
+  assert.strictEqual(postCount, 1, "重复/空格 normalize 后应 skip");
+
+  service.resetCatalogSignature();
+  await silent(() => service.updateMovies([{ ...base, aliases: ["哪吒2"] }]));
+  assert.strictEqual(postCount, 2);
+  const rContent = await silent(() =>
+    service.updateMovies([{ ...base, aliases: ["哪吒2", "魔童"] }]),
+  );
+  assert.notStrictEqual(rContent.reason, "unchanged");
+  assert.strictEqual(postCount, 3, "alias 内容变化必须重新 POST");
+
+  console.log("OK: catalog signature includes aliases");
+}
+
 async function testCursorResetAndCommitSemantics() {
   const {
     createMovieInteractionService,
@@ -161,9 +243,150 @@ async function testCursorResetAndCommitSemantics() {
   console.log("OK: cursor reset + commit-after-onEvents");
 }
 
+/**
+ * epoch 改变但 after <= serverMaxSeq（reset=false）时，必须丢弃错位批次并 after=0 重拉。
+ */
+async function testEpochChangeWithLargerServerMaxSeq() {
+  const {
+    createMovieInteractionService,
+    CURSOR_STORAGE_KEY,
+    STREAM_EPOCH_STORAGE_KEY,
+    writeEventCursor,
+    readEventCursor,
+    writeStreamEpoch,
+    readStreamEpoch,
+  } = await loadService();
+
+  const storage = memoryStorage({
+    [CURSOR_STORAGE_KEY]: "50",
+    [STREAM_EPOCH_STORAGE_KEY]: "epoch-old",
+  });
+  globalThis.localStorage = storage;
+
+  const requestedAfter = [];
+  let call = 0;
+  const responses = [
+    {
+      // 新库已有 seq 到 100，旧 cursor=50，服务端不标 reset
+      ok: true,
+      after: 50,
+      cursor: 100,
+      serverMaxSeq: 100,
+      streamEpoch: "epoch-new",
+      reset: false,
+      events: Array.from({ length: 50 }, (_, i) => ({
+        seq: 51 + i,
+        type: "danmaku",
+        data: { msgId: `m${51 + i}`, nickname: "x", content: "gap" },
+      })),
+    },
+    {
+      ok: true,
+      after: 0,
+      cursor: 100,
+      serverMaxSeq: 100,
+      streamEpoch: "epoch-new",
+      reset: false,
+      events: [
+        { seq: 1, type: "danmaku", data: { msgId: "m1", nickname: "a", content: "first" } },
+        { seq: 50, type: "danmaku", data: { msgId: "m50", nickname: "b", content: "mid" } },
+        { seq: 100, type: "danmaku", data: { msgId: "m100", nickname: "c", content: "last" } },
+      ],
+    },
+  ];
+
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    const m = /[?&]after=([^&]+)/.exec(u);
+    requestedAfter.push(m ? m[1] : "0");
+    const body = responses[Math.min(call, responses.length - 1)];
+    call += 1;
+    const text = JSON.stringify(body);
+    return {
+      ok: true,
+      status: 200,
+      async text() {
+        return text;
+      },
+      async json() {
+        return body;
+      },
+    };
+  };
+
+  const service = createMovieInteractionService({
+    baseUrl: "http://127.0.0.1:9/api/movie-interaction",
+  });
+
+  const result = await service.fetchEvents();
+  assert.strictEqual(result.ok, true);
+  assert.deepStrictEqual(requestedAfter, ["50", "0"], "必须丢弃错位批并 after=0 重拉");
+  assert.ok(result.events.some((e) => Number(e.seq) === 1), "必须拿到 seq 1...");
+  assert.ok(
+    result.events.some((e) => Number(e.seq) < 51),
+    "最终结果不能只有 51~100",
+  );
+  assert.strictEqual(String(result.candidateCursor), "100");
+  assert.strictEqual(readEventCursor(storage), "", "fetchEvents 不得提前 commit");
+  assert.strictEqual(readStreamEpoch(storage), "epoch-new");
+
+  // onEvents 成功后才 commit
+  (service.commitEventCursor || service.writeEventCursor)(result.candidateCursor);
+  assert.strictEqual(String(readEventCursor(storage)), "100");
+
+  // 保留 after > serverMaxSeq 的 reset 路径
+  writeEventCursor("50000", storage);
+  writeStreamEpoch("epoch-new", storage);
+  call = 0;
+  requestedAfter.length = 0;
+  const resetResponses = [
+    {
+      ok: true,
+      after: 50000,
+      cursor: 0,
+      serverMaxSeq: 10,
+      streamEpoch: "epoch-new",
+      reset: true,
+      events: [],
+    },
+    {
+      ok: true,
+      after: 0,
+      cursor: 10,
+      serverMaxSeq: 10,
+      streamEpoch: "epoch-new",
+      reset: false,
+      events: [{ seq: 1, type: "danmaku", data: { msgId: "r1", nickname: "a", content: "ok" } }],
+    },
+  ];
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    const m = /[?&]after=([^&]+)/.exec(u);
+    requestedAfter.push(m ? m[1] : "0");
+    const body = resetResponses[Math.min(call, resetResponses.length - 1)];
+    call += 1;
+    return {
+      ok: true,
+      status: 200,
+      async text() {
+        return JSON.stringify(body);
+      },
+      async json() {
+        return body;
+      },
+    };
+  };
+  const resetResult = await service.fetchEvents();
+  assert.deepStrictEqual(requestedAfter, ["50000", "0"]);
+  assert.ok(resetResult.events.length >= 1);
+  console.log("OK: epoch change with larger serverMaxSeq + reset path kept");
+}
+
 async function main() {
   await testAliasesPublished();
+  await testCatalogSignatureIncludesAliases();
   await testCursorResetAndCommitSemantics();
+  await testEpochChangeWithLargerServerMaxSeq();
   console.log("\nALL PASSED (movie interaction cursor/aliases)");
 }
 
