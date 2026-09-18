@@ -398,6 +398,7 @@ export function createMovieInteractionUi(options = {}) {
     getMovieScore,
     addDanmaku,
     showMovieScoreBubble,
+    clearScoreBubbles: () => bubbleLayer.clear(),
     applyRemoteScores,
     applyRemoteEvents,
     setBridgeStatus,

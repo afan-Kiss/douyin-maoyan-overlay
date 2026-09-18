@@ -82,6 +82,7 @@ import {
   resolvePosterUrl,
 } from "./data/movie-media.js";
 import { createMovieInteractionUi } from "./movie-interaction-ui.js";
+import { computeBubblePosition, readViewportScale } from "./overlay-coordinate.js";
 import {
   createEnrichScheduleState,
   shouldScheduleFullEnrich,
@@ -1170,7 +1171,7 @@ function cssEscapeMovieId(value) {
 }
 
 /**
- * 票房上涨气泡挂到全局层，用行 getBoundingClientRect 定位，避免被 ix-board overflow 裁切。
+ * 票房上涨气泡挂到全局层，锚在该行实时票房正上方。坐标经 overlay-coordinate 换算。
  */
 function placeGlobalRiseBubble(bubbleEl, movieId) {
   const layer = getGlobalBubbleLayer();
@@ -1179,56 +1180,36 @@ function placeGlobalRiseBubble(bubbleEl, movieId) {
   );
   if (!layer || !bubbleEl || !card) return;
 
-  const metric = card.querySelector('[data-metric="dailyBox"]') || card;
-  const board = document.querySelector(".ix-board");
-  const layerRect = layer.getBoundingClientRect();
-  const metricRect = metric.getBoundingClientRect();
-  const boardRect = board?.getBoundingClientRect();
-  const rank = Number(card.dataset.rank) || 5;
-  const margin = 6;
-  const floatPx = Math.abs(
-    parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--bubble-float")) || 44,
-  );
+  const metric = card.querySelector('[data-metric="dailyBox"]');
+  if (!metric) return;
 
-  // 先设可见以量宽
   const prevVis = bubbleEl.style.visibility;
   bubbleEl.style.visibility = "hidden";
   bubbleEl.classList.add("is-visible");
-  const bw = Math.max(bubbleEl.offsetWidth || 0, 110);
-  const bh = Math.max(bubbleEl.offsetHeight || 0, 32);
-
-  let centerX = metricRect.left + metricRect.width / 2 - layerRect.left;
-  // 默认贴在票房上方
-  let top = metricRect.top - layerRect.top - bh - 8;
-
-  // TOP1~3：优先浮出排行榜顶边（不被表头/边框裁切）
-  if (rank >= 1 && rank <= 3 && boardRect) {
-    const boardTopLocal = boardRect.top - layerRect.top;
-    top = Math.min(top, boardTopLocal - bh - 6);
-    if (top < margin) top = margin;
-  } else if (rank >= 8) {
-    // TOP8~10：偏左上，并预留上浮动程，避免被底边吃掉
-    centerX -= 18;
-    top = metricRect.top - layerRect.top - bh - 12;
-    const endTop = top - floatPx * 0.7;
-    if (endTop < margin) top = margin + floatPx * 0.7;
-    if (top + bh > layerRect.height - margin) {
-      top = Math.max(margin, layerRect.height - bh - margin - floatPx * 0.15);
-    }
-  } else if (top < margin) {
-    top = margin;
-  }
-
-  // 横向夹紧（transform 以中心为锚）
-  const half = bw / 2;
-  centerX = Math.max(margin + half, Math.min(centerX, layerRect.width - margin - half));
-
-  bubbleEl.style.left = `${centerX}px`;
-  bubbleEl.style.top = `${top}px`;
+  const placed = computeBubblePosition(layer, metric, bubbleEl, {
+    mode: "center",
+    gap: 10,
+    margin: 8,
+  });
+  bubbleEl.style.left = `${placed.left}px`;
+  bubbleEl.style.top = `${placed.top}px`;
   bubbleEl.style.bottom = "auto";
   bubbleEl.style.right = "auto";
+  bubbleEl.dataset.anchorMovieId = String(movieId);
+  bubbleEl.dataset.anchorRank = String(card.dataset.rank || "");
+  bubbleEl.dataset.anchorColumn = "dailyBox";
   bubbleEl.classList.remove("is-visible");
   bubbleEl.style.visibility = prevVis || "";
+
+  window.__bubblePlacement = {
+    kind: "box",
+    viewportScale: readViewportScale(),
+    anchorMovieId: String(movieId),
+    anchorRank: Number(card.dataset.rank) || 0,
+    anchorColumn: "dailyBox",
+    left: placed.left,
+    top: placed.top,
+  };
 }
 
 /**
@@ -2599,14 +2580,57 @@ function formatRowRate(value) {
   return text;
 }
 
+const posterUiCache = new Map();
+
+function isRealPoster(src) {
+  const text = String(src || "").trim();
+  if (!text) return false;
+  return !text.includes("default-movie-poster");
+}
+
 function resolveRowPoster(movie) {
-  return (
-    movie?.moviePoster ||
-    movie?.posterUrl ||
-    movie?.poster ||
-    resolvePosterUrl(movie, movieMediaCatalog) ||
-    DEFAULT_POSTER
-  );
+  const candidates = [
+    movie?.moviePoster,
+    movie?.posterUrl,
+    movie?.poster,
+    resolvePosterUrl(movie, movieMediaCatalog),
+    posterUiCache.get(String(movie?.movieId || "")),
+  ];
+  for (const candidate of candidates) {
+    if (isRealPoster(candidate)) return candidate;
+  }
+  return DEFAULT_POSTER;
+}
+
+let posterResolveJob = 0;
+
+function schedulePosterResolve(list) {
+  const resolve = window.overlay?.resolvePosters;
+  if (typeof resolve !== "function" || !list?.length) return;
+  const missing = [];
+  for (const movie of list) {
+    const id = String(movie?.movieId || "");
+    if (!id || posterUiCache.has(id)) continue;
+    const card = cardPool.get(id);
+    const src = card?.querySelector(".race-row__poster")?.getAttribute("src") || "";
+    if (isRealPoster(src)) continue;
+    missing.push({ movieId: id, movieName: String(movie.name || "") });
+  }
+  if (!missing.length) return;
+  const job = ++posterResolveJob;
+  Promise.resolve(resolve(missing))
+    .then((rows) => {
+      if (job !== posterResolveJob) return;
+      for (const row of rows || []) {
+        if (!row || row.status !== "ok" || !row.uiPath) continue;
+        const id = String(row.movieId || "");
+        if (!id) continue;
+        posterUiCache.set(id, row.uiPath);
+        const img = cardPool.get(id)?.querySelector(".race-row__poster");
+        if (img) applyPosterSrc(img, row.uiPath);
+      }
+    })
+    .catch(() => {});
 }
 
 function bindPosterFallback(img) {
@@ -2844,6 +2868,7 @@ function renderList(movies, options = {}) {
 
   movieInteraction?.updateMovieCatalog?.(list);
   updateChampion(list, latestParsedMeta?.calendar?.today || lastGoodCacheDay, options);
+  schedulePosterResolve(list);
 }
 
 function syncRaceListChildren(cards) {

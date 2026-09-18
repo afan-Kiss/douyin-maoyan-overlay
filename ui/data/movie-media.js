@@ -85,8 +85,14 @@ export function applyMediaToMovie(movie, catalog = mediaCache || []) {
   const media = findMovieMedia(movie.name, catalog);
   const mediaKey = normalizeMovieName(movie.name);
 
-  const poster = resolveMediaPoster(media) || DEFAULT_POSTER;
-  if (!resolveMediaPoster(media) && movie.name && !warnedPosters.has(movie.name)) {
+  const existingPoster = movie.moviePoster || movie.posterUrl || movie.poster || "";
+  const poster =
+    resolveMediaPoster(media) ||
+    (existingPoster && !String(existingPoster).includes("default-movie-poster")
+      ? existingPoster
+      : "") ||
+    DEFAULT_POSTER;
+  if (!resolveMediaPoster(media) && !existingPoster && movie.name && !warnedPosters.has(movie.name)) {
     warnedPosters.add(movie.name);
     console.warn(`[MovieMedia] poster not found: ${movie.name}`);
   }

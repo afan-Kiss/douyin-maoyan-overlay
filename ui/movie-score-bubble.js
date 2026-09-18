@@ -1,7 +1,10 @@
 /**
  * 电影评分成功气泡（独立于票房上涨气泡）。
- * 显示层统一挂到 #global-bubble-layer，避免被排行榜 overflow 裁切。
+ * 显示层统一挂到 #global-bubble-layer，坐标与票房气泡共用 overlay-coordinate。
  */
+import { computeBubblePosition, readViewportScale } from "./overlay-coordinate.js";
+
+const SCORE_STACK_STEP = 38;
 
 export const SCORE_BUBBLE_DURATION_MS = 10000;
 export const SCORE_BUBBLE_MAX_VISIBLE = 5;
@@ -37,53 +40,34 @@ function resolveBubbleLayer(preferred) {
   );
 }
 
-/**
- * 根据行位置与排名，把评分气泡放到不被裁切的位置。
- * TOP1~3 / TOP8~10 优先向上；底部空间不足时自动上移。
- */
 function placeScoreBubble(el, layer, card, offsetIndex) {
-  const layerRect = layer.getBoundingClientRect();
-  const rank = Number(card?.dataset?.rank) || 5;
-  const scoreEl = card?.querySelector("[data-live-score]") || card;
-  const rowRect = scoreEl?.getBoundingClientRect?.() || card?.getBoundingClientRect?.();
-
-  const bw = el.offsetWidth || 220;
-  const bh = el.offsetHeight || 36;
-  const margin = 6;
-  const floatReserve = 48;
-
-  let left = 640;
-  let top = 120;
-
-  if (rowRect) {
-    // 锚定评分胶囊左侧上方
-    left = rowRect.left - layerRect.left + rowRect.width * 0.15 - bw * 0.2;
-    top = rowRect.top - layerRect.top - bh - 8 + (offsetIndex % 3) * 10;
-
-    if (rank >= 1 && rank <= 3) {
-      top = rowRect.top - layerRect.top - bh - 14;
-      left = rowRect.left - layerRect.left + Math.max(0, rowRect.width - bw) * 0.5;
-    } else if (rank >= 8) {
-      top = rowRect.top - layerRect.top - bh - 10;
-      left = rowRect.left - layerRect.left - 12 - (offsetIndex % 2) * 28;
-    } else {
-      top = rowRect.top - layerRect.top - bh - 6 + (offsetIndex % 3) * 12;
-      left = rowRect.right - layerRect.left - bw - 8 - (offsetIndex % 2) * 24;
-    }
-  }
-
-  // 底部行：若动画上浮后仍可能贴底，整体上移
-  if (rank >= 8 && top + bh + floatReserve > layerRect.height - margin) {
-    top = Math.max(margin, layerRect.height - bh - floatReserve - margin);
-  }
-  if (top < margin) top = margin;
-  if (top + bh > layerRect.height - margin) {
-    top = Math.max(margin, layerRect.height - bh - margin);
-  }
-  left = Math.max(margin, Math.min(left, layerRect.width - bw - margin));
-
-  el.style.top = `${top}px`;
-  el.style.left = `${left}px`;
+  const scoreEl = card?.querySelector("[data-live-score]");
+  if (!scoreEl) return false;
+  const placed = computeBubblePosition(layer, scoreEl, el, {
+    mode: "edge",
+    gap: 10,
+    margin: 8,
+    stackIndex: offsetIndex,
+    stackStep: SCORE_STACK_STEP,
+  });
+  el.style.top = `${placed.top}px`;
+  el.style.left = `${placed.left}px`;
+  el.style.right = "auto";
+  el.style.bottom = "auto";
+  el.dataset.anchorMovieId = String(card.dataset.movieId || "");
+  el.dataset.anchorRank = String(card.dataset.rank || "");
+  el.dataset.anchorColumn = "liveScore";
+  window.__bubblePlacement = {
+    kind: "score",
+    viewportScale: readViewportScale(),
+    anchorMovieId: String(card.dataset.movieId || ""),
+    anchorRank: Number(card.dataset.rank) || 0,
+    anchorColumn: "liveScore",
+    left: placed.left,
+    top: placed.top,
+    stackIndex: offsetIndex,
+  };
+  return true;
 }
 
 export function createMovieScoreBubbleLayer(options = {}) {
@@ -109,6 +93,7 @@ export function createMovieScoreBubbleLayer(options = {}) {
     const card = payload.movieId
       ? document.querySelector(`.race-card[data-movie-id="${cssEscapeAttr(String(payload.movieId))}"]`)
       : null;
+    if (!card?.querySelector("[data-live-score]")) return null;
 
     const el = document.createElement("div");
     el.className = "score-bubble";
@@ -119,9 +104,15 @@ export function createMovieScoreBubbleLayer(options = {}) {
     const delta = formatDelta(payload.scoreDelta);
     el.innerHTML = `<span class="score-bubble__nick">${nick}</span><span class="score-bubble__arrow">→</span><span class="score-bubble__movie">${movieName}</span><span class="score-bubble__delta">${delta}分</span>`;
     layer.appendChild(el);
-
-    // 先插入再量宽，保证定位准确
-    placeScoreBubble(el, layer, card, active.size);
+    const movieId = String(payload.movieId || "");
+    let stackIndex = 0;
+    for (const item of active.values()) {
+      if (String(item.el?.dataset?.anchorMovieId || "") === movieId) stackIndex += 1;
+    }
+    if (!placeScoreBubble(el, layer, card, stackIndex)) {
+      el.remove();
+      return null;
+    }
 
     const timer = window.setTimeout(() => {
       el.classList.add("is-leaving");

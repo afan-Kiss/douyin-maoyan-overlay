@@ -29,6 +29,7 @@ data/browser_state.json
 data/cookies.txt
 data/session_cache/
 data/browser_state.json
+data/poster-cache/
 
 ui/preview-*.png
 overlay-settings.json

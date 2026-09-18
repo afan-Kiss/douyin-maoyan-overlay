@@ -52,22 +52,30 @@
 
         <footer class="ix-bottom">
           <aside class="ix-guide" id="ix-guide" aria-label="互动方式">
-            <h2 class="ix-guide__title"><span aria-hidden="true">💬</span> 互动方式</h2>
-            <ul class="ix-guide__list">
-              <li>送礼物获得可评分积分</li>
-              <li><strong>1钻 = 10分</strong></li>
-              <li>送礼后<strong>3分钟</strong>内发送：</li>
-              <li class="ix-guide__cmds">
-                <code>电影名 + 好评</code>
-                <code>电影名 + 差评</code>
-              </li>
-              <li>一次有效评分将使用当前全部未过期积分</li>
-              <li class="ix-guide__example">
-                例如：<code>哪吒 好评</code>　<code>哪吒 差评</code>
-              </li>
-            </ul>
+            <h2 class="ix-guide__title"><span aria-hidden="true">💬</span>互动方式</h2>
+            <section class="ix-guide__block">
+              <p class="ix-guide__lead"><span aria-hidden="true">🎁</span>送礼物获得评分积分</p>
+              <div class="ix-guide__tags">
+                <span class="ix-guide__tag">1钻 = 10分</span>
+                <span class="ix-guide__tag">有效期 3分钟</span>
+              </div>
+            </section>
+            <section class="ix-guide__block">
+              <p class="ix-guide__lead">发送弹幕评分</p>
+              <div class="ix-guide__cmds">
+                <span class="ix-guide__cmd ix-guide__cmd--pos">电影名 + 好评</span>
+                <span class="ix-guide__cmd ix-guide__cmd--neg">电影名 + 差评</span>
+              </div>
+            </section>
+            <p class="ix-guide__hint">一次评分将使用当前全部未过期积分</p>
+            <p class="ix-guide__example">
+              <span class="ix-guide__example-label">示例</span>
+              <span>哪吒 好评</span>
+              <span>哪吒 差评</span>
+            </p>
             <p class="ix-guide__disclaimer">
-              仅供娱乐，直播间互动评分不代表影片质量或官方评分；礼物为自愿互动，请理性消费。
+              仅供娱乐 · 互动评分不代表官方评价<br />
+              礼物为自愿互动，请理性消费
             </p>
           </aside>
           <div class="ix-cloud" id="ix-word-cloud" aria-label="弹幕球"></div>

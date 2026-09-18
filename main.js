@@ -440,6 +440,10 @@ function registerIpcHandlers() {
   } = getMods().maoyan;
 
   ipcMain.handle("get-config", () => loadConfig());
+  ipcMain.handle("resolve-posters", (_event, movies) => {
+    const { resolveMissingPosters } = require("./lib/poster-resolver");
+    return resolveMissingPosters(Array.isArray(movies) ? movies : []);
+  });
   ipcMain.handle("get-overlay-settings", () => loadSettings());
   ipcMain.handle("save-overlay-settings", (_event, patch) => {
     const saved = saveSettings(patch);
