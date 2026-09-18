@@ -13,9 +13,9 @@ const UI_DIR = path.join(ROOT, "ui");
 const OUT_PNG = path.join(UI_DIR, "1080x1920-top5.png");
 
 const CHROME_CANDIDATES = [
+  "C:\\Users\\Administrator\\AppData\\Local\\Google\\Chrome\\Bin\\chrome.exe",
   "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
   "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-  "C:\\Users\\Administrator\\AppData\\Local\\Google\\Chrome\\Bin\\chrome.exe",
 ];
 
 const MIME = {

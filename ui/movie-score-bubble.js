@@ -1,5 +1,6 @@
 /**
  * 电影评分成功气泡（独立于票房上涨气泡）。
+ * 显示层统一挂到 #global-bubble-layer，避免被排行榜 overflow 裁切。
  */
 
 export const SCORE_BUBBLE_DURATION_MS = 10000;
@@ -27,10 +28,66 @@ function toneOf(scoreDelta) {
   return "zero";
 }
 
+function resolveBubbleLayer(preferred) {
+  if (preferred && preferred.isConnected) return preferred;
+  if (typeof document === "undefined") return null;
+  return (
+    document.getElementById("global-bubble-layer") ||
+    document.getElementById("score-bubble-layer")
+  );
+}
+
+/**
+ * 根据行位置与排名，把评分气泡放到不被裁切的位置。
+ * TOP1~3 / TOP8~10 优先向上；底部空间不足时自动上移。
+ */
+function placeScoreBubble(el, layer, card, offsetIndex) {
+  const layerRect = layer.getBoundingClientRect();
+  const rank = Number(card?.dataset?.rank) || 5;
+  const scoreEl = card?.querySelector("[data-live-score]") || card;
+  const rowRect = scoreEl?.getBoundingClientRect?.() || card?.getBoundingClientRect?.();
+
+  const bw = el.offsetWidth || 220;
+  const bh = el.offsetHeight || 36;
+  const margin = 6;
+  const floatReserve = 48;
+
+  let left = 640;
+  let top = 120;
+
+  if (rowRect) {
+    // 锚定评分胶囊左侧上方
+    left = rowRect.left - layerRect.left + rowRect.width * 0.15 - bw * 0.2;
+    top = rowRect.top - layerRect.top - bh - 8 + (offsetIndex % 3) * 10;
+
+    if (rank >= 1 && rank <= 3) {
+      top = rowRect.top - layerRect.top - bh - 14;
+      left = rowRect.left - layerRect.left + Math.max(0, rowRect.width - bw) * 0.5;
+    } else if (rank >= 8) {
+      top = rowRect.top - layerRect.top - bh - 10;
+      left = rowRect.left - layerRect.left - 12 - (offsetIndex % 2) * 28;
+    } else {
+      top = rowRect.top - layerRect.top - bh - 6 + (offsetIndex % 3) * 12;
+      left = rowRect.right - layerRect.left - bw - 8 - (offsetIndex % 2) * 24;
+    }
+  }
+
+  // 底部行：若动画上浮后仍可能贴底，整体上移
+  if (rank >= 8 && top + bh + floatReserve > layerRect.height - margin) {
+    top = Math.max(margin, layerRect.height - bh - floatReserve - margin);
+  }
+  if (top < margin) top = margin;
+  if (top + bh > layerRect.height - margin) {
+    top = Math.max(margin, layerRect.height - bh - margin);
+  }
+  left = Math.max(margin, Math.min(left, layerRect.width - bw - margin));
+
+  el.style.top = `${top}px`;
+  el.style.left = `${left}px`;
+}
+
 export function createMovieScoreBubbleLayer(options = {}) {
-  const layer =
-    options.layer ||
-    (typeof document !== "undefined" ? document.getElementById("score-bubble-layer") : null);
+  const layer = resolveBubbleLayer(options.layer);
   const durationMs =
     Number(options.durationMs) > 0 ? Number(options.durationMs) : SCORE_BUBBLE_DURATION_MS;
   const maxVisible =
@@ -63,17 +120,8 @@ export function createMovieScoreBubbleLayer(options = {}) {
     el.innerHTML = `<span class="score-bubble__nick">${nick}</span><span class="score-bubble__arrow">→</span><span class="score-bubble__movie">${movieName}</span><span class="score-bubble__delta">${delta}分</span>`;
     layer.appendChild(el);
 
-    const layerRect = layer.getBoundingClientRect();
-    const offsetIndex = active.size;
-    let top = 120;
-    let left = 640;
-    const rowRect = card?.getBoundingClientRect();
-    if (rowRect) {
-      top = rowRect.top - layerRect.top + 8 + (offsetIndex % 3) * 28;
-      left = rowRect.right - layerRect.left - 280 - (offsetIndex % 2) * 36;
-    }
-    el.style.top = `${Math.max(8, top)}px`;
-    el.style.left = `${Math.max(16, Math.min(left, 780))}px`;
+    // 先插入再量宽，保证定位准确
+    placeScoreBubble(el, layer, card, active.size);
 
     const timer = window.setTimeout(() => {
       el.classList.add("is-leaving");

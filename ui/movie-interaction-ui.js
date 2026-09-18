@@ -112,7 +112,7 @@ export function createMovieInteractionUi(options = {}) {
 
   const wordCloud = createMovieWordCloud(cloudRoot);
   const bubbleLayer = createMovieScoreBubbleLayer({
-    layer: $("score-bubble-layer"),
+    layer: $("global-bubble-layer") || $("score-bubble-layer"),
     maxVisible: SCORE_BUBBLE_MAX_VISIBLE,
     durationMs: SCORE_BUBBLE_DURATION_MS,
   });

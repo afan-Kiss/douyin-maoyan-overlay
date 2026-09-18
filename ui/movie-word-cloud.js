@@ -115,13 +115,15 @@ export function createMovieWordCloud(root) {
       const base = it.base || { x: 0, y: 0, z: 0 };
       const spun = rotateX(rotateY(base, rotationY), tiltX);
       const depth = (spun.z + SPHERE_RADIUS) / (SPHERE_RADIUS * 2);
-      const scale = 0.62 + depth * 0.7;
+      // 前景 28~40；中景 22~28；后景最低 18~20；最前可达 ~40
+      const fontSize = 18 + depth * 22;
+      it.el.style.fontSize = `${fontSize.toFixed(1)}px`;
+      // 深度缩放收窄，主要靠字号分层，避免字被二次放大糊掉
+      const scale = 0.88 + depth * 0.18;
       const opacity = 0.42 + depth * 0.58;
       it.el.style.transform = `translate3d(${spun.x.toFixed(2)}px, ${spun.y.toFixed(2)}px, ${spun.z.toFixed(2)}px) scale(${scale.toFixed(3)})`;
       it.el.style.opacity = String(opacity.toFixed(3));
       it.el.style.zIndex = String(Math.round(40 + depth * 60));
-      // 前景更大更清楚；后景可略小，但不用 blur（易糊成一团）
-      it.el.style.fontSize = `${(17 + depth * 13).toFixed(1)}px`;
       it.el.style.filter = "none";
     }
   }

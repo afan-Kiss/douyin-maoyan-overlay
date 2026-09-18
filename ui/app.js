@@ -1154,10 +1154,82 @@ function finishBubbleAnimation(el, key) {
 }
 
 const BUBBLE_STYLE = {
-  real: { color: "#22c55e", shadow: "0 0 8px rgba(34, 197, 94, 0.5)" },
-  randomGold: { color: "#f5c542", shadow: "0 0 8px rgba(245, 197, 66, 0.55)" },
-  randomBlue: { color: "#3b82f6", shadow: "0 0 8px rgba(59, 130, 246, 0.55)" },
+  real: { color: "#22c55e", shadow: "none" },
+  randomGold: { color: "#f5c542", shadow: "none" },
+  randomBlue: { color: "#3b82f6", shadow: "none" },
 };
+
+function getGlobalBubbleLayer() {
+  return document.getElementById("global-bubble-layer");
+}
+
+function cssEscapeMovieId(value) {
+  const text = String(value ?? "");
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") return CSS.escape(text);
+  return text.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+/**
+ * 票房上涨气泡挂到全局层，用行 getBoundingClientRect 定位，避免被 ix-board overflow 裁切。
+ */
+function placeGlobalRiseBubble(bubbleEl, movieId) {
+  const layer = getGlobalBubbleLayer();
+  const card = cardPool.get(String(movieId)) || document.querySelector(
+    `.race-card[data-movie-id="${cssEscapeMovieId(movieId)}"]`,
+  );
+  if (!layer || !bubbleEl || !card) return;
+
+  const metric = card.querySelector('[data-metric="dailyBox"]') || card;
+  const board = document.querySelector(".ix-board");
+  const layerRect = layer.getBoundingClientRect();
+  const metricRect = metric.getBoundingClientRect();
+  const boardRect = board?.getBoundingClientRect();
+  const rank = Number(card.dataset.rank) || 5;
+  const margin = 6;
+  const floatPx = Math.abs(
+    parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--bubble-float")) || 44,
+  );
+
+  // 先设可见以量宽
+  const prevVis = bubbleEl.style.visibility;
+  bubbleEl.style.visibility = "hidden";
+  bubbleEl.classList.add("is-visible");
+  const bw = Math.max(bubbleEl.offsetWidth || 0, 110);
+  const bh = Math.max(bubbleEl.offsetHeight || 0, 32);
+
+  let centerX = metricRect.left + metricRect.width / 2 - layerRect.left;
+  // 默认贴在票房上方
+  let top = metricRect.top - layerRect.top - bh - 8;
+
+  // TOP1~3：优先浮出排行榜顶边（不被表头/边框裁切）
+  if (rank >= 1 && rank <= 3 && boardRect) {
+    const boardTopLocal = boardRect.top - layerRect.top;
+    top = Math.min(top, boardTopLocal - bh - 6);
+    if (top < margin) top = margin;
+  } else if (rank >= 8) {
+    // TOP8~10：偏左上，并预留上浮动程，避免被底边吃掉
+    centerX -= 18;
+    top = metricRect.top - layerRect.top - bh - 12;
+    const endTop = top - floatPx * 0.7;
+    if (endTop < margin) top = margin + floatPx * 0.7;
+    if (top + bh > layerRect.height - margin) {
+      top = Math.max(margin, layerRect.height - bh - margin - floatPx * 0.15);
+    }
+  } else if (top < margin) {
+    top = margin;
+  }
+
+  // 横向夹紧（transform 以中心为锚）
+  const half = bw / 2;
+  centerX = Math.max(margin + half, Math.min(centerX, layerRect.width - margin - half));
+
+  bubbleEl.style.left = `${centerX}px`;
+  bubbleEl.style.top = `${top}px`;
+  bubbleEl.style.bottom = "auto";
+  bubbleEl.style.right = "auto";
+  bubbleEl.classList.remove("is-visible");
+  bubbleEl.style.visibility = prevVis || "";
+}
 
 /**
  * 仅上涨：+数字 ↑，约 2 秒后隐藏。无「暂无变化」。
@@ -1181,35 +1253,53 @@ function playBubblePulse(el, key, mode, deltaWan = 0, options = {}) {
         : BUBBLE_STYLE.randomGold
       : BUBBLE_STYLE.real;
 
-  el.style.display = "inline-flex";
+  // 行内占位 → 投影到全局层
+  const card =
+    el.closest?.(".race-card") ||
+    (options.movieId ? cardPool.get(String(options.movieId)) : null) ||
+    (el.dataset?.movieId ? cardPool.get(String(el.dataset.movieId)) : null);
+  const movieId =
+    card?.dataset?.movieId || options.movieId || el.dataset?.movieId || "";
+  let target = el;
+  if (movieId && getGlobalBubbleLayer()) {
+    target = ensureMovieBubbleElement(movieId) || el;
+    if (target !== el && el.classList?.contains("race-card__delta-float")) {
+      // 占位保持隐藏
+      el.classList.remove("is-visible", "is-animating");
+    }
+  }
+
+  target.style.display = "inline-flex";
   if (inlineDeltaTimers.has(key)) clearTimeout(inlineDeltaTimers.get(key));
 
   const durationMs = getBubbleDurationMs();
-  el.textContent = text;
-  el.style.color = style.color;
-  el.style.textShadow = style.shadow;
-  el.classList.remove(
+  target.textContent = text;
+  target.style.color = style.color;
+  target.style.textShadow = style.shadow;
+  target.classList.remove(
     "is-idle",
     "bubble-real",
     "bubble-random",
     "bubble-tone-gold",
     "bubble-tone-blue",
   );
-  el.classList.add("is-rise", type === "random" ? "bubble-random" : "bubble-real");
+  target.classList.add("is-rise", type === "random" ? "bubble-random" : "bubble-real");
   if (type === "random") {
-    el.classList.add(tone === "blue" ? "bubble-tone-blue" : "bubble-tone-gold");
+    target.classList.add(tone === "blue" ? "bubble-tone-blue" : "bubble-tone-gold");
   }
 
-  el.style.animation = "none";
-  el.style.animationDuration = `${durationMs}ms`;
-  el.style.opacity = "1";
-  el.style.visibility = "visible";
-  el.classList.remove("is-animating");
-  void el.offsetWidth;
-  el.style.animation = "";
-  el.classList.add("is-visible", "is-animating");
+  if (movieId) placeGlobalRiseBubble(target, movieId);
 
-  inlineDeltaTimers.set(key, setTimeout(() => finishBubbleAnimation(el, key), durationMs));
+  target.style.animation = "none";
+  target.style.animationDuration = `${durationMs}ms`;
+  target.style.opacity = "1";
+  target.style.visibility = "visible";
+  target.classList.remove("is-animating");
+  void target.offsetWidth;
+  target.style.animation = "";
+  target.classList.add("is-visible", "is-animating");
+
+  inlineDeltaTimers.set(key, setTimeout(() => finishBubbleAnimation(target, key), durationMs));
   return true;
 }
 
@@ -2050,10 +2140,9 @@ function maybeFitTableAfterUpdate(card) {
 
 function fitCardChrome(card, movie, { fitMetrics = true, fitTable = true } = {}) {
   if (!card) return;
-  const rank = Number(movie?.rank ?? card.dataset.rank);
-  // 片名单行省略，避免双行标题挤掉「后天」表格行
+  // 片名保持大字号；过长用省略号，不整体缩成小字（下限 28，禁止压到 20 以下）
   fitNowrapEl(card.querySelector(".race-card__title"), {
-    minSize: rank === 1 ? 30 : 28,
+    minSize: 28,
     allowWrap: false,
   });
   fitNowrapEl(card.querySelector(".js-mainland"), { minSize: 22 });
@@ -2068,7 +2157,7 @@ function refitAllRaceCards() {
     if (movie) fitCardChrome(card, movie);
     else {
       fitNowrapEl(card.querySelector(".race-card__title"), {
-        minSize: Number(card.dataset.rank) === 1 ? 30 : 28,
+        minSize: 28,
         allowWrap: false,
       });
       fitNowrapEl(card.querySelector(".js-mainland"), { minSize: 22 });
@@ -2520,6 +2609,27 @@ function resolveRowPoster(movie) {
   );
 }
 
+function bindPosterFallback(img) {
+  if (!img || img.dataset.posterFallbackBound === "1") return;
+  img.dataset.posterFallbackBound = "1";
+  img.addEventListener("error", () => {
+    if (img.dataset.posterFallbackApplied === "1") return;
+    img.dataset.posterFallbackApplied = "1";
+    img.src = DEFAULT_POSTER;
+    img.classList.add("race-row__poster--fallback");
+  });
+}
+
+function applyPosterSrc(img, poster) {
+  if (!img) return;
+  bindPosterFallback(img);
+  const next = poster || DEFAULT_POSTER;
+  if (img.getAttribute("src") === next) return;
+  img.dataset.posterFallbackApplied = next === DEFAULT_POSTER ? "1" : "";
+  img.classList.toggle("race-row__poster--fallback", next === DEFAULT_POSTER);
+  img.setAttribute("src", next);
+}
+
 function raceCardTemplate(movie) {
   const poster = resolveRowPoster(movie);
   const score = movieInteraction?.getMovieScore?.(movie.movieId) || 0;
@@ -2531,7 +2641,7 @@ function raceCardTemplate(movie) {
   return `
     <span class="race-row__rank">${movie.rank}</span>
     <div class="race-row__film">
-      <img class="race-row__poster" src="${escapeHtml(poster)}" alt="" loading="lazy" />
+      <img class="race-row__poster" src="${escapeHtml(poster)}" alt="" loading="lazy" data-poster-fallback-bound="0" />
       <h2 class="race-card__title race-row__name">${escapeHtml(movie.name || "")}</h2>
     </div>
     <div class="metric race-row__box" data-metric="dailyBox">
@@ -2572,6 +2682,7 @@ function buildRaceCard(movie) {
   card.dataset.movieId = String(movie.movieId);
   card.dataset.rank = String(movie.rank);
   card.innerHTML = raceCardTemplate(movie);
+  applyPosterSrc(card.querySelector(".race-row__poster"), resolveRowPoster(movie));
   applyCardEncodedBoxes(card, movie);
   return card;
 }
@@ -2594,25 +2705,20 @@ function computeMovieDelta(movie, isNew) {
 }
 
 function updateRaceCardDelta(card, movie, boxSync = null) {
-  let bubbleEl = card.querySelector(".race-card__delta-bubble");
-  const dailyBoxMetric = card.querySelector('[data-metric="dailyBox"]');
-  if (dailyBoxMetric && (!bubbleEl || bubbleEl.parentElement !== dailyBoxMetric)) {
-    if (bubbleEl) bubbleEl.remove();
-    bubbleEl = document.createElement("span");
-    bubbleEl.className = "race-card__delta-bubble race-card__delta-float";
-    bubbleEl.setAttribute("aria-hidden", "true");
-    const valueEl = dailyBoxMetric.querySelector(".metric__value");
-    if (valueEl) dailyBoxMetric.insertBefore(bubbleEl, valueEl);
-    else dailyBoxMetric.appendChild(bubbleEl);
-  }
-  if (!bubbleEl) return;
+  // 确保全局层气泡与行内锚点存在
+  ensureMovieBubbleElement(movie.movieId);
 
   // V2：气泡只由 RiseEvent 驱动，禁止在 render 路径里再算涨幅
   if (BOX_PIPELINE_V2) return;
 
+  const bubbleEl = ensureMovieBubbleElement(movie.movieId);
+  if (!bubbleEl) return;
+
   const synced = boxSync || syncMovieBoxState(movie);
   if (synced.action === "rise" && synced.delta > 0) {
-    pulseInlineDelta(bubbleEl, synced.delta, synced.key || `movie-${movie.movieId}`);
+    pulseInlineDelta(bubbleEl, synced.delta, synced.key || `movie-${movie.movieId}`, {
+      movieId: movie.movieId,
+    });
   }
 }
 
@@ -2645,8 +2751,7 @@ function updateRaceCard(card, movie, isNew = false, options = {}) {
 
   const posterEl = card.querySelector(".race-row__poster");
   if (posterEl) {
-    const poster = resolveRowPoster(movie);
-    if (posterEl.getAttribute("src") !== poster) posterEl.setAttribute("src", poster);
+    applyPosterSrc(posterEl, resolveRowPoster(movie));
   }
 
   applyCardEncodedBoxes(card, movie, options);
@@ -3271,19 +3376,36 @@ function logBubbleUi(payload) {
 }
 
 function ensureMovieBubbleElement(movieId) {
-  const card = cardPool.get(String(movieId));
+  const id = String(movieId || "");
+  if (!id) return null;
+  const layer = getGlobalBubbleLayer();
+  const card = cardPool.get(id);
   if (!card) return null;
   const dailyBoxMetric = card.querySelector('[data-metric="dailyBox"]');
   if (!dailyBoxMetric) return null;
-  let bubbleEl = card.querySelector(".race-card__delta-bubble");
-  if (!bubbleEl || bubbleEl.parentElement !== dailyBoxMetric) {
-    if (bubbleEl) bubbleEl.remove();
+
+  // 行内保留隐藏锚点，兼容旧查询路径
+  let anchor = dailyBoxMetric.querySelector(":scope > .race-card__delta-float");
+  if (!anchor) {
+    anchor = document.createElement("span");
+    anchor.className = "race-card__delta-bubble race-card__delta-float";
+    anchor.setAttribute("aria-hidden", "true");
+    const valueEl = dailyBoxMetric.querySelector(".metric__value");
+    if (valueEl) dailyBoxMetric.insertBefore(anchor, valueEl);
+    else dailyBoxMetric.appendChild(anchor);
+  }
+
+  if (!layer) return anchor;
+
+  let bubbleEl = layer.querySelector(
+    `.race-card__delta-float[data-movie-id="${cssEscapeMovieId(id)}"]`,
+  );
+  if (!bubbleEl) {
     bubbleEl = document.createElement("span");
     bubbleEl.className = "race-card__delta-bubble race-card__delta-float";
+    bubbleEl.dataset.movieId = id;
     bubbleEl.setAttribute("aria-hidden", "true");
-    const valueEl = dailyBoxMetric.querySelector(".metric__value");
-    if (valueEl) dailyBoxMetric.insertBefore(bubbleEl, valueEl);
-    else dailyBoxMetric.appendChild(bubbleEl);
+    layer.appendChild(bubbleEl);
   }
   return bubbleEl;
 }
@@ -3299,6 +3421,7 @@ function playRandomAutoBubble({ movieId, amountYuan, tone }) {
   return pulseInlineDelta(bubbleEl, yuan / 10000, `movie-${id}`, {
     type: "random",
     tone: tone === "blue" ? "blue" : "gold",
+    movieId: id,
   });
 }
 
@@ -3456,7 +3579,10 @@ function applyV2RiseEvent(evt) {
   }
   base.text = text;
 
-  const ok = pulseInlineDelta(bubbleEl, evt.deltaWan, `movie-${evt.movieId}`, { type: "real" });
+  const ok = pulseInlineDelta(bubbleEl, evt.deltaWan, `movie-${evt.movieId}`, {
+    type: "real",
+    movieId: evt.movieId,
+  });
   if (ok && dedupKey) {
     playedV2RiseEventKeys.add(dedupKey);
     if (playedV2RiseEventKeys.size > 200) {
