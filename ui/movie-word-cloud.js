@@ -5,7 +5,7 @@
 const MAX_ITEMS = 28;
 const MIN_ITEMS = 20;
 const ROTATE_SEC = 30;
-const TRUNCATE_CHARS = 14;
+const TRUNCATE_CHARS = 16;
 
 function escapeHtml(s) {
   return String(s)

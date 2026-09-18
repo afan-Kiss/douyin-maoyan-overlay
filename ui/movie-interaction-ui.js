@@ -1,18 +1,19 @@
 /**
- * 电影互动榜 UI：在线人数、直播间评分、评分气泡、演示模式。
- * 与票房状态机隔离；LiveAssistant 后续直接调用导出 API。
+ * 电影互动榜 UI：在线人数、直播间评分、评分气泡、弹幕球、LiveAssistant 轮询。
+ * 与票房状态机隔离。
  */
 
 import { createMovieWordCloud } from "./movie-word-cloud.js";
-
-export const SCORE_BUBBLE_DURATION_MS = 10000;
-export const SCORE_BUBBLE_MAX_VISIBLE = 7;
-
-function cssEscapeAttr(value) {
-  const text = String(value ?? "");
-  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") return CSS.escape(text);
-  return text.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
+import {
+  createMovieScoreBubbleLayer,
+  SCORE_BUBBLE_DURATION_MS,
+  SCORE_BUBBLE_MAX_VISIBLE,
+} from "./movie-score-bubble.js";
+import {
+  createMovieInteractionService,
+  createMovieInteractionPoller,
+  DEFAULT_MOVIE_INTERACTION_BASE,
+} from "./movie-interaction-service.js";
 
 function $(id) {
   return document.getElementById(id);
@@ -54,12 +55,29 @@ function scoreTone(score) {
   return "zero";
 }
 
+function cssEscapeAttr(value) {
+  const text = String(value ?? "");
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") return CSS.escape(text);
+  return text.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
 function isInteractionDemoEnabled() {
   try {
     return new URLSearchParams(location.search).get("interactionDemo") === "1";
   } catch {
     return false;
   }
+}
+
+function resolveInteractionBaseUrl() {
+  try {
+    const params = new URLSearchParams(location.search);
+    const fromQuery = params.get("interactionApi");
+    if (fromQuery) return fromQuery.replace(/\/+$/, "");
+  } catch {
+    /* ignore */
+  }
+  return DEFAULT_MOVIE_INTERACTION_BASE;
 }
 
 const DEMO_SCORE_PRESETS = [28000, 2400, 1200, -300, 8600, 150, -1200, 42000, 980, -50];
@@ -79,7 +97,7 @@ export function createMovieInteractionUi(options = {}) {
   const clockEl = $("ix-clock");
   const viewerEl = $("ix-viewer-count");
   const cloudRoot = $("ix-word-cloud");
-  const bubbleLayer = $("score-bubble-layer");
+  const offlineEl = ensureOfflineBadge();
 
   /** @type {Map<string, number>} */
   const scores = new Map();
@@ -90,13 +108,55 @@ export function createMovieInteractionUi(options = {}) {
   let demoTimer = null;
   let demoSeq = 0;
   let destroyed = false;
+  let bridgeOnline = null;
 
   const wordCloud = createMovieWordCloud(cloudRoot);
+  const bubbleLayer = createMovieScoreBubbleLayer({
+    layer: $("score-bubble-layer"),
+    maxVisible: SCORE_BUBBLE_MAX_VISIBLE,
+    durationMs: SCORE_BUBBLE_DURATION_MS,
+  });
 
-  /** @type {Array<object>} */
-  const bubbleQueue = [];
-  /** @type {Map<string, { el: HTMLElement, timer: number }>} */
-  const activeBubbles = new Map();
+  const service =
+    options.service ||
+    createMovieInteractionService({
+      baseUrl: options.baseUrl || resolveInteractionBaseUrl(),
+    });
+
+  const poller =
+    options.poller ||
+    createMovieInteractionPoller({
+      service,
+      scoresIntervalMs: options.scoresIntervalMs,
+      eventsIntervalMs: options.eventsIntervalMs,
+      onScores: (movies) => applyRemoteScores(movies),
+      onEvents: (events) => applyRemoteEvents(events),
+      onStatus: ({ online, message }) => setBridgeStatus(online, message),
+    });
+
+  function ensureOfflineBadge() {
+    let el = $("ix-interaction-offline");
+    if (el) return el;
+    const headerLeft = document.querySelector(".ix-header__left");
+    if (!headerLeft) return null;
+    el = document.createElement("span");
+    el.id = "ix-interaction-offline";
+    el.className = "ix-offline is-hidden";
+    el.textContent = "互动服务离线";
+    headerLeft.appendChild(el);
+    return el;
+  }
+
+  function setBridgeStatus(online, message) {
+    bridgeOnline = online;
+    if (!offlineEl) return;
+    if (online === false) {
+      offlineEl.textContent = message || "互动服务离线";
+      offlineEl.classList.remove("is-hidden");
+    } else {
+      offlineEl.classList.add("is-hidden");
+    }
+  }
 
   function tickClock() {
     if (clockEl) clockEl.textContent = formatClock(new Date());
@@ -112,27 +172,46 @@ export function createMovieInteractionUi(options = {}) {
     return card?.querySelector?.("[data-live-score]") || null;
   }
 
-  function paintScore(movieId, score) {
+  function paintScore(movieId, score, { pulse = false } = {}) {
     const el = findScoreEl(movieId);
     if (!el) return;
     const n = Number(score) || 0;
     el.textContent = formatScore(n);
     el.dataset.tone = scoreTone(n);
-    el.classList.remove("is-pulse");
-    void el.offsetWidth;
-    el.classList.add("is-pulse");
+    if (pulse) {
+      el.classList.remove("is-pulse");
+      void el.offsetWidth;
+      el.classList.add("is-pulse");
+    }
   }
 
-  function setMovieScore(movieId, score) {
+  function setMovieScore(movieId, score, options = {}) {
     const id = String(movieId || "");
     if (!id) return;
     const n = Number(score);
     scores.set(id, Number.isFinite(n) ? Math.trunc(n) : 0);
-    paintScore(id, scores.get(id));
+    paintScore(id, scores.get(id), { pulse: options.pulse === true });
   }
 
   function getMovieScore(movieId) {
     return scores.get(String(movieId)) || 0;
+  }
+
+  function matchCatalogMovie(movieId, movieName) {
+    const id = String(movieId || "").trim();
+    if (id) {
+      const byId = catalog.find((m) => m.movieId === id);
+      if (byId) return byId;
+    }
+    const name = String(movieName || "")
+      .replace(/《|》/g, "")
+      .trim();
+    if (!name) return null;
+    return (
+      catalog.find((m) => m.name === name) ||
+      catalog.find((m) => m.name.includes(name) || name.includes(m.name)) ||
+      null
+    );
   }
 
   function updateMovieCatalog(movies) {
@@ -158,89 +237,71 @@ export function createMovieInteractionUi(options = {}) {
     }
   }
 
-  function addDanmaku(payload) {
-    return wordCloud.addDanmaku(payload || {});
-  }
-
-  function placeBubble(payload) {
-    if (!bubbleLayer) return null;
-    const eventId = String(payload.eventId || `score-${++demoSeq}`);
-    if (activeBubbles.has(eventId)) return activeBubbles.get(eventId).el;
-
-    const card = document.querySelector(
-      `.race-card[data-movie-id="${cssEscapeAttr(String(payload.movieId))}"]`,
-    );
-    const el = document.createElement("div");
-    el.className = "score-bubble";
-    el.dataset.eventId = eventId;
-    el.dataset.tone = scoreTone(payload.scoreDelta);
-    const delta = formatScore(payload.scoreDelta);
-    const nick = String(payload.nickname || "观众");
-    const movieName = String(payload.movieName || payload.movieId || "");
-    el.innerHTML = `<span class="score-bubble__nick">${nick}</span><span class="score-bubble__arrow">→</span><span class="score-bubble__movie">${movieName}</span><span class="score-bubble__delta">${delta}分</span>`;
-
-    bubbleLayer.appendChild(el);
-
-    const rowRect = card?.getBoundingClientRect();
-    const stage = document.querySelector(".stage")?.getBoundingClientRect();
-    const layerRect = bubbleLayer.getBoundingClientRect();
-    const offsetIndex = activeBubbles.size;
-    let top = 120;
-    let left = 640;
-    if (rowRect && stage) {
-      top = rowRect.top - layerRect.top + 8 + (offsetIndex % 3) * 28;
-      left = rowRect.right - layerRect.left - 280 - (offsetIndex % 2) * 36;
-    }
-    el.style.top = `${Math.max(8, top)}px`;
-    el.style.left = `${Math.max(16, Math.min(left, 780))}px`;
-
-    const timer = window.setTimeout(() => {
-      el.classList.add("is-leaving");
-      window.setTimeout(() => {
-        el.remove();
-        activeBubbles.delete(eventId);
-        flushBubbleQueue();
-      }, 320);
-    }, SCORE_BUBBLE_DURATION_MS);
-
-    activeBubbles.set(eventId, { el, timer });
-    return el;
-  }
-
-  function flushBubbleQueue() {
-    while (bubbleQueue.length && activeBubbles.size < SCORE_BUBBLE_MAX_VISIBLE) {
-      const next = bubbleQueue.shift();
-      placeBubble(next);
+  function applyRemoteScores(movies) {
+    if (isInteractionDemoEnabled()) return;
+    for (const item of movies || []) {
+      const matched = matchCatalogMovie(item.movieId, item.movieName || item.name);
+      const id = matched?.movieId || String(item.movieId || "");
+      if (!id) continue;
+      const score = Number(item.score);
+      if (!Number.isFinite(score)) continue;
+      const prev = scores.get(id);
+      setMovieScore(id, score, { pulse: prev != null && prev !== Math.trunc(score) });
     }
   }
 
   function showMovieScoreBubble(payload = {}) {
-    const eventId = String(payload.eventId || `score-${Date.now()}-${++demoSeq}`);
     const movieId = String(payload.movieId || "");
+    const matched = matchCatalogMovie(movieId, payload.movieName);
+    const resolvedId = matched?.movieId || movieId;
     const scoreDelta = Number(payload.scoreDelta) || 0;
     let totalScore = payload.totalScore;
-    if (!Number.isFinite(Number(totalScore)) && movieId) {
-      totalScore = (scores.get(movieId) || 0) + scoreDelta;
+    if (!Number.isFinite(Number(totalScore)) && resolvedId) {
+      totalScore = (scores.get(resolvedId) || 0) + scoreDelta;
     }
-    if (movieId && Number.isFinite(Number(totalScore))) {
-      setMovieScore(movieId, totalScore);
+    if (resolvedId && Number.isFinite(Number(totalScore))) {
+      setMovieScore(resolvedId, totalScore, { pulse: true });
     }
 
-    const full = {
+    return bubbleLayer.showMovieScoreBubble({
       ...payload,
-      eventId,
-      movieId,
+      movieId: resolvedId,
+      movieName: payload.movieName || matched?.name || "",
       scoreDelta,
       totalScore,
-      movieName: payload.movieName || catalog.find((m) => m.movieId === movieId)?.name || "",
-    };
+    });
+  }
 
-    if (activeBubbles.size >= SCORE_BUBBLE_MAX_VISIBLE) {
-      bubbleQueue.push(full);
-      return { queued: true, eventId };
+  function addDanmaku(payload) {
+    return wordCloud.addDanmaku(payload || {});
+  }
+
+  function applyRemoteEvents(events) {
+    if (isInteractionDemoEnabled()) return;
+    for (const evt of events || []) {
+      const type = String(evt?.type || "").toLowerCase();
+      if (type === "movie_score" || type === "score") {
+        showMovieScoreBubble({
+          eventId: evt.eventId,
+          nickname: evt.nickname,
+          movieId: evt.movieId,
+          movieName: evt.movieName,
+          action: evt.action,
+          scoreDelta: evt.scoreDelta,
+          totalScore: evt.totalScore,
+        });
+        continue;
+      }
+      if (type === "danmaku" || type === "comment") {
+        addDanmaku({
+          msgId: evt.msgId || evt.eventId,
+          userId: evt.userId,
+          nickname: evt.nickname,
+          content: evt.content,
+          createdAt: evt.createdAt,
+        });
+      }
     }
-    placeBubble(full);
-    return { queued: false, eventId };
   }
 
   function seedDemoScores() {
@@ -291,7 +352,6 @@ export function createMovieInteractionUi(options = {}) {
     document.body.classList.add("is-interaction-demo");
     setViewerCount(123000);
     seedDemoScores();
-    // 立即灌几条弹幕，方便截图验收
     for (let i = 0; i < 8; i += 1) {
       const dm = DEMO_DANMAKU[i % DEMO_DANMAKU.length];
       addDanmaku({
@@ -311,18 +371,18 @@ export function createMovieInteractionUi(options = {}) {
     if (viewerCount == null) setViewerCount(null);
     if (isInteractionDemoEnabled()) {
       startDemoMode();
+      return;
     }
+    // 生产模式：独立轮询 LiveAssistant，不影响票房刷新
+    poller.start();
   }
 
   function destroy() {
     destroyed = true;
     if (clockTimer) clearInterval(clockTimer);
     if (demoTimer) clearInterval(demoTimer);
-    for (const { timer, el } of activeBubbles.values()) {
-      clearTimeout(timer);
-      el.remove();
-    }
-    activeBubbles.clear();
+    poller.stop();
+    bubbleLayer.clear();
     wordCloud.destroy();
   }
 
@@ -333,12 +393,18 @@ export function createMovieInteractionUi(options = {}) {
     getMovieScore,
     addDanmaku,
     showMovieScoreBubble,
+    applyRemoteScores,
+    applyRemoteEvents,
+    setBridgeStatus,
     start,
     destroy,
     isDemo: isInteractionDemoEnabled,
     formatScore,
     SCORE_BUBBLE_DURATION_MS,
     SCORE_BUBBLE_MAX_VISIBLE,
+    service,
+    poller,
+    getBridgeOnline: () => bridgeOnline,
   };
 
   if (typeof window !== "undefined") {
@@ -354,4 +420,6 @@ export {
   formatScore,
   scoreTone,
   isInteractionDemoEnabled,
+  SCORE_BUBBLE_DURATION_MS,
+  SCORE_BUBBLE_MAX_VISIBLE,
 };

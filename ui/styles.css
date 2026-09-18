@@ -207,6 +207,23 @@ body {
   opacity: 0.9;
 }
 
+.ix-offline {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 14px;
+  font-weight: 700;
+  color: #ffd0a8;
+  background: rgba(80, 40, 10, 0.72);
+  border: 1px solid rgba(255, 180, 100, 0.45);
+  white-space: nowrap;
+}
+
+.ix-offline.is-hidden {
+  display: none !important;
+}
+
 .ix-title {
   justify-self: center;
   font-size: 56px;
