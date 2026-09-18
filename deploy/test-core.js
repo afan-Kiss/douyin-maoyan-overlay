@@ -18,6 +18,7 @@ const TESTS = [
   { name: "session-persist", script: "deploy/test-session-persist.js", needsChrome: false },
   { name: "session-capability", script: "deploy/test-session-capability.js", needsChrome: false },
   { name: "layout-top5", script: "deploy/test-layout-top5.js", needsChrome: true },
+  { name: "movie-interaction-ui", script: "deploy/test-movie-interaction-ui.js", needsChrome: true },
   { name: "data-consistency", script: "deploy/test-data-consistency.js", needsChrome: false },
   { name: "extra-metrics", script: "deploy/test-extra-metrics.js", needsChrome: false },
 ];

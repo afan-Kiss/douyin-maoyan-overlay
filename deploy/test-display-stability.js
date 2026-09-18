@@ -1,5 +1,5 @@
 /**
- * 冠军/大盘/异步响应/字体切换显示稳定性回归
+ * 冠军/大盘显示稳定性回归（V2 Store）
  * node deploy/test-display-stability.js
  */
 const assert = require("node:assert/strict");
@@ -7,6 +7,54 @@ const fs = require("node:fs");
 const path = require("node:path");
 const http = require("node:http");
 const { chromium } = require("playwright");
+
+function toCandidate({ movieId, name, boxWan, nationWan, day }) {
+  const okBox = Number(boxWan) > 0;
+  const okNation = Number(nationWan) > 0;
+  return {
+    businessDate: day,
+    movies: [
+      {
+        movieId: String(movieId),
+        name,
+        rank: 1,
+        originalRank: 1,
+        box: okBox ? { ok: true, valueWan: boxWan } : { ok: false, valueWan: 0 },
+        boxRate: "11%",
+        showCountRate: "21%",
+        avgShowView: "101",
+        sumBoxDesc: "1亿",
+        raw: {
+          movieId: String(movieId),
+          name,
+          todayBox: okBox ? boxWan : 0,
+          todayBoxText: okBox ? String(boxWan) : "--",
+          todayUnit: "万",
+          displayBoxWan: okBox ? boxWan : 0,
+        },
+      },
+      ...[2, 3, 4, 5].map((rank) => ({
+        movieId: String(9000 + rank),
+        name: `影片${rank}`,
+        rank,
+        originalRank: rank,
+        box: { ok: true, valueWan: 10 + rank },
+        boxRate: "1%",
+        showCountRate: "1%",
+        avgShowView: "1",
+        sumBoxDesc: "1亿",
+        raw: {},
+      })),
+    ],
+    nation: {
+      box: okNation ? { ok: true, valueWan: nationWan } : { ok: false, valueWan: 0 },
+      showCount: "12.3万场",
+      views: "45.6万人",
+      seatLabel: "场均人次",
+      seatValue: "78",
+    },
+  };
+}
 
 async function main() {
   const root = path.resolve(__dirname, "../ui");
@@ -31,9 +79,9 @@ async function main() {
   let browser;
   try {
     const executablePath = [
+      "C:/Users/Administrator/AppData/Local/Google/Chrome/Bin/chrome.exe",
       "C:/Program Files/Google/Chrome/Application/chrome.exe",
       "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
-      "C:/Users/Administrator/AppData/Local/Google/Chrome/Bin/chrome.exe",
     ].find((p) => fs.existsSync(p));
     browser = await chromium.launch({ headless: true, executablePath });
     const page = await browser.newPage({ viewport: { width: 1080, height: 1920 } });
@@ -51,89 +99,68 @@ async function main() {
     await page.goto(`http://127.0.0.1:${server.address().port}/?preview=1`);
     await page.waitForFunction(() => window.__racePreview);
 
-    const render = (movies, nation, day = "2026-09-15") =>
-      page.evaluate(
-        ({ movies, nation, day }) => {
-          window.__racePreview.resetLastGoodIfDayChanged(day);
-          window.__racePreview.renderList(movies);
-          window.__racePreview.updateNation(nation, { calendar: { today: day } });
-        },
-        { movies, nation, day },
-      );
+    const commit = (opts) =>
+      page.evaluate(({ candidate }) => window.__racePreview.commitAndPaint(candidate), {
+        candidate: toCandidate(opts),
+      });
 
     const champText = () =>
       page.evaluate(() => ({
         value: document.getElementById("champ-box")?.textContent?.trim() || "",
         unit: document.getElementById("champ-box-unit")?.textContent?.trim() || "",
-        fontVersion: document.getElementById("champ-box")?.dataset?.fontVersion || "",
       }));
     const nationText = () =>
       page.evaluate(() => ({
         value: document.getElementById("nation-box")?.textContent?.trim() || "",
         unit: document.querySelector(".js-nation-unit")?.textContent?.trim() || "",
       }));
+    const movieBox = () =>
+      page.evaluate(
+        () =>
+          document.querySelector('[data-metric="dailyBox"] .metric__value')?.textContent?.trim() ||
+          "",
+      );
 
-    await render(
-      [{ movieId: 1001, rank: 1, name: "A", todayBox: 120.5, todayBoxText: "120.5", todayUnit: "万" }],
-      { todayBox: 500, todayBoxText: "500", todayUnit: "万" },
-    );
+    await commit({ movieId: 1001, name: "A", boxWan: 120.5, nationWan: 500, day: "2026-09-15" });
     assert.strictEqual((await champText()).unit, "万");
     assert.ok((await champText()).value.includes("120.5"), "champion shows decoded amount");
 
-    await render(
-      [{ movieId: 1001, rank: 1, name: "A", todayBox: 0, todayBoxText: "--", todayUnit: "万" }],
-      { todayBox: 0, todayBoxText: "--", todayUnit: "万" },
+    await commit({ movieId: 1001, name: "A", boxWan: 0, nationWan: 0, day: "2026-09-15" });
+    assert.ok(
+      (await champText()).value.includes("120.5"),
+      "temporary decode gap keeps champion amount",
     );
-    assert.ok((await champText()).value.includes("120.5"), "temporary decode gap keeps champion amount");
 
-    await render(
-      [{ movieId: 2002, rank: 1, name: "B", todayBox: 88.8, todayBoxText: "88.8", todayUnit: "万" }],
-      { todayBox: 300, todayBoxText: "300", todayUnit: "万" },
+    await commit({ movieId: 2002, name: "B", boxWan: 88.8, nationWan: 300, day: "2026-09-15" });
+    assert.ok(
+      (await champText()).value.includes("88.8"),
+      "new champion must not inherit old champion amount",
     );
-    assert.ok((await champText()).value.includes("88.8"), "new champion must not inherit old champion amount");
 
-    await render(
-      [{ movieId: 2002, rank: 1, name: "B", todayBox: 88.8, todayBoxText: "88.8", todayUnit: "万" }],
-      { todayBox: 300, todayBoxText: "300", todayUnit: "万" },
-      "2026-09-14",
-    );
+    await commit({ movieId: 2002, name: "B", boxWan: 88.8, nationWan: 300, day: "2026-09-14" });
     assert.ok((await champText()).value.includes("88.8"));
-    await render(
-      [{ movieId: 2002, rank: 1, name: "B", todayBox: 12.3, todayBoxText: "12.3", todayUnit: "万" }],
-      { todayBox: 40, todayBoxText: "40", todayUnit: "万" },
-      "2026-09-15",
+    await commit({ movieId: 2002, name: "B", boxWan: 12.3, nationWan: 40, day: "2026-09-15" });
+    assert.ok(
+      (await champText()).value.includes("12.3"),
+      "cross-day must not reuse yesterday champion cache",
     );
-    assert.ok((await champText()).value.includes("12.3"), "cross-day must not reuse yesterday champion cache");
 
-    await render(
-      [{ movieId: 3003, rank: 1, name: "C", todayBox: 50, todayBoxText: "50", todayUnit: "万" }],
-      { todayBox: 200, todayBoxText: "200", todayUnit: "万" },
-    );
+    await commit({ movieId: 3003, name: "C", boxWan: 50, nationWan: 200, day: "2026-09-15" });
     const before = await nationText();
-    await render(
-      [{ movieId: 3003, rank: 1, name: "C", todayBox: 50, todayBoxText: "50", todayUnit: "万" }],
-      { todayBox: 0, todayBoxText: "--", todayUnit: "万" },
-    );
+    await commit({ movieId: 3003, name: "C", boxWan: 50, nationWan: 0, day: "2026-09-15" });
     const afterGap = await nationText();
     assert.strictEqual(afterGap.value, before.value, "same-day temporary nation gap keeps last amount");
     assert.notStrictEqual(afterGap.value, "0", "decode failure must not become business zero");
 
-    await render(
-      [{ movieId: 4004, rank: 1, name: "D", todayBox: 66.6, todayBoxText: "66.6", todayUnit: "万" }],
-      { todayBox: 180, todayBoxText: "180", todayUnit: "万" },
-    );
-    const movieBoxBefore = await page.evaluate(
-      () => document.querySelector('[data-metric="dailyBox"] .metric__value')?.textContent?.trim() || "",
-    );
+    await commit({ movieId: 4004, name: "D", boxWan: 66.6, nationWan: 180, day: "2026-09-15" });
+    const movieBoxBefore = await movieBox();
     assert.ok(movieBoxBefore.includes("66.6"), "movie daily box renders");
-    await render(
-      [{ movieId: 4004, rank: 1, name: "D", todayBox: 0, todayBoxText: "--", todayUnit: "万" }],
-      { todayBox: 180, todayBoxText: "180", todayUnit: "万" },
+    await commit({ movieId: 4004, name: "D", boxWan: 0, nationWan: 180, day: "2026-09-15" });
+    const movieBoxAfterGap = await movieBox();
+    assert.ok(
+      movieBoxAfterGap.includes("66.6"),
+      "movie daily box stays visible during decode gap",
     );
-    const movieBoxAfterGap = await page.evaluate(
-      () => document.querySelector('[data-metric="dailyBox"] .metric__value')?.textContent?.trim() || "",
-    );
-    assert.ok(movieBoxAfterGap.includes("66.6"), "movie daily box stays visible during decode gap");
 
     console.log("PASS display stability: champion cache, cross-day reset, nation gap retention");
   } finally {

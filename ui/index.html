@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>票房赛马榜</title>
+    <title>电影互动榜</title>
     <link rel="stylesheet" href="fonts/harmonyos-sans.css" />
     <link rel="stylesheet" href="fonts/mtsi-font.css" />
     <link rel="stylesheet" href="styles.css" />
@@ -13,107 +13,91 @@
       <div class="stage">
         <div class="bg-layer" aria-hidden="true">
           <div class="bg-base"></div>
-          <div class="bg-curtain bg-curtain--l"></div>
-          <div class="bg-ribbon bg-ribbon--r"></div>
-          <div class="bg-spotlight bg-spotlight--l"></div>
-          <div class="bg-spotlight bg-spotlight--r"></div>
-          <div class="bg-beam bg-beam--l"></div>
-          <div class="bg-beam bg-beam--r"></div>
-          <div class="bg-speedlines"></div>
-          <div class="bg-particles"></div>
+          <div class="bg-stars"></div>
+          <div class="bg-nebula bg-nebula--a"></div>
+          <div class="bg-nebula bg-nebula--b"></div>
           <div class="bg-vignette"></div>
         </div>
 
-        <header class="hero">
-          <div class="hero__chrome">
-            <button class="titlebar__btn titlebar__btn--login" id="btn-login" title="登录猫眼账号">登录</button>
+        <header class="ix-header">
+          <div class="ix-header__left">
+            <span class="ix-live"><i class="ix-live__dot"></i>LIVE</span>
+            <span class="ix-viewers" id="ix-viewers" aria-label="在线人数">
+              <span class="ix-viewers__icon" aria-hidden="true">👤</span>
+              <span class="ix-viewers__count" id="ix-viewer-count">--</span>
+            </span>
           </div>
-
-          <div class="hero__title-row">
-            <h1 class="hero__title">票房赛马榜</h1>
-            <svg class="hero__trophy" viewBox="0 0 64 64" aria-hidden="true">
-              <defs>
-                <linearGradient id="trophyGold" x1="0%" y1="0%" x2="0%" y2="100%">
-                  <stop offset="0%" stop-color="#fff4c8" />
-                  <stop offset="45%" stop-color="#f0c45a" />
-                  <stop offset="100%" stop-color="#b8862a" />
-                </linearGradient>
-              </defs>
-              <path
-                fill="url(#trophyGold)"
-                stroke="#7a2a10"
-                stroke-width="1.4"
-                d="M18 10h28v6c0 9.4-6.2 16.2-14 17.6V40h6v4H26v-4h6v-6.4C24.2 32.2 18 25.4 18 16V10z"
-              />
-              <path
-                fill="none"
-                stroke="url(#trophyGold)"
-                stroke-width="3"
-                stroke-linecap="round"
-                d="M18 14c-6 1-10 6-10 12s5 10 10 10"
-              />
-              <path
-                fill="none"
-                stroke="url(#trophyGold)"
-                stroke-width="3"
-                stroke-linecap="round"
-                d="M46 14c6 1 10 6 10 12s-5 10-10 10"
-              />
-              <rect x="22" y="44" width="20" height="4" rx="1" fill="url(#trophyGold)" stroke="#7a2a10" stroke-width="1" />
-              <path fill="url(#trophyGold)" stroke="#7a2a10" stroke-width="1" d="M16 52h32l-3 6H19z" />
-            </svg>
-          </div>
-
-          <div class="hero__meta">
-            <span class="hero__date" id="hero-date">今日：--</span>
-          </div>
-
-          <div class="nation-strip" id="nation-strip">
-            <div class="nation-pill nation-pill--main nation-pill--dark">
-              <span class="nation-pill__crown" aria-hidden="true">
-                <svg viewBox="0 0 24 18" width="18" height="14">
-                  <path
-                    fill="#ffd978"
-                    stroke="#8a4a10"
-                    stroke-width="0.8"
-                    d="M2 14 L4 5 L8 10 L12 3 L16 10 L20 5 L22 14 Z"
-                  />
-                </svg>
-              </span>
-              <span class="nation-pill__label">今日大盘</span>
-              <span class="nation-pill__row">
-                <span class="nation-pill__value mtsi-font" id="nation-box">--</span>
-                <span class="nation-pill__unit js-nation-unit">万</span>
-                <span class="nation-pill__delta" id="nation-delta" aria-hidden="true"></span>
-              </span>
-            </div>
-            <div class="nation-pill nation-pill--light" id="nation-shows-pill">
-              <span class="nation-pill__label">排片</span>
-              <span class="nation-pill__value" id="nation-shows">--</span>
-            </div>
-            <div class="nation-pill nation-pill--dark" id="champ-box-pill">
-              <span class="nation-pill__label">冠军票房</span>
-              <span class="nation-pill__row">
-                <span class="nation-pill__value mtsi-font" id="champ-box">--</span>
-                <span class="nation-pill__unit" id="champ-box-unit">万</span>
-              </span>
-            </div>
-            <div class="nation-pill nation-pill--light" id="nation-views-pill">
-              <span class="nation-pill__label">观影人次</span>
-              <span class="nation-pill__value" id="nation-views">--</span>
-            </div>
-            <div class="nation-pill nation-pill--dark" id="nation-seat-pill">
-              <span class="nation-pill__label" id="nation-seat-label">上座率</span>
-              <span class="nation-pill__value" id="nation-seat">--</span>
-            </div>
+          <h1 class="ix-title" id="ix-title">电影互动榜</h1>
+          <div class="ix-header__right">
+            <time class="ix-clock" id="ix-clock">----/--/-- --:--:--</time>
+            <button class="titlebar__btn titlebar__btn--login is-hidden" id="btn-login" title="登录猫眼账号">
+              登录
+            </button>
           </div>
         </header>
 
         <div id="status" class="status status--loading">正在启动票房服务…</div>
 
-        <section class="race-list" id="race-list" aria-label="票房榜前十"></section>
+        <section class="ix-board" aria-label="电影互动榜">
+          <div class="ix-board__head" role="row">
+            <span class="ix-col ix-col--rank">排名</span>
+            <span class="ix-col ix-col--film">影片名称</span>
+            <span class="ix-col ix-col--box">实时票房</span>
+            <span class="ix-col ix-col--rate">票房占比</span>
+            <span class="ix-col ix-col--show">排片占比</span>
+            <span class="ix-col ix-col--score">直播间评分</span>
+          </div>
+          <div class="race-list" id="race-list" role="list"></div>
+        </section>
+
+        <footer class="ix-bottom">
+          <aside class="ix-guide" id="ix-guide" aria-label="互动方式">
+            <h2 class="ix-guide__title"><span aria-hidden="true">💬</span> 互动方式</h2>
+            <ul class="ix-guide__list">
+              <li>送礼物获得可评分积分</li>
+              <li><strong>1钻 = 10分</strong></li>
+              <li>送礼后<strong>3分钟</strong>内发送：</li>
+              <li class="ix-guide__cmds">
+                <code>电影名 + 好评</code>
+                <code>电影名 + 差评</code>
+              </li>
+              <li>一次有效评分将使用当前全部未过期积分</li>
+              <li class="ix-guide__example">
+                例如：<code>哪吒 好评</code>　<code>哪吒 差评</code>
+              </li>
+            </ul>
+            <p class="ix-guide__disclaimer">
+              仅供娱乐，直播间互动评分不代表影片质量或官方评分；礼物为自愿互动，请理性消费。
+            </p>
+          </aside>
+          <div class="ix-cloud" id="ix-word-cloud" aria-label="弹幕球"></div>
+        </footer>
+
+        <!-- 票房 pipeline / 回归测试保留节点（正式直播画面隐藏） -->
+        <div class="pipeline-anchor" aria-hidden="true">
+          <span id="hero-date"></span>
+          <span id="nation-box"></span>
+          <span class="js-nation-unit">万</span>
+          <span id="nation-delta" class="nation-pill__delta"></span>
+          <span id="champ-box"></span>
+          <span id="champ-box-unit">万</span>
+          <span id="nation-shows"></span>
+          <span id="nation-views"></span>
+          <span id="nation-seat"></span>
+          <span id="nation-seat-label"></span>
+          <div id="nation-strip" class="nation-strip">
+            <div class="nation-pill nation-pill--main">
+              <span class="nation-pill__row"><span id="nation-delta-host"></span></span>
+            </div>
+            <div id="nation-shows-pill"></div>
+            <div id="champ-box-pill"></div>
+            <div id="nation-views-pill"></div>
+            <div id="nation-seat-pill"></div>
+          </div>
+        </div>
 
         <div class="delta-overlay" id="delta-overlay" aria-hidden="true"></div>
+        <div class="score-bubble-layer" id="score-bubble-layer" aria-hidden="true"></div>
       </div>
     </div>
 

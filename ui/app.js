@@ -76,6 +76,13 @@ import {
   boxTextToWanApprox,
 } from "./box-display.js";
 import {
+  DEFAULT_POSTER,
+  loadMovieMedia,
+  applyMediaToMovies,
+  resolvePosterUrl,
+} from "./data/movie-media.js";
+import { createMovieInteractionUi } from "./movie-interaction-ui.js";
+import {
   createEnrichScheduleState,
   shouldScheduleFullEnrich,
   markFullEnrichAttempt,
@@ -2423,7 +2430,9 @@ function dailyTableHtml(rows) {
   return `<table class="race-card__table"><thead>${head}</thead><tbody>${body}</tbody></table>`;
 }
 
-const RACE_TOP_COUNT = 5;
+const RACE_TOP_COUNT = 10;
+const movieInteraction = createMovieInteractionUi();
+let movieMediaCatalog = [];
 
 function getDisplayMovieCount() {
   return Math.max(1, Number(config.topCount) || RACE_TOP_COUNT);
@@ -2431,7 +2440,7 @@ function getDisplayMovieCount() {
 
 function cardClassName(movie) {
   const rank = Math.min(Number(movie.rank) || 99, RACE_TOP_COUNT);
-  return `race-card race-card--rank${rank}`;
+  return `race-card race-row race-card--rank${rank}`;
 }
 
 function formatDisplayBox(movie) {
@@ -2443,46 +2452,78 @@ function formatDisplayBox(movie) {
   return "--";
 }
 
-function raceCardTemplate(movie) {
-  const mainland = formatMainlandDisplay(movie);
-  logChinaBoxFieldTrace(movie);
-  const summary = buildSummaryHtml(movie);
-  const tableRows = ensureDailyTable(movie);
-  const table = dailyTableHtml(tableRows);
+function formatRowBoxText(movie) {
+  const amount =
+    Number(movie?.displayBoxWan || movie?.lastValidBoxWan || movie?.todayBox) || 0;
+  if (amount > 0) return formatWanDisplayText(amount);
+  if (!isEmptyField(movie?.todayBoxText) && movie.todayBoxText !== "--") {
+    return (
+      formatBoxTextForDisplay(movie.todayBoxText, movie.todayUnit || "万", parseBoxNum) || "--"
+    );
+  }
+  return "--";
+}
 
+function formatRowRate(value) {
+  if (isEmptyField(value) || value === "--") return "--";
+  const text = String(value).trim();
+  return text;
+}
+
+function resolveRowPoster(movie) {
+  return (
+    movie?.moviePoster ||
+    movie?.posterUrl ||
+    movie?.poster ||
+    resolvePosterUrl(movie, movieMediaCatalog) ||
+    DEFAULT_POSTER
+  );
+}
+
+function raceCardTemplate(movie) {
+  const poster = resolveRowPoster(movie);
+  const score = movieInteraction?.getMovieScore?.(movie.movieId) || 0;
+  const scoreText =
+    typeof movieInteraction?.formatScore === "function"
+      ? movieInteraction.formatScore(score)
+      : String(score || 0);
+  const tone = score > 0 ? "pos" : score < 0 ? "neg" : "zero";
   return `
-    <div class="race-card__head">
-      <span class="race-card__rank">NO.${movie.rank}</span>
-      <div class="race-card__title-wrap">
-        <h2 class="race-card__title">《${escapeHtml(movie.name)}》</h2>
-      </div>
-      <div class="race-card__mainland-wrap">
-        <div class="race-card__mainland${isEmptyField(mainland) || mainland === "--" ? " is-empty" : ""}">
-          <em class="js-mainland-label">${mainlandLabel()}：</em>
-          <strong class="js-mainland">${escapeHtml(mainland)}</strong>
-        </div>
-      </div>
+    <span class="race-row__rank">${movie.rank}</span>
+    <div class="race-row__film">
+      <img class="race-row__poster" src="${escapeHtml(poster)}" alt="" loading="lazy" />
+      <h2 class="race-card__title race-row__name">${escapeHtml(movie.name || "")}</h2>
     </div>
-    <div class="race-card__summary-wrap">${summary}</div>
-    <div class="race-card__table-wrap" data-table-sig=""><div class="race-card__table-scaler">${table}</div></div>
+    <div class="metric race-row__box" data-metric="dailyBox">
+      <span class="race-card__delta-bubble race-card__delta-float" aria-hidden="true"></span>
+      <span class="metric__value">${escapeHtml(formatRowBoxText(movie))}</span>
+    </div>
+    <span class="race-row__rate" data-field="boxRate">${escapeHtml(formatRowRate(movie.boxRate))}</span>
+    <span class="race-row__rate" data-field="showCountRate">${escapeHtml(formatRowRate(movie.showCountRate))}</span>
+    <span class="race-row__score" data-live-score data-tone="${tone}">${escapeHtml(scoreText)}</span>
   `;
 }
 
 function applyCardEncodedBoxes(card, movie, options = {}) {
   if (!card || !movie) return;
-  const summaryWrap = card.querySelector(".race-card__summary-wrap");
-  if (summaryWrap) updateSummaryInPlace(summaryWrap, movie, options);
-
-  const tableRows = ensureDailyTable(movie);
-  const tableWrap = card.querySelector(".race-card__table-wrap");
-  if (tableWrap) {
-    const table = tableWrap.querySelector(".race-card__table");
-    const inPlace = table ? updateDailyTableInPlace(table, tableRows) : null;
-    if (inPlace === null) {
-      tableWrap.innerHTML = `<div class="race-card__table-scaler">${dailyTableHtml(tableRows)}</div>`;
+  const valueEl = card.querySelector('[data-metric="dailyBox"] .metric__value');
+  if (!valueEl) return;
+  if (BOX_PIPELINE_V2) {
+    const next = formatRowBoxText(movie);
+    if (!isEmptyField(next) && next !== "--") {
+      setTextIfChanged(valueEl, next);
+    } else if (!hasDisplayedData && !elementHasVisibleBox(valueEl)) {
+      setTextIfChanged(valueEl, "--");
     }
-    tableWrap.dataset.tableSig = dailyTableSignature(tableRows);
+    return;
   }
+  const nextHtml = buildSummaryMetricValueHtml(
+    SUMMARY_COLUMN_DEFS[1][0],
+    movie,
+    valueEl.innerHTML || "",
+    options,
+  );
+  if (valueEl.innerHTML !== nextHtml) valueEl.innerHTML = nextHtml;
 }
 
 function buildRaceCard(movie) {
@@ -2492,13 +2533,6 @@ function buildRaceCard(movie) {
   card.dataset.rank = String(movie.rank);
   card.innerHTML = raceCardTemplate(movie);
   applyCardEncodedBoxes(card, movie);
-  const tableWrap = card.querySelector(".race-card__table-wrap");
-  if (tableWrap) {
-    tableWrap.dataset.tableSig = dailyTableSignature(ensureDailyTable(movie));
-  }
-  requestAnimationFrame(() => {
-    fitCardChrome(card, movie);
-  });
   return card;
 }
 
@@ -2560,102 +2594,30 @@ function updateRaceCard(card, movie, isNew = false, options = {}) {
     card.classList.add("is-flash");
   }
 
-  const head = card.querySelector(".race-card__head");
-  if (!head) {
+  if (!card.querySelector('[data-metric="dailyBox"]')) {
     card.innerHTML = raceCardTemplate(movie);
-    const tableWrap = card.querySelector(".race-card__table-wrap");
-    if (tableWrap) {
-      tableWrap.dataset.tableSig = dailyTableSignature(ensureDailyTable(movie));
-    }
     updateRaceCardDelta(card, movie, synced);
     return;
   }
 
-  setTextIfChanged(card.querySelector(".race-card__rank"), `NO.${movie.rank}`);
-  const titleChanged = setTextIfChanged(card.querySelector(".race-card__title"), `《${movie.name}》`);
+  setTextIfChanged(card.querySelector(".race-row__rank"), String(movie.rank));
+  setTextIfChanged(card.querySelector(".race-card__title"), movie.name || "");
 
-  const mainland = formatMainlandDisplay(movie);
-  logChinaBoxFieldTrace(movie);
-  const mainlandWrap = card.querySelector(".race-card__mainland");
-  const mainlandEl = card.querySelector(".js-mainland");
-  const mainlandLabelEl = card.querySelector(".js-mainland-label");
-  if (mainlandLabelEl) {
-    setTextIfChanged(mainlandLabelEl, `${mainlandLabel()}：`);
-  }
-  if (mainlandWrap && mainlandEl) {
-    mainlandWrap.classList.toggle("is-empty", isEmptyField(mainland) || mainland === "--");
-    mainlandEl.classList.remove("mtsi-font");
-    if (!isEmptyField(mainland) && mainland !== "--") {
-      setTextIfChanged(mainlandEl, mainland);
-    }
+  const posterEl = card.querySelector(".race-row__poster");
+  if (posterEl) {
+    const poster = resolveRowPoster(movie);
+    if (posterEl.getAttribute("src") !== poster) posterEl.setAttribute("src", poster);
   }
 
-  const summaryWrap = card.querySelector(".race-card__summary-wrap");
-  let summaryStructural = false;
-  let summaryValuesChanged = false;
-  if (summaryWrap) {
-    const inPlace = updateSummaryInPlace(summaryWrap, movie, options);
-    if (inPlace === null) {
-      const prevByKey = {};
-      summaryWrap.querySelectorAll(".metric[data-metric]").forEach((metric) => {
-        const key = metric.dataset.metric;
-        const valueEl = metric.querySelector(".metric__value");
-        if (key && valueEl) prevByKey[key] = valueEl.innerHTML;
-      });
-      const savedBubble = detachActiveRiseBubble(summaryWrap);
-      if (options.holdBoxes) {
-        const heldDaily = prevByKey.dailyBox || "";
-        summaryWrap.innerHTML = buildSummaryHtml(movie);
-        if (heldDaily && displayHtmlLooksLikeBox(heldDaily)) {
-          const nextDaily = summaryWrap.querySelector('[data-metric="dailyBox"] .metric__value');
-          if (nextDaily) nextDaily.innerHTML = heldDaily;
-        }
-      } else {
-        summaryWrap.innerHTML = buildSummaryHtml(movie);
-      }
-      restoreSummaryMetricsFromPrevious(summaryWrap, prevByKey);
-      reattachRiseBubble(summaryWrap, savedBubble);
-      summaryStructural = true;
-    } else if (inPlace) {
-      summaryValuesChanged = true;
-    }
-  }
-
-  const tableRows = ensureDailyTable(movie);
-  const tableWrap = card.querySelector(".race-card__table-wrap");
-  let tableStructural = false;
-  let tableValuesChanged = false;
-  if (tableWrap) {
-    const sig = dailyTableSignature(tableRows);
-    if (tableWrap.dataset.tableSig !== sig) {
-      const table = tableWrap.querySelector(".race-card__table");
-      const inPlace = table ? updateDailyTableInPlace(table, tableRows) : null;
-      if (inPlace === null) {
-        tableWrap.innerHTML = `<div class="race-card__table-scaler">${dailyTableHtml(tableRows)}</div>`;
-        tableWrap.dataset.tableFitReady = "";
-        card.dataset.tableFitKey = "";
-        card.dataset.tableFitReady = "";
-        tableStructural = true;
-      } else if (inPlace) {
-        tableValuesChanged = true;
-      }
-      tableWrap.dataset.tableSig = sig;
-    }
-  }
+  applyCardEncodedBoxes(card, movie, options);
+  setTextIfChanged(card.querySelector('[data-field="boxRate"]'), formatRowRate(movie.boxRate));
+  setTextIfChanged(
+    card.querySelector('[data-field="showCountRate"]'),
+    formatRowRate(movie.showCountRate),
+  );
 
   updateRaceCardDelta(card, movie, synced);
   trackBoxDelta();
-
-  if (titleChanged || summaryStructural || tableStructural) {
-    requestAnimationFrame(() => {
-      fitCardChrome(card, movie, {
-        fitMetrics: titleChanged || summaryStructural,
-        fitTable: tableStructural,
-      });
-    });
-  } else if (tableValuesChanged) {
-    requestAnimationFrame(() => maybeFitTableAfterUpdate(card));
-  }
 }
 
 function isFirstSeen(movieId) {
@@ -2668,7 +2630,7 @@ function ensureRaceCard(movie, options = {}) {
   movie = synced.movie;
   const key = String(movie.movieId);
   let card = cardPool.get(key);
-  if (!card || !card.classList.contains("race-card") || !card.querySelector(".race-card__head")) {
+  if (!card || !card.classList.contains("race-card") || !card.querySelector('[data-metric="dailyBox"]')) {
     card?.remove();
     card = buildRaceCard(movie);
     cardPool.set(key, card);
@@ -2684,18 +2646,16 @@ function renderLoadingSkeleton() {
   raceListEl.innerHTML = Array.from({ length: getDisplayMovieCount() }, (_, i) => {
     const rank = i + 1;
     return `
-      <article class="race-card race-card--skeleton race-card--rank${rank}" aria-hidden="true">
-        <div class="race-card__head">
-          <span class="race-card__rank skeleton-block">NO.${rank}</span>
+      <article class="race-card race-row race-card--skeleton race-card--rank${rank}" aria-hidden="true">
+        <span class="race-row__rank skeleton-block">${rank}</span>
+        <div class="race-row__film">
+          <span class="race-row__poster skeleton-block"></span>
           <h2 class="race-card__title skeleton-block">加载中</h2>
-          <div class="race-card__mainland skeleton-block"></div>
         </div>
-        <div class="race-card__summary-wrap">
-          <div class="race-card__summary">
-            ${Array.from({ length: 3 }, () => '<div class="race-card__summary-col skeleton-block"></div>').join("")}
-          </div>
-        </div>
-        <div class="race-card__table-wrap skeleton-block"></div>
+        <div class="metric race-row__box"><span class="metric__value skeleton-block">--</span></div>
+        <span class="race-row__rate skeleton-block">--</span>
+        <span class="race-row__rate skeleton-block">--</span>
+        <span class="race-row__score skeleton-block">0</span>
       </article>
     `;
   }).join("");
@@ -2704,7 +2664,8 @@ function renderLoadingSkeleton() {
 function renderList(movies, options = {}) {
   if (!raceListEl) return;
 
-  const list = (movies || [])
+  const withMedia = applyMediaToMovies(movies || [], movieMediaCatalog);
+  const list = withMedia
     .map((movie) => stabilizeMovie(movie))
     .slice()
     .sort((a, b) => a.rank - b.rank)
@@ -2734,9 +2695,9 @@ function renderList(movies, options = {}) {
 
   if (cards.length) {
     syncRaceListChildren(cards);
-    // 不再每次轮询全表 refit：字号抖动是界面闪烁主因；结构变化时 updateRaceCard 会局部 fit
   }
 
+  movieInteraction?.updateMovieCatalog?.(list);
   updateChampion(list, latestParsedMeta?.calendar?.today || lastGoodCacheDay, options);
 }
 
@@ -4022,17 +3983,16 @@ async function updateLoginButton(forceShow = false) {
   const needLogin = forceShow || isLoginRequiredStatus(status);
   const needSig = !needLogin && isSignatureIssueStatus(status);
 
-  // 右上角登录按钮常驻显示，方便随时重新登录
-  btn.classList.remove("is-hidden");
+  if (needLogin || forceShow || needSig) {
+    btn.classList.remove("is-hidden");
+    btn.textContent = "登录";
+    btn.title = needSig ? "猫眼签名不可用，点击登录或刷新签名" : "登录猫眼账号";
+    return;
+  }
+
+  // 已登录：弱化，不占直播画面中心
+  btn.classList.add("is-hidden");
   btn.textContent = "登录";
-  if (needLogin || forceShow) {
-    btn.title = "登录猫眼账号";
-    return;
-  }
-  if (needSig) {
-    btn.title = "猫眼签名不可用，点击登录或刷新签名";
-    return;
-  }
   btn.title = "登录猫眼账号";
 }
 
@@ -4188,6 +4148,12 @@ async function init() {
     { passive: true },
   );
   renderLoadingSkeleton();
+  movieInteraction?.start?.();
+  try {
+    movieMediaCatalog = await loadMovieMedia();
+  } catch {
+    movieMediaCatalog = [];
+  }
   $("btn-login")?.addEventListener("click", handleLoginClick);
   window.overlay?.onLoginResult?.((result) => {
     if (!shouldApplyLoginResult(result)) return;

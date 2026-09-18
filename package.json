@@ -24,6 +24,7 @@
     "test:api-errors": "node deploy/test-api-errors.js",
     "test:repo-integrity": "node deploy/test-repo-integrity.js",
     "test:layout-top5": "node deploy/test-layout-top5.js",
+    "test:movie-interaction-ui": "node deploy/test-movie-interaction-ui.js",
     "test:bubble-cadence": "node deploy/test-bubble-cadence.js",
     "test:display-stability": "node deploy/test-display-stability.js",
     "test:font-session-replay": "node deploy/test-font-session-replay.js",
