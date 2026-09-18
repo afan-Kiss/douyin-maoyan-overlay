@@ -31,6 +31,8 @@ const HEALTH_FAIL_THRESHOLD = 2;
 let _spawnImpl = spawn;
 let _checkHealthImpl = null;
 let _portListeningImpl = null;
+let _findListeningPidsImpl = null;
+let _isOwnMaoyanPidImpl = null;
 let _testWaitForPidGoneFn = null;
 
 function sleep(ms) {
@@ -373,6 +375,7 @@ function isPortListening(port, host = "127.0.0.1") {
 }
 
 async function findListeningPids(port) {
+  if (_findListeningPidsImpl) return _findListeningPidsImpl(port);
   if (process.platform !== "win32") return [];
   return new Promise((resolve) => {
     const child = _spawnImpl("netstat", ["-ano"], {
@@ -397,11 +400,37 @@ async function findListeningPids(port) {
   });
 }
 
-async function killListenersOnPort(port, exceptPid = 0) {
+/**
+ * 仅允许结束明确属于当前猫眼 sidecar 的进程。
+ * 无法证明 ownership 时绝不 taskkill。
+ */
+function isOwnMaoyanPid(pid) {
+  if (!pid || pid <= 0) return false;
+  if (maoyanProcess?.pid && Number(maoyanProcess.pid) === Number(pid)) return true;
+  if (_isOwnMaoyanPidImpl) return Boolean(_isOwnMaoyanPidImpl(pid));
+  return false;
+}
+
+async function killOwnSidecarOnPort(port) {
   const pids = await findListeningPids(port);
   let killed = false;
+  let refused = null;
   for (const pid of pids) {
-    if (pid === exceptPid || pid === process.pid) continue;
+    if (pid === process.pid) continue;
+    if (!isOwnMaoyanPid(pid)) {
+      console.warn("MAOYAN_PORT_CONFLICT", {
+        port,
+        pid,
+        owned: false,
+        action: "refuse_kill",
+      });
+      refused = {
+        code: "PORT_OCCUPIED_BY_FOREIGN_PROCESS",
+        port,
+        pid,
+      };
+      continue;
+    }
     try {
       if (process.platform === "win32") {
         _spawnImpl("taskkill", ["/pid", String(pid), "/f", "/t"], {
@@ -412,20 +441,53 @@ async function killListenersOnPort(port, exceptPid = 0) {
         process.kill(pid, "SIGTERM");
       }
       killed = true;
+      console.log("MAOYAN_PORT_CONFLICT", {
+        port,
+        pid,
+        owned: true,
+        action: "kill_own_sidecar",
+      });
     } catch {
       /* ignore */
     }
   }
   if (killed) await sleep(600);
+  return { killed, refused };
 }
 
 async function recoverStalePort(apiBase) {
   const port = parsePortFromApiBase(apiBase);
-  if (!(await isPortListening(port))) return;
+  if (!(await isPortListening(port))) {
+    return { ok: true, action: "idle" };
+  }
   const expectedDataDir = getDataDir();
-  if (await checkHealth(apiBase, expectedDataDir)) return;
-  const exceptPid = maoyanProcess?.pid || 0;
-  await killListenersOnPort(port, exceptPid);
+  if (await checkHealth(apiBase, expectedDataDir)) {
+    return { ok: true, action: "health_ok" };
+  }
+
+  // 仅当当前有自己的 sidecar PID 时才允许回收；陌生进程绝不杀
+  if (!maoyanProcess?.pid) {
+    const pids = await findListeningPids(port);
+    const foreignPid = pids.find((p) => p && p !== process.pid) || 0;
+    console.warn("MAOYAN_PORT_CONFLICT", {
+      port,
+      pid: foreignPid,
+      owned: false,
+      action: "refuse_kill",
+    });
+    return {
+      ok: false,
+      code: "PORT_OCCUPIED_BY_FOREIGN_PROCESS",
+      port,
+      pid: foreignPid,
+    };
+  }
+
+  const result = await killOwnSidecarOnPort(port);
+  if (result.refused) {
+    return { ok: false, ...result.refused };
+  }
+  return { ok: true, action: "killed_own", killed: result.killed };
 }
 
 function healthResponseMatches(data, expectedDataDir) {
@@ -771,7 +833,19 @@ async function ensureMaoyanServiceInner(config) {
     return apiStatus;
   }
 
-  await recoverStalePort(apiBase);
+  const recover = await recoverStalePort(apiBase);
+  if (recover && recover.ok === false && recover.code === "PORT_OCCUPIED_BY_FOREIGN_PROCESS") {
+    apiStatus.error = `端口 ${recover.port || 8765} 已被其他进程占用 (pid=${recover.pid || "?"})，请关闭占用进程后重试`;
+    apiStatus.code = "PORT_OCCUPIED_BY_FOREIGN_PROCESS";
+    reportServiceIssue(apiStatus.error);
+    console.log("[MAOYAN_SERVICE]", {
+      stage: "ensure_fail",
+      reason: "PORT_OCCUPIED_BY_FOREIGN_PROCESS",
+      port: recover.port,
+      pid: recover.pid,
+    });
+    return apiStatus;
+  }
   if (await checkHealth(apiBase, ownDataDir)) {
     apiStatus.ready = true;
     Object.assign(apiStatus, getMaoyanSessionStatus());
@@ -937,6 +1011,8 @@ function _testResetMaoyanState() {
   _spawnImpl = spawn;
   _checkHealthImpl = null;
   _portListeningImpl = null;
+  _findListeningPidsImpl = null;
+  _isOwnMaoyanPidImpl = null;
   _healthCheckIntervalMs = HEALTH_CHECK_INTERVAL_MS;
   _testWaitForPidGoneFn = null;
 }
@@ -978,6 +1054,14 @@ function _testSetPortListening(fn) {
   _portListeningImpl = fn || null;
 }
 
+function _testSetFindListeningPids(fn) {
+  _findListeningPidsImpl = fn || null;
+}
+
+function _testSetIsOwnMaoyanPid(fn) {
+  _isOwnMaoyanPidImpl = fn || null;
+}
+
 function _testSetHealthCheckInterval(ms) {
   _healthCheckIntervalMs = Number(ms) || HEALTH_CHECK_INTERVAL_MS;
 }
@@ -994,6 +1078,7 @@ module.exports = {
   checkHealth,
   healthResponseMatches,
   recoverStalePort,
+  isOwnMaoyanPid,
   isMaoyanLoggedIn,
   getMaoyanSessionStatus,
   startMaoyanLogin,
@@ -1009,6 +1094,8 @@ module.exports = {
   _testSetSpawn,
   _testSetCheckHealth,
   _testSetPortListening,
+  _testSetFindListeningPids,
+  _testSetIsOwnMaoyanPid,
   _testSetHealthCheckInterval,
   _testSetWaitForPidGone,
   DATA_DIR: LEGACY_DATA_DIR,

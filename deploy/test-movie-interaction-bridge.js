@@ -290,7 +290,7 @@ async function main() {
     await page.waitForTimeout(200);
     assert.ok(state.postedCatalogs.length >= 1, "mock 应收到 /movies POST");
     assert.strictEqual(state.lastPostedMovies[0].movieId, "1001");
-    assert.deepStrictEqual(state.lastPostedMovies[0].aliases, []);
+    assert.ok(Array.isArray(state.lastPostedMovies[0].aliases), "aliases 字段必须存在");
     assert.strictEqual(state.lastPostedMovies[0].rank, 1);
     assert.ok(post1.signature, "应记录目录签名");
     assert.ok(post1.postedViaService.skipped, "相同目录二次 publish 应跳过");
@@ -447,6 +447,10 @@ async function main() {
       } catch {}
       const result = await window.__movieInteraction.service.fetchEvents("");
       window.__movieInteraction.applyRemoteEvents(result.events || []);
+      // 处理成功后再提交 cursor（fetchEvents 本身不永久 commit）
+      const candidate = result.candidateCursor ?? result.cursor;
+      window.__movieInteraction.service.commitEventCursor?.(candidate) ||
+        window.__movieInteraction.service.writeEventCursor(candidate);
       return {
         count: result.events.length,
         cursor: result.cursor,
@@ -488,8 +492,14 @@ async function main() {
         localStorage.removeItem("movie_interaction_cursor");
       } catch {}
       const first = await window.__movieInteraction.service.fetchEvents("");
+      const candidate1 = first.candidateCursor ?? first.cursor;
+      window.__movieInteraction.service.commitEventCursor?.(candidate1) ||
+        window.__movieInteraction.service.writeEventCursor(candidate1);
       const storedAfterFirst = window.__movieInteraction.service.readEventCursor();
       const second = await window.__movieInteraction.service.fetchEvents("2");
+      const candidate2 = second.candidateCursor ?? second.cursor;
+      window.__movieInteraction.service.commitEventCursor?.(candidate2) ||
+        window.__movieInteraction.service.writeEventCursor(candidate2);
       const resumedCursor = localStorage.getItem("movie_interaction_cursor");
       const resumed = await window.__movieInteraction.service.fetchEvents(resumedCursor);
       return {

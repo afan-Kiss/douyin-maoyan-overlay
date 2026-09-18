@@ -20,6 +20,8 @@ const TESTS = [
   { name: "layout-top5", script: "deploy/test-layout-top5.js", needsChrome: true },
   { name: "movie-interaction-ui", script: "deploy/test-movie-interaction-ui.js", needsChrome: true },
   { name: "movie-interaction-bridge", script: "deploy/test-movie-interaction-bridge.js", needsChrome: true },
+  { name: "movie-interaction-cursor-aliases", script: "deploy/test-movie-interaction-cursor-aliases.js", needsChrome: false },
+  { name: "maoyan-service-lifecycle", script: "deploy/test-maoyan-service-lifecycle.js", needsChrome: false },
   { name: "data-consistency", script: "deploy/test-data-consistency.js", needsChrome: false },
   { name: "extra-metrics", script: "deploy/test-extra-metrics.js", needsChrome: false },
   { name: "window-aspect", script: "deploy/test-window-aspect-ratio.js", needsChrome: false },

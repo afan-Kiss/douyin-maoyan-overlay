@@ -137,15 +137,64 @@ async function testMismatchedDataDirTriggersRecover() {
   let taskkillCalled = false;
   svc._testSetSpawn((cmd, args) => {
     if (cmd === "taskkill") taskkillCalled = true;
-    return makeFakeChild(5001);
+    return makeFakeChild(0);
   });
   svc._testSetPortListening(async () => true);
   svc._testSetCheckHealth(async () => false);
+  // 无自有 sidecar → 不得杀陌生进程
+  svc._testSetFindListeningPids(async () => [9999]);
   svc._testSetState({ maoyanProcess: null, startedByUs: false });
 
-  await svc.recoverStalePort("http://127.0.0.1:8765");
-  assert.strictEqual(taskkillCalled, true);
-  console.log("OK: mismatched health dataDir triggers port recovery");
+  const result = await svc.recoverStalePort("http://127.0.0.1:8765");
+  assert.strictEqual(taskkillCalled, false);
+  assert.strictEqual(result.ok, false);
+  assert.strictEqual(result.code, "PORT_OCCUPIED_BY_FOREIGN_PROCESS");
+  console.log("OK: foreign pid occupying 8765 is not killed");
+}
+
+async function testOwnSidecarCanBeRecycled() {
+  const svc = loadService();
+  svc._testResetMaoyanState();
+
+  const own = makeFakeChild(7001);
+  let taskkillArgs = null;
+  svc._testSetSpawn((cmd, args) => {
+    if (cmd === "taskkill") {
+      taskkillArgs = args;
+      return makeFakeChild(0);
+    }
+    return makeFakeChild(0);
+  });
+  svc._testSetPortListening(async () => true);
+  svc._testSetCheckHealth(async () => false);
+  svc._testSetFindListeningPids(async () => [7001]);
+  svc._testSetState({ maoyanProcess: own, startedByUs: true });
+
+  const result = await svc.recoverStalePort("http://127.0.0.1:8765");
+  assert.strictEqual(result.ok, true);
+  assert.ok(taskkillArgs, "own sidecar should be taskkilled");
+  assert.ok(taskkillArgs.includes("7001"));
+  console.log("OK: own sidecar pid can be recycled");
+}
+
+async function testForeignHealthMismatchStillRefuseKill() {
+  const svc = loadService();
+  svc._testResetMaoyanState();
+
+  let taskkillCalled = false;
+  svc._testSetSpawn((cmd) => {
+    if (cmd === "taskkill") taskkillCalled = true;
+    return makeFakeChild(0);
+  });
+  svc._testSetPortListening(async () => true);
+  svc._testSetCheckHealth(async () => false);
+  svc._testSetFindListeningPids(async () => [8888]);
+  svc._testSetState({ maoyanProcess: null, startedByUs: false });
+
+  const result = await svc.recoverStalePort("http://127.0.0.1:8765");
+  assert.strictEqual(taskkillCalled, false);
+  assert.strictEqual(result.code, "PORT_OCCUPIED_BY_FOREIGN_PROCESS");
+  console.log("OK: mismatched foreign health does not trigger taskkill");
 }
 
 async function main() {
@@ -155,6 +204,8 @@ async function main() {
   await testUnknownServiceNotKilled();
   testHealthDataDirBinding();
   await testMismatchedDataDirTriggersRecover();
+  await testOwnSidecarCanBeRecycled();
+  await testForeignHealthMismatchStillRefuseKill();
   console.log("\nALL PASSED (maoyan service lifecycle)");
 }
 

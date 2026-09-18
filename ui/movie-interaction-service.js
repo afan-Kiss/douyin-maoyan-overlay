@@ -7,6 +7,7 @@ export const DEFAULT_MOVIE_INTERACTION_BASE =
   "http://127.0.0.1:5088/diangexitong/api/movie-interaction";
 
 export const CURSOR_STORAGE_KEY = "movie_interaction_cursor";
+export const STREAM_EPOCH_STORAGE_KEY = "movie_interaction_stream_epoch";
 
 const LOG_TAG = "[MOVIE_UI_API]";
 const LOG_COOLDOWN_MS = 8000;
@@ -64,6 +65,29 @@ export function writeEventCursor(cursor, storage = globalThis.localStorage) {
   return value;
 }
 
+export function readStreamEpoch(storage = globalThis.localStorage) {
+  try {
+    return String(storage?.getItem?.(STREAM_EPOCH_STORAGE_KEY) || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+export function writeStreamEpoch(epoch, storage = globalThis.localStorage) {
+  const value = epoch == null ? "" : String(epoch).trim();
+  try {
+    if (!value) storage?.removeItem?.(STREAM_EPOCH_STORAGE_KEY);
+    else storage?.setItem?.(STREAM_EPOCH_STORAGE_KEY, value);
+  } catch {
+    /* ignore */
+  }
+  return value;
+}
+
+export function commitEventCursor(cursor, storage = globalThis.localStorage) {
+  return writeEventCursor(cursor, storage);
+}
+
 /** movieId + movieName + rank 签名，用于避免无脑 POST */
 export function buildCatalogSignature(movies) {
   const list = (movies || [])
@@ -77,14 +101,49 @@ export function buildCatalogSignature(movies) {
   return list.map((m) => `${m.movieId}|${m.movieName}|${m.rank}`).join(";");
 }
 
-export function toCatalogPayload(movies) {
+export function normalizeAliases(aliases, movieName = "") {
+  const title = String(movieName || "").trim();
+  const seen = new Set();
+  const out = [];
+  for (const raw of Array.isArray(aliases) ? aliases : []) {
+    const alias = String(raw || "").trim();
+    if (!alias) continue;
+    const key = alias.toLowerCase();
+    if (seen.has(key)) continue;
+    if (title && alias.toLowerCase() === title.toLowerCase()) continue;
+    seen.add(key);
+    out.push(alias);
+  }
+  return out;
+}
+
+/**
+ * 仅使用调用方明确给出的 aliases（或本地 media 目录匹配到的维护别名）。
+ * 不自动猜简称、不做模糊生成。
+ */
+export function toCatalogPayload(movies, mediaCatalog = null) {
+  const catalog = Array.isArray(mediaCatalog) ? mediaCatalog : null;
   return (movies || [])
-    .map((m, index) => ({
-      movieId: String(m.movieId ?? m.id ?? "").trim(),
-      movieName: String(m.movieName ?? m.name ?? "").trim(),
-      aliases: [],
-      rank: Number(m.rank) || index + 1,
-    }))
+    .map((m, index) => {
+      const movieId = String(m.movieId ?? m.id ?? "").trim();
+      const movieName = String(m.movieName ?? m.name ?? "").trim();
+      let aliases = Array.isArray(m.aliases) ? [...m.aliases] : [];
+      if ((!aliases.length || catalog) && catalog?.length && movieName) {
+        const media =
+          catalog.find(
+            (item) => String(item?.name || "").trim().toLowerCase() === movieName.toLowerCase(),
+          ) || null;
+        if (media?.aliases?.length) {
+          aliases = [...aliases, ...media.aliases];
+        }
+      }
+      return {
+        movieId,
+        movieName,
+        aliases: normalizeAliases(aliases, movieName),
+        rank: Number(m.rank) || index + 1,
+      };
+    })
     .filter((m) => m.movieId);
 }
 
@@ -183,11 +242,24 @@ export function normalizeEventsResponse(data, fallbackAfter = "") {
     cursor = fallbackAfter || "";
   }
 
+  const serverMaxSeq =
+    data?.serverMaxSeq != null && Number.isFinite(Number(data.serverMaxSeq))
+      ? Number(data.serverMaxSeq)
+      : null;
+  const reset = data?.reset === true;
+  const streamEpoch =
+    data?.streamEpoch != null && String(data.streamEpoch).trim()
+      ? String(data.streamEpoch).trim()
+      : "";
+
   return {
     ok: data?.ok !== false,
     after: data?.after ?? fallbackAfter ?? 0,
     cursor,
     events,
+    reset,
+    serverMaxSeq,
+    streamEpoch,
   };
 }
 
@@ -282,31 +354,81 @@ export function createMovieInteractionService(options = {}) {
   }
 
   async function fetchEvents(after) {
-    const stored = after == null ? readEventCursor() : String(after ?? "").trim();
+    let stored = after == null ? readEventCursor() : String(after ?? "").trim();
     const query = {};
     if (stored !== "") query.after = stored;
     const url = joinUrl(baseUrl, "events", query);
     try {
       const data = await requestJson(url, { timeoutMs });
-      const normalized = normalizeEventsResponse(data, stored);
-      online = true;
-      const nextCursor = normalized.cursor;
-      if (nextCursor !== "" && String(nextCursor) !== String(stored)) {
-        writeEventCursor(nextCursor);
+      let normalized = normalizeEventsResponse(data, stored);
+
+      // 服务端流重置：清本地 cursor，必要时再拉一次 from 0（防死循环只重试一次）
+      if (normalized.reset) {
+        console.warn("MOVIE_EVENT_CURSOR_RESET", {
+          after: stored,
+          serverMaxSeq: normalized.serverMaxSeq,
+          streamEpoch: normalized.streamEpoch,
+        });
+        writeEventCursor("");
+        if (normalized.streamEpoch) writeStreamEpoch(normalized.streamEpoch);
+        stored = "";
+        const retryUrl = joinUrl(baseUrl, "events", {});
+        const retryData = await requestJson(retryUrl, { timeoutMs });
+        normalized = normalizeEventsResponse(retryData, "0");
+        // 若仍 reset，返回空，不要循环
+        if (normalized.reset) {
+          online = true;
+          return {
+            ok: true,
+            online: true,
+            events: [],
+            cursor: "0",
+            candidateCursor: "0",
+            after: 0,
+            reset: true,
+            serverMaxSeq: normalized.serverMaxSeq,
+            streamEpoch: normalized.streamEpoch,
+          };
+        }
+      } else if (normalized.streamEpoch) {
+        const prevEpoch = readStreamEpoch();
+        if (prevEpoch && prevEpoch !== normalized.streamEpoch) {
+          console.warn("MOVIE_EVENT_CURSOR_RESET", {
+            reason: "stream_epoch_changed",
+            prevEpoch,
+            streamEpoch: normalized.streamEpoch,
+          });
+          writeEventCursor("");
+          writeStreamEpoch(normalized.streamEpoch);
+        } else if (!prevEpoch) {
+          writeStreamEpoch(normalized.streamEpoch);
+        }
       }
+
+      online = true;
+      const candidateCursor =
+        normalized.cursor == null || normalized.cursor === ""
+          ? stored
+          : String(normalized.cursor);
       logApi("info", "events-ok", {
         ok: true,
         endpoint: "events",
         count: normalized.events.length,
         after: stored || "0",
-        cursor: nextCursor,
+        candidateCursor,
+        reset: Boolean(normalized.reset),
       });
+      // 不在此处永久提交 cursor；由 poller 在 onEvents 成功后再 commit
       return {
         ok: true,
         online: true,
         events: normalized.events,
-        cursor: nextCursor,
+        cursor: candidateCursor,
+        candidateCursor,
         after: normalized.after,
+        reset: Boolean(normalized.reset),
+        serverMaxSeq: normalized.serverMaxSeq,
+        streamEpoch: normalized.streamEpoch,
       };
     } catch (error) {
       if (error?.parseFailed) {
@@ -320,7 +442,7 @@ export function createMovieInteractionService(options = {}) {
           error: String(error?.message || error),
         });
       }
-      return { ok: false, online: false, events: [], cursor: stored, error };
+      return { ok: false, online: false, events: [], cursor: stored, candidateCursor: stored, error };
     }
   }
 
@@ -328,8 +450,8 @@ export function createMovieInteractionService(options = {}) {
    * POST /movies — 同步猫眼真实 TOP10 目录。
    * 相同签名跳过；失败不影响票房。
    */
-  async function updateMovies(movies) {
-    const payloadMovies = toCatalogPayload(movies);
+  async function updateMovies(movies, mediaCatalog = null) {
+    const payloadMovies = toCatalogPayload(movies, mediaCatalog);
     if (!payloadMovies.length) {
       return { ok: false, skipped: true, reason: "empty" };
     }
@@ -373,8 +495,8 @@ export function createMovieInteractionService(options = {}) {
   }
 
   /** 别名：与 updateMovies 相同 */
-  async function publishCatalog(movies) {
-    return updateMovies(movies);
+  async function publishCatalog(movies, mediaCatalog = null) {
+    return updateMovies(movies, mediaCatalog);
   }
 
   function getLastCatalogSignature() {
@@ -394,6 +516,7 @@ export function createMovieInteractionService(options = {}) {
     publishCatalog,
     readEventCursor,
     writeEventCursor,
+    commitEventCursor,
     buildCatalogSignature,
     getLastCatalogSignature,
     resetCatalogSignature,
@@ -423,7 +546,7 @@ export function createMovieInteractionPoller(deps = {}) {
   }
 
   async function pollScores() {
-    if (stopped || scoresInFlight) return;
+    if (scoresInFlight) return;
     scoresInFlight = true;
     try {
       const result = await service.fetchScores();
@@ -435,12 +558,28 @@ export function createMovieInteractionPoller(deps = {}) {
   }
 
   async function pollEvents() {
-    if (stopped || eventsInFlight) return;
+    // 允许手动调用（测试/补拉）；stopped 只阻止 interval 调度
+    if (eventsInFlight) return;
     eventsInFlight = true;
     try {
       const result = await service.fetchEvents();
       setOnline(Boolean(result.online));
-      if (result.ok && result.events?.length) onEvents(result.events);
+      if (!result.ok) return;
+      const events = result.events || [];
+      const candidate =
+        result.candidateCursor != null ? result.candidateCursor : result.cursor;
+      if (events.length) {
+        await Promise.resolve(onEvents(events));
+      }
+      // 处理成功（含空事件）后再提交 cursor；onEvents 抛错则不推进
+      if (candidate != null && candidate !== "") {
+        const prev = service.readEventCursor();
+        if (String(candidate) !== String(prev)) {
+          (service.commitEventCursor || service.writeEventCursor)(candidate);
+        }
+      }
+    } catch (err) {
+      console.warn("[MOVIE_UI_API]", { ok: false, endpoint: "events", error: String(err?.message || err) });
     } finally {
       eventsInFlight = false;
     }
@@ -451,8 +590,12 @@ export function createMovieInteractionPoller(deps = {}) {
     stopped = false;
     void pollScores();
     void pollEvents();
-    scoresTimer = setInterval(() => void pollScores(), scoresIntervalMs);
-    eventsTimer = setInterval(() => void pollEvents(), eventsIntervalMs);
+    scoresTimer = setInterval(() => {
+      if (!stopped) void pollScores();
+    }, scoresIntervalMs);
+    eventsTimer = setInterval(() => {
+      if (!stopped) void pollEvents();
+    }, eventsIntervalMs);
   }
 
   function stop() {

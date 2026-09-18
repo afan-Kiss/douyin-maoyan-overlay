@@ -15,6 +15,7 @@ import {
   DEFAULT_MOVIE_INTERACTION_BASE,
   normalizeUserCount,
 } from "./movie-interaction-service.js";
+import { findMovieMedia, getMovieMediaCatalog } from "./data/movie-media.js";
 
 function $(id) {
   return document.getElementById(id);
@@ -312,7 +313,15 @@ export function createMovieInteractionUi(options = {}) {
       }
       // 真实 TOP10 变化时同步给 LiveAssistant（签名去重；失败不影响票房）
       if (catalog.length) {
-        void service.publishCatalog(catalog).catch(() => {});
+        const withAliases = catalog.map((m) => {
+          const media = findMovieMedia(m.name, getMovieMediaCatalog());
+          return {
+            ...m,
+            movieName: m.name,
+            aliases: Array.isArray(media?.aliases) ? media.aliases : [],
+          };
+        });
+        void service.publishCatalog(withAliases, getMovieMediaCatalog()).catch(() => {});
       }
     }
     for (const m of catalog) {
