@@ -100,6 +100,7 @@ function startMockAssistant(state) {
         const afterRaw = url.searchParams.get("after");
         const after = afterRaw == null || afterRaw === "" ? 0 : Number(afterRaw) || 0;
         state.lastAfter = after;
+        if (Array.isArray(state.eventRequests)) state.eventRequests.push(after);
         const events = state.events.filter((e) => Number(e.seq) > after);
         const cursor = events.length ? Number(events[events.length - 1].seq) : after;
         res.end(
@@ -207,6 +208,7 @@ async function main() {
     ],
     events: [],
     lastAfter: null,
+    eventRequests: [],
     postedCatalogs: [],
     lastPostedMovies: [],
   };
@@ -319,8 +321,11 @@ async function main() {
     assert.ok(scoresSnap.some((s) => /300/.test(s)), `scores=${scoresSnap}`);
 
     // 4/5) 真实嵌套 danmaku + movie_score
+    // 先停 poller：page.clock.runFor 会推进 setInterval，否则会污染 after/cursor 断言
     state.events = nestedEventsFixture();
     await page.clock.install();
+    await page.evaluate(() => window.__movieInteraction.poller.stop());
+
     const pull = await page.evaluate(async () => {
       try {
         localStorage.removeItem("movie_interaction_cursor");
@@ -360,22 +365,43 @@ async function main() {
     );
     assert.strictEqual(bubbleGone, false, "评分气泡 10 秒后消失");
 
-    // 6/7) cursor 数字 + 重启后 after 继续
-    assert.strictEqual(state.lastAfter, 0);
-    const secondPull = await page.evaluate(async () => {
-      const cursor = window.__movieInteraction.service.readEventCursor();
-      return window.__movieInteraction.service.fetchEvents(cursor);
+    // 6/7) cursor 数字 + 重启后 after 继续（poller 已停，手动拉事件，不依赖单值 lastAfter 时序）
+    state.eventRequests = [];
+    state.lastAfter = null;
+    const cursorPhase = await page.evaluate(async () => {
+      try {
+        localStorage.removeItem("movie_interaction_cursor");
+      } catch {}
+      const first = await window.__movieInteraction.service.fetchEvents("");
+      const storedAfterFirst = window.__movieInteraction.service.readEventCursor();
+      const second = await window.__movieInteraction.service.fetchEvents("2");
+      const resumedCursor = localStorage.getItem("movie_interaction_cursor");
+      const resumed = await window.__movieInteraction.service.fetchEvents(resumedCursor);
+      return {
+        first,
+        storedAfterFirst,
+        second,
+        resumedCursor,
+        resumed,
+      };
     });
-    assert.ok(secondPull.ok);
-    assert.strictEqual(secondPull.events.length, 0, "after=2 后不应重复旧事件");
-    assert.strictEqual(Number(state.lastAfter), 2, "mock 应收到数字 after=2");
 
-    // 模拟重启：仅读 localStorage cursor
-    const resumed = await page.evaluate(async () => {
-      const cursor = localStorage.getItem("movie_interaction_cursor");
-      return window.__movieInteraction.service.fetchEvents(cursor);
-    });
-    assert.strictEqual(Number(resumed.cursor) || Number(state.lastAfter), 2);
+    assert.ok(state.eventRequests.includes(0), `应出现 after=0: ${JSON.stringify(state.eventRequests)}`);
+    assert.ok(state.eventRequests.includes(2), `应出现 after=2: ${JSON.stringify(state.eventRequests)}`);
+    assert.deepStrictEqual(
+      state.eventRequests.slice(0, 3),
+      [0, 2, 2],
+      `cursor 专项请求序列应为 [0,2,2]，实际=${JSON.stringify(state.eventRequests)}`,
+    );
+    assert.strictEqual(Number(state.eventRequests[0]), 0, "第一次请求 after=0");
+    assert.strictEqual(Number(cursorPhase.first.cursor), 2, "第一次返回 cursor=2");
+    assert.strictEqual(String(cursorPhase.storedAfterFirst), "2", "localStorage 应写成 2");
+    assert.ok(cursorPhase.second.ok);
+    assert.strictEqual(cursorPhase.second.events.length, 0, "after=2 后不应重复旧事件");
+    assert.strictEqual(Number(state.eventRequests[1]), 2, "第二次请求 after=2");
+    assert.strictEqual(String(cursorPhase.resumedCursor), "2", "模拟重启仍读到 localStorage=2");
+    assert.strictEqual(Number(state.eventRequests[2]), 2, "重启后继续从 after=2");
+    assert.strictEqual(Number(cursorPhase.resumed.cursor) || Number(state.lastAfter), 2);
     assert.strictEqual(Number(state.lastAfter), 2);
 
     // 票房路径仍在
