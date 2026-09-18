@@ -43,6 +43,7 @@ ui/tmp-posters/
 ui/_captures/
 ui/final-large-font-*.png
 ui/poster-live-resolve.png
+ui/poster-provider-test.png
 
 # 媒体大文件（本地保留，不入库）
 ui/trailers/*.mp4

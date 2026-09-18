@@ -14,7 +14,7 @@ const {
 } = require("./ui-preview-harness");
 const { resolveMissingPosters, clearPosterFailureCooldown } = require("../lib/poster-resolver");
 
-const OUT = path.join(UI_DIR, "poster-provider-test.png");
+const OUT = path.join(UI_DIR, "_captures", "poster-provider-test.png");
 const CAPTURE_DIR = path.join(UI_DIR, "_captures", "provider-test");
 
 const TARGETS = [

@@ -150,7 +150,7 @@ async function renderAndInspect(page, movies) {
     const head = [...document.querySelectorAll(".ix-board__head .ix-col")].map((el) =>
       el.textContent.trim(),
     );
-    const expected = ["排名", "影片名称", "实时票房", "票房占比", "排片占比", "好看", "不好看", "直播间评分"];
+    const expected = ["排名", "影片名称", "实时票房", "票房%", "排片%", "好看", "不好看", "直播间评分"];
     if (head.join("|") !== expected.join("|")) {
       issues.push(`表头不匹配: ${head.join("|")}`);
     }
