@@ -7,7 +7,7 @@ const MAX_ITEMS = 28;
 const MIN_ITEMS = 20;
 const ROTATE_SEC = 30;
 const TRUNCATE_CHARS = 16;
-const SPHERE_RADIUS = 168;
+const SPHERE_RADIUS = 150;
 const TILT_X_DEG = 8;
 
 function escapeHtml(s) {
@@ -115,13 +115,14 @@ export function createMovieWordCloud(root) {
       const base = it.base || { x: 0, y: 0, z: 0 };
       const spun = rotateX(rotateY(base, rotationY), tiltX);
       const depth = (spun.z + SPHERE_RADIUS) / (SPHERE_RADIUS * 2);
-      const scale = 0.55 + depth * 0.75;
-      const opacity = 0.22 + depth * 0.78;
+      const scale = 0.62 + depth * 0.7;
+      const opacity = 0.42 + depth * 0.58;
       it.el.style.transform = `translate3d(${spun.x.toFixed(2)}px, ${spun.y.toFixed(2)}px, ${spun.z.toFixed(2)}px) scale(${scale.toFixed(3)})`;
       it.el.style.opacity = String(opacity.toFixed(3));
       it.el.style.zIndex = String(Math.round(40 + depth * 60));
-      it.el.style.fontSize = `${(13 + depth * 11).toFixed(1)}px`;
-      it.el.style.filter = depth > 0.45 ? "none" : "blur(0.35px)";
+      // 前景更大更清楚；后景可略小，但不用 blur（易糊成一团）
+      it.el.style.fontSize = `${(17 + depth * 13).toFixed(1)}px`;
+      it.el.style.filter = "none";
     }
   }
 

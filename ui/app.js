@@ -2053,10 +2053,10 @@ function fitCardChrome(card, movie, { fitMetrics = true, fitTable = true } = {})
   const rank = Number(movie?.rank ?? card.dataset.rank);
   // 片名单行省略，避免双行标题挤掉「后天」表格行
   fitNowrapEl(card.querySelector(".race-card__title"), {
-    minSize: rank === 1 ? 28 : 26,
+    minSize: rank === 1 ? 30 : 28,
     allowWrap: false,
   });
-  fitNowrapEl(card.querySelector(".js-mainland"), { minSize: 20 });
+  fitNowrapEl(card.querySelector(".js-mainland"), { minSize: 22 });
   if (fitMetrics) fitMetricEls(card);
   if (fitTable) fitTableInCard(card);
 }
@@ -2068,10 +2068,10 @@ function refitAllRaceCards() {
     if (movie) fitCardChrome(card, movie);
     else {
       fitNowrapEl(card.querySelector(".race-card__title"), {
-        minSize: Number(card.dataset.rank) === 1 ? 28 : 26,
+        minSize: Number(card.dataset.rank) === 1 ? 30 : 28,
         allowWrap: false,
       });
-      fitNowrapEl(card.querySelector(".js-mainland"), { minSize: 20 });
+      fitNowrapEl(card.querySelector(".js-mainland"), { minSize: 22 });
       fitMetricEls(card);
       fitTableInCard(card);
     }
