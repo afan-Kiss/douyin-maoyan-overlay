@@ -1,11 +1,14 @@
 /**
- * 3D 弹幕球：昵称:内容，缓慢匀速旋转，增量更新不整球重建。
+ * 3D 弹幕球：昵称:内容，Y 轴连续旋转；每帧按深度更新 scale/opacity/zIndex。
+ * 空球时轨道/辉光由 CSS 持续动画（不造假弹幕）。
  */
 
 const MAX_ITEMS = 28;
 const MIN_ITEMS = 20;
 const ROTATE_SEC = 30;
 const TRUNCATE_CHARS = 16;
+const SPHERE_RADIUS = 168;
+const TILT_X_DEG = 8;
 
 function escapeHtml(s) {
   return String(s)
@@ -27,7 +30,7 @@ function formatDanmakuLabel({ nickname, content }) {
   return truncateLabel(`${nick}:${body}`);
 }
 
-/** 斐波那契球面分布 */
+/** 斐波那契球面分布（本地坐标，未旋转） */
 function spherePoint(index, total, radius) {
   const n = Math.max(total, 1);
   const offset = 2 / n;
@@ -41,6 +44,26 @@ function spherePoint(index, total, radius) {
   };
 }
 
+function rotateY(point, angleRad) {
+  const cos = Math.cos(angleRad);
+  const sin = Math.sin(angleRad);
+  return {
+    x: point.x * cos + point.z * sin,
+    y: point.y,
+    z: -point.x * sin + point.z * cos,
+  };
+}
+
+function rotateX(point, angleRad) {
+  const cos = Math.cos(angleRad);
+  const sin = Math.sin(angleRad);
+  return {
+    x: point.x,
+    y: point.y * cos - point.z * sin,
+    z: point.y * sin + point.z * cos,
+  };
+}
+
 const COLORS = ["#ffe08a", "#7ef0ff", "#ff9ad5", "#9dffb0", "#a8c8ff", "#ffd0a8"];
 
 export function createMovieWordCloud(root) {
@@ -50,6 +73,7 @@ export function createMovieWordCloud(root) {
       clear() {},
       destroy() {},
       getCount: () => 0,
+      getItemPositions: () => [],
     };
   }
 
@@ -63,26 +87,58 @@ export function createMovieWordCloud(root) {
   `;
 
   const sphere = root.querySelector("#ix-cloud-sphere");
-  /** @type {Map<string, { el: HTMLElement, msgId: string, fading?: boolean }>} */
+  /** @type {Map<string, { el: HTMLElement, msgId: string, base: {x:number,y:number,z:number}, fading?: boolean }>} */
   const items = new Map();
   let seq = 0;
   let destroyed = false;
+  let rotationY = 0;
+  let lastTs = 0;
+  let rafId = 0;
+  const tiltX = (TILT_X_DEG * Math.PI) / 180;
+  const radPerMs = (Math.PI * 2) / (ROTATE_SEC * 1000);
 
-  function relayout() {
-    const list = [...items.values()].filter((it) => !it.fading);
+  function visibleItems() {
+    return [...items.values()].filter((it) => !it.fading);
+  }
+
+  function assignBasePositions() {
+    const list = visibleItems();
     const total = list.length;
-    const radius = 168;
     list.forEach((it, index) => {
-      const p = spherePoint(index, total, radius);
-      const depth = (p.z + radius) / (radius * 2);
+      it.base = spherePoint(index, total, SPHERE_RADIUS);
+    });
+  }
+
+  function paintFrame() {
+    const list = visibleItems();
+    for (const it of list) {
+      const base = it.base || { x: 0, y: 0, z: 0 };
+      const spun = rotateX(rotateY(base, rotationY), tiltX);
+      const depth = (spun.z + SPHERE_RADIUS) / (SPHERE_RADIUS * 2);
       const scale = 0.55 + depth * 0.75;
       const opacity = 0.22 + depth * 0.78;
-      it.el.style.transform = `translate3d(${p.x}px, ${p.y}px, ${p.z}px) scale(${scale})`;
-      it.el.style.opacity = String(opacity);
+      it.el.style.transform = `translate3d(${spun.x.toFixed(2)}px, ${spun.y.toFixed(2)}px, ${spun.z.toFixed(2)}px) scale(${scale.toFixed(3)})`;
+      it.el.style.opacity = String(opacity.toFixed(3));
       it.el.style.zIndex = String(Math.round(40 + depth * 60));
-      it.el.style.fontSize = `${13 + depth * 11}px`;
+      it.el.style.fontSize = `${(13 + depth * 11).toFixed(1)}px`;
       it.el.style.filter = depth > 0.45 ? "none" : "blur(0.35px)";
-    });
+    }
+  }
+
+  function tick(ts) {
+    if (destroyed) return;
+    if (!lastTs) lastTs = ts;
+    const dt = Math.min(64, ts - lastTs);
+    lastTs = ts;
+    rotationY = (rotationY + dt * radPerMs) % (Math.PI * 2);
+    if (items.size) paintFrame();
+    rafId = window.requestAnimationFrame(tick);
+  }
+
+  function ensureSpinning() {
+    if (destroyed || rafId) return;
+    lastTs = 0;
+    rafId = window.requestAnimationFrame(tick);
   }
 
   function removeOldest() {
@@ -95,7 +151,8 @@ export function createMovieWordCloud(root) {
     window.setTimeout(() => {
       it.el.remove();
       items.delete(first);
-      relayout();
+      assignBasePositions();
+      paintFrame();
     }, 480);
   }
 
@@ -112,8 +169,10 @@ export function createMovieWordCloud(root) {
     el.textContent = formatDanmakuLabel(payload);
     el.style.color = COLORS[seq % COLORS.length];
     sphere.appendChild(el);
-    items.set(msgId, { el, msgId });
-    relayout();
+    items.set(msgId, { el, msgId, base: { x: 0, y: 0, z: 0 } });
+    assignBasePositions();
+    paintFrame();
+    ensureSpinning();
     window.requestAnimationFrame(() => el.classList.remove("is-fade-in"));
     return true;
   }
@@ -125,19 +184,42 @@ export function createMovieWordCloud(root) {
 
   function destroy() {
     destroyed = true;
+    if (rafId) {
+      window.cancelAnimationFrame(rafId);
+      rafId = 0;
+    }
     clear();
   }
 
-  // 正常模式不预置假弹幕；空球仅保留轨道光效
+  function getItemPositions() {
+    return visibleItems().map((it) => {
+      const spun = rotateX(rotateY(it.base || { x: 0, y: 0, z: 0 }, rotationY), tiltX);
+      return {
+        msgId: it.msgId,
+        x: spun.x,
+        y: spun.y,
+        z: spun.z,
+        text: it.el.textContent || "",
+      };
+    });
+  }
+
+  // 空球也持续跑 rAF（几乎空转），保证后续弹幕立刻进入旋转相位；轨道靠 CSS
+  ensureSpinning();
+
   return {
     addDanmaku,
     clear,
     destroy,
     getCount: () => items.size,
+    getItemPositions,
+    getRotationY: () => rotationY,
     formatDanmakuLabel,
     truncateLabel,
   };
 }
 
 export const WORD_CLOUD_ROTATE_SEC = ROTATE_SEC;
-export { formatDanmakuLabel, truncateLabel };
+export const WORD_CLOUD_MIN_ITEMS = MIN_ITEMS;
+export const WORD_CLOUD_MAX_ITEMS = MAX_ITEMS;
+export { formatDanmakuLabel, truncateLabel, escapeHtml };

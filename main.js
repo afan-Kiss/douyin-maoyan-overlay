@@ -514,8 +514,21 @@ if (!ensureSingleInstance({ onSecondInstance: focusMainWindow })) {
     registerIpcHandlers();
 
     const config = loadConfig();
-    void startMaoyanService();
-    createWindow({ onReadyToShow: () => startBackgroundServices(config) });
+    const startupT0 = Date.now();
+    const logStartup = (stage) => {
+      console.log("[STARTUP_TIMING]", `${stage} +${Date.now() - startupT0}ms`);
+    };
+    logStartup("service_start");
+    void startMaoyanService().then((status) => {
+      logStartup(status?.ready ? "service_ready" : "service_not_ready");
+    });
+    createWindow({
+      onReadyToShow: () => {
+        logStartup("main_window_visible");
+        startBackgroundServices(config);
+      },
+    });
+    logStartup("main_window_create");
 
     // A: 更新检查放到后台，不阻塞主窗口首屏
     setImmediate(() => {

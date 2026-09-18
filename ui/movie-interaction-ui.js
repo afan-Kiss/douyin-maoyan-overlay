@@ -356,7 +356,8 @@ export function createMovieInteractionUi(options = {}) {
     document.body.classList.add("is-interaction-demo");
     setViewerCount(123000);
     seedDemoScores();
-    for (let i = 0; i < 8; i += 1) {
+    // 视觉自检：预置 24 条模拟弹幕，便于观察球面旋转（仅 interactionDemo）
+    for (let i = 0; i < 24; i += 1) {
       const dm = DEMO_DANMAKU[i % DEMO_DANMAKU.length];
       addDanmaku({
         msgId: `demo-boot-${i}`,

@@ -109,6 +109,20 @@ let lastPipelineReason = "";
 let lastApiReady = false;
 let lastApiError = "";
 let earlyPaintDone = false;
+let fastRetryTimer = null;
+let startupTimingOrigin = 0;
+let startupTimingLogged = Object.create(null);
+
+function logStartupTiming(stage, extra = {}) {
+  if (!startupTimingOrigin) startupTimingOrigin = performance.now();
+  const ms = Math.round(performance.now() - startupTimingOrigin);
+  if (!startupTimingLogged[stage]) {
+    startupTimingLogged[stage] = ms;
+    console.log("[STARTUP_TIMING]", `${stage} +${ms}ms`, extra);
+  } else {
+    console.log("[STARTUP_TIMING]", `${stage} +${ms}ms`, extra);
+  }
+}
 
 function logMaoyanDiag(tag, payload = {}) {
   try {
@@ -3491,10 +3505,21 @@ function paintFromStoreSnapshot(projected, meta = {}) {
   setStatus("ok", "");
   if (!firstDashboardPainted) firstDashboardPainted = true;
   markStartup("firstRealFields");
+  logStartupTiming("first_render", {
+    movies: movies.length,
+    withBox: movies.filter((m) => Number(m.displayBoxWan || m.todayBox) > 0).length,
+  });
   if (movies.some((m) => Number(m.displayBoxWan || m.todayBox) > 0)) {
     markStartup("firstBoxDisplay");
+    logStartupTiming("first_box_display");
   }
   markStartup("mappingComplete");
+  // 首屏成功后切回正常 5s 轮询
+  if (fastRetryTimer) {
+    clearInterval(fastRetryTimer);
+    fastRetryTimer = null;
+    restartPolling();
+  }
   enrichAllowed = true;
   if (!meta.skipEnrichSchedule) {
     scheduleBackgroundEnrich(meta.pollId || pollGeneration, latestParsedMeta, latestSpeedMap);
@@ -3771,11 +3796,22 @@ async function refreshData() {
         topCount: getDisplayMovieCount(),
         pollCount,
       });
+      if (pollCount === 1) logStartupTiming("dashboard_request");
       const result = await boxPipeline.runOnce({
         apiBase: config.apiBase,
         topCount: getDisplayMovieCount(),
       });
       if (result?.skipped) return;
+      if (pollCount === 1) {
+        logStartupTiming("dashboard_response", {
+          ok: Boolean(result?.ok),
+          reason: result?.reason || "",
+        });
+        if (result?.moviesTotal != null) {
+          logStartupTiming("movies_parsed", { count: result.moviesTotal });
+        }
+        if (result?.ok) logStartupTiming("decode_done", { moviesDecoded: result.moviesDecoded });
+      }
       if (result?.reason) lastPipelineReason = String(result.reason);
       logMaoyanDiag("MAOYAN_DASHBOARD", {
         stage: "fetch_done",
@@ -3920,13 +3956,26 @@ async function refreshData() {
   }
 }
 
+function clearPollTimers() {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  if (fastRetryTimer) {
+    clearInterval(fastRetryTimer);
+    fastRetryTimer = null;
+  }
+}
+
 function restartPolling() {
   if (BOX_PIPELINE_V2) {
     // V2 生产主链固定 5000ms，忽略旧设置 4000/8000/10000
     config.pollIntervalMs = BOX_POLL_MS;
     boxPipeline.setPollIntervalMs(BOX_POLL_MS);
     boxPipeline.stop();
-    if (pollTimer) clearInterval(pollTimer);
+    clearPollTimers();
+    // 重启时立即拉一次，避免白等一个周期
+    void refreshData();
     pollTimer = setInterval(() => {
       void refreshData();
     }, BOX_POLL_MS);
@@ -3941,7 +3990,7 @@ function startPolling() {
     config.pollIntervalMs = BOX_POLL_MS;
     boxPipeline.setPollIntervalMs(BOX_POLL_MS);
     boxPipeline.stop();
-    if (pollTimer) clearInterval(pollTimer);
+    clearPollTimers();
     void refreshData();
     pollTimer = setInterval(() => {
       void refreshData();
@@ -3966,6 +4015,28 @@ async function syncOverlaySettings() {
   if (hasDisplayedData && pollTimer) restartPolling();
 }
 
+/** 首屏阶段：立即拉主榜 + 约 1s 快速重试，成功后切回 5s */
+function startBootstrapPolling() {
+  if (BOX_PIPELINE_V2) {
+    config.pollIntervalMs = BOX_POLL_MS;
+    boxPipeline.setPollIntervalMs(BOX_POLL_MS);
+    boxPipeline.stop();
+  }
+  clearPollTimers();
+  logStartupTiming("bootstrap_poll_start");
+  void refreshData();
+  fastRetryTimer = setInterval(() => {
+    if (hasDisplayedData) {
+      clearInterval(fastRetryTimer);
+      fastRetryTimer = null;
+      // 已有数据：转入正常 5s（restartPolling 会再立即 refresh 一次）
+      if (!pollTimer) restartPolling();
+      return;
+    }
+    void refreshData();
+  }, 1000);
+}
+
 function startServiceRetryLoop() {
   if (retryTimer) clearInterval(retryTimer);
   retryTimer = setInterval(async () => {
@@ -3976,54 +4047,86 @@ function startServiceRetryLoop() {
       retryTimer = null;
       if (retry.apiBase) config.apiBase = retry.apiBase;
       setStatus("loading", "服务已就绪，正在拉取票房数据…");
-      startPolling();
+      startBootstrapPolling();
     }
   }, 5000);
 }
 
+/**
+ * 尽快拿到可用 apiBase；不因登录/明细阻塞。
+ * 服务未 ready 时也返回 apiBase，由 bootstrap 快速重试主榜。
+ */
 async function waitForApiReady() {
   if (!window.overlay) {
     return { ready: false, error: "界面桥接未就绪，请重启软件" };
   }
 
   setStatus("loading", "正在自动启动票房数据服务…");
+  logStartupTiming("wait_api_begin");
 
-  // 先订阅，避免 ensureApi 完成时事件已发出却漏接
   let latestFromEvent = null;
   const off = window.overlay.onApiReady?.((next) => {
     latestFromEvent = next;
+    if (next?.ready) logStartupTiming("api_ready_event");
   });
 
   try {
     let status = await window.overlay.getApiStatus();
-    if (status?.ready) return status;
-
-    const ensurePromise = window.overlay.ensureApi();
-    const timeoutPromise = new Promise((resolve) => {
-      setTimeout(() => resolve({ __timeout: true }), 45_000);
-    });
-    status = await Promise.race([ensurePromise, timeoutPromise]);
-
-    if (status?.__timeout) {
-      if (latestFromEvent) return latestFromEvent;
-      const current = await window.overlay.getApiStatus().catch(() => null);
-      if (current?.ready) return current;
-      return {
-        ready: false,
-        error:
-          current?.error ||
-          "票房服务启动超时（45 秒），请重启软件；换电脑后需安装 Google Chrome",
-      };
+    if (status?.apiBase) config.apiBase = status.apiBase;
+    if (status?.ready) {
+      logStartupTiming("api_reachable");
+      return status;
     }
 
-    if (status?.ready) return status;
-    if (latestFromEvent?.ready) return latestFromEvent;
+    // 后台 ensure；UI 侧短轮询，尽快放行主榜
+    const ensurePromise = window.overlay.ensureApi().catch((error) => ({
+      ready: false,
+      error: error?.message || "ensureApi failed",
+      apiBase: config.apiBase,
+    }));
+
+    const deadline = Date.now() + 45_000;
+    while (Date.now() < deadline) {
+      if (latestFromEvent?.ready) {
+        logStartupTiming("api_reachable");
+        return latestFromEvent;
+      }
+      status = await window.overlay.getApiStatus().catch(() => null);
+      if (status?.apiBase) config.apiBase = status.apiBase;
+      if (status?.ready) {
+        logStartupTiming("api_reachable");
+        return status;
+      }
+      // 已有 apiBase：不必等完整 ready，先去打主榜（失败则 bootstrap 1s 重试）
+      if (status?.apiBase || config.apiBase) {
+        logStartupTiming("api_base_available", { ready: false });
+        // 继续后台 ensure，但不阻塞首屏尝试
+        void ensurePromise;
+        return {
+          ready: false,
+          apiBase: status?.apiBase || config.apiBase,
+          error: status?.error || "",
+          provisional: true,
+        };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+
+    const ensured = await Promise.race([
+      ensurePromise,
+      Promise.resolve(latestFromEvent || status || { ready: false }),
+    ]);
+    if (ensured?.ready || latestFromEvent?.ready) {
+      logStartupTiming("api_reachable");
+      return ensured?.ready ? ensured : latestFromEvent;
+    }
     return {
       ready: false,
       error:
+        ensured?.error ||
         status?.error ||
-        latestFromEvent?.error ||
-        "票房服务启动失败，请重启软件",
+        "票房服务启动超时（45 秒），请重启软件；换电脑后需安装 Google Chrome",
+      apiBase: config.apiBase,
     };
   } finally {
     off?.();
@@ -4201,6 +4304,9 @@ async function handleLoginClick() {
 }
 
 async function init() {
+  startupTimingOrigin = performance.now();
+  startupTimingLogged = Object.create(null);
+  logStartupTiming("ui_init");
   const prevReport = getPreviousStartupReport();
   beginStartupSession(prevReport?.completed ? "warm" : "cold");
   bindDesignViewport();
@@ -4213,11 +4319,16 @@ async function init() {
   );
   renderLoadingSkeleton();
   movieInteraction?.start?.();
-  try {
-    movieMediaCatalog = await loadMovieMedia();
-  } catch {
-    movieMediaCatalog = [];
-  }
+
+  // 媒体目录与主榜并行，不阻塞首屏
+  const mediaPromise = loadMovieMedia()
+    .then((list) => {
+      movieMediaCatalog = list;
+    })
+    .catch(() => {
+      movieMediaCatalog = [];
+    });
+
   $("btn-login")?.addEventListener("click", handleLoginClick);
   window.overlay?.onLoginResult?.((result) => {
     if (!shouldApplyLoginResult(result)) return;
@@ -4237,6 +4348,13 @@ async function init() {
     topCount: RACE_TOP_COUNT,
   };
   config.topCount = RACE_TOP_COUNT;
+  logStartupTiming("config_loaded", { apiBase: config.apiBase });
+
+  // 尽早踢 ensure，与 settings/登录按钮并行
+  void window.overlay?.ensureApi?.().then((status) => {
+    if (status?.apiBase) config.apiBase = status.apiBase;
+    if (status?.ready) logStartupTiming("service_ready_bg");
+  });
 
   await syncOverlaySettings();
   window.getBubbleSkipLog = getBubbleSkipLog;
@@ -4254,9 +4372,10 @@ async function init() {
     }
   });
 
-  await updateLoginButton();
+  void updateLoginButton();
 
   if (new URLSearchParams(location.search).has("preview")) {
+    await mediaPromise;
     window.__racePreview = {
       renderList,
       refitAllRaceCards,
@@ -4313,12 +4432,10 @@ async function init() {
         const result = boxStore.commit(candidate);
         if (result.ok) {
           const projected = projectSnapshotForRender(result.snapshot || boxStore.getSnapshot());
-          // rises 由 boxStore.onRise → pending queue → paint 内 flush；此处不再二次播放
           paintFromStoreSnapshot(projected, {
             skipEnrichSchedule: true,
             pollId: meta.pollId || Date.now(),
             ...meta,
-            // 保留诊断数据，禁止覆盖为播放源
             risesDiagnostic: result.rises || [],
           });
         }
@@ -4334,27 +4451,31 @@ async function init() {
   markStartup("serviceReady");
   lastApiReady = Boolean(apiStatus?.ready);
   lastApiError = String(apiStatus?.error || "");
+  if (apiStatus?.apiBase) config.apiBase = apiStatus.apiBase;
   logMaoyanDiag("MAOYAN_STARTUP", {
     ready: lastApiReady,
     apiBase: apiStatus?.apiBase || config.apiBase,
     error: lastApiError,
+    provisional: Boolean(apiStatus?.provisional),
     detailApiReady: Boolean(apiStatus?.detailApiReady),
     loginRequired: Boolean(apiStatus?.loginRequired),
     signatureReady: Boolean(apiStatus?.signatureReady),
   });
-  if (!apiStatus?.ready) {
+
+  // 无 apiBase 且未 ready：进入慢重试；否则立即 bootstrap 主榜（不因登录/明细阻塞）
+  if (!apiStatus?.ready && !apiStatus?.apiBase && !config.apiBase) {
     setStatus("error", apiStatus?.error || "票房服务启动失败，5 秒后自动重试…");
     await updateLoginButton(isLoginRequiredStatus(apiStatus));
     startServiceRetryLoop();
+    void mediaPromise;
     return;
   }
 
-  if (apiStatus.apiBase) config.apiBase = apiStatus.apiBase;
   setStatus("loading", "服务已就绪，正在拉取票房数据…");
-  // 主榜不依赖登录/明细：服务就绪后立即拉 dashboard
-  await updateLoginButton();
+  void updateLoginButton();
   bubbleAutoScheduler.start();
-  startPolling();
+  startBootstrapPolling();
+  void mediaPromise;
   setTimeout(() => flushStartupReport(), 90_000);
 }
 
