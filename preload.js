@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("overlay", {
   getConfig: () => ipcRenderer.invoke("get-config"),
+  getPosterCacheDir: () => ipcRenderer.invoke("get-poster-cache-dir"),
   resolvePosters: (movies) => ipcRenderer.invoke("resolve-posters", movies),
   getOverlaySettings: () => ipcRenderer.invoke("get-overlay-settings"),
   onSettingsChanged: (callback) => {

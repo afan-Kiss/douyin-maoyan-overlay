@@ -120,20 +120,6 @@ async function main() {
     const movies = mockMovies(10);
     await paintMovies(page, movies);
 
-    await page.evaluate(() => {
-      const cards = [...document.querySelectorAll(".race-card")];
-      for (const card of cards) {
-        const name = card.querySelector(".race-card__title")?.textContent || "";
-        const img = card.querySelector(".race-row__poster");
-        if (!img) continue;
-        if (/功夫女足|欢迎来龙餐馆|八仙/.test(name)) continue;
-        if (/哪吒/.test(name)) {
-          img.setAttribute("src", "posters/welcome.jpg");
-          img.classList.remove("race-row__poster--fallback");
-        }
-      }
-    });
-
     const report = await inspectLayout(page);
     assert.strictEqual(report.issues.length, 0, report.issues.join("; "));
     assert.ok(report.avgRowHeight >= 118 && report.avgRowHeight <= 140, `rowH=${report.avgRowHeight}`);

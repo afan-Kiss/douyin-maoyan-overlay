@@ -1,6 +1,8 @@
 const { app, BrowserWindow, ipcMain, screen, Menu } = require("electron");
 
 app.commandLine.appendSwitch("high-dpi-support", "1");
+// loadFile 页面需允许加载 userData 下的 file:// 海报缓存
+app.commandLine.appendSwitch("allow-file-access-from-files");
 const fs = require("fs");
 const path = require("path");
 const { ensureSingleInstance } = require("./lib/single-instance");
@@ -429,6 +431,10 @@ function scheduleAutoStartRegistration() {
   });
 }
 
+function getPosterCacheDir() {
+  return path.join(app.getPath("userData"), "poster-cache");
+}
+
 function registerIpcHandlers() {
   if (ipcMain.listenerCount("window-minimize") > 0) return;
   const { loadSettings, saveSettings } = getMods().settings;
@@ -440,9 +446,12 @@ function registerIpcHandlers() {
   } = getMods().maoyan;
 
   ipcMain.handle("get-config", () => loadConfig());
+  ipcMain.handle("get-poster-cache-dir", () => getPosterCacheDir());
   ipcMain.handle("resolve-posters", (_event, movies) => {
     const { resolveMissingPosters } = require("./lib/poster-resolver");
-    return resolveMissingPosters(Array.isArray(movies) ? movies : []);
+    return resolveMissingPosters(Array.isArray(movies) ? movies : [], {
+      cacheDir: getPosterCacheDir(),
+    });
   });
   ipcMain.handle("get-overlay-settings", () => loadSettings());
   ipcMain.handle("save-overlay-settings", (_event, patch) => {

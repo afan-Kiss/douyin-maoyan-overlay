@@ -2585,6 +2585,7 @@ const posterUiCache = new Map();
 function isRealPoster(src) {
   const text = String(src || "").trim();
   if (!text) return false;
+  if (/^file:/i.test(text)) return true;
   return !text.includes("default-movie-poster");
 }
 
@@ -2622,12 +2623,14 @@ function schedulePosterResolve(list) {
     .then((rows) => {
       if (job !== posterResolveJob) return;
       for (const row of rows || []) {
-        if (!row || row.status !== "ok" || !row.uiPath) continue;
+        if (!row || row.status !== "ok") continue;
         const id = String(row.movieId || "");
-        if (!id) continue;
-        posterUiCache.set(id, row.uiPath);
+        const src = row.fileUrl || row.uiPath;
+        if (!id || !src) continue;
+        if (!/^file:/i.test(src) && !isRealPoster(src)) continue;
+        posterUiCache.set(id, src);
         const img = cardPool.get(id)?.querySelector(".race-row__poster");
-        if (img) applyPosterSrc(img, row.uiPath);
+        if (img) applyPosterSrc(img, src);
       }
     })
     .catch(() => {});
